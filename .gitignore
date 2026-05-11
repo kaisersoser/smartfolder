@@ -1,0 +1,12 @@
+/target/
+
+# Local/editor state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# smartfolder runtime artifacts
+*.plan.json
+*.journal.json
+.smartfolder/

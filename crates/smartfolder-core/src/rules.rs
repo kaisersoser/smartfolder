@@ -313,6 +313,14 @@ mod tests {
     use crate::model::{BuiltInMode, FileEntryKind, FileInventoryRecord, FileTypeBucket};
     use crate::rules::{builtin_rule_match, RuleProfile};
 
+    fn path(parts: &[&str]) -> PathBuf {
+        let mut path = PathBuf::new();
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
     #[test]
     fn builtin_type_year_rule_places_file_in_type_year_month_day() {
         let record = record("report.pdf", FileTypeBucket::Document);
@@ -320,7 +328,7 @@ mod tests {
 
         assert_eq!(
             matched.destination,
-            PathBuf::from("Documents\\2026\\May\\11\\report.pdf")
+            path(&["Documents", "2026", "May", "11", "report.pdf"])
         );
     }
 
@@ -331,7 +339,7 @@ mod tests {
 
         assert_eq!(
             matched.destination,
-            PathBuf::from("2026\\May\\11\\report.pdf")
+            path(&["2026", "May", "11", "report.pdf"])
         );
     }
 
@@ -362,7 +370,14 @@ extensions = ["pdf"]
 
         assert_eq!(
             matched.destination,
-            PathBuf::from("Documents\\Invoices\\2026\\May\\11\\invoice-acme.pdf")
+            path(&[
+                "Documents",
+                "Invoices",
+                "2026",
+                "May",
+                "11",
+                "invoice-acme.pdf"
+            ])
         );
         assert_eq!(matched.reason, "Rule: Invoices");
     }

@@ -100,23 +100,52 @@ mod tests {
 
     use crate::paths::{normalize_relative, safe_destination_path};
 
+    fn path(parts: &[&str]) -> PathBuf {
+        let mut path = PathBuf::new();
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
+    fn test_root() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\root")
+        }
+
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/root")
+        }
+    }
+
+    fn outside_root() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"C:\other\x.txt")
+        }
+
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/other/x.txt")
+        }
+    }
+
     #[test]
     fn relative_destination_inside_root_is_allowed() {
-        let destination = safe_destination_path(
-            PathBuf::from("C:\\root"),
-            PathBuf::from("Documents\\report.pdf"),
-        )
-        .expect("relative destination should be accepted");
+        let destination = safe_destination_path(test_root(), path(&["Documents", "report.pdf"]))
+            .expect("relative destination should be accepted");
 
         assert_eq!(
             destination,
-            PathBuf::from("C:\\root\\Documents\\report.pdf")
+            test_root().join(path(&["Documents", "report.pdf"]))
         );
     }
 
     #[test]
     fn parent_components_are_rejected() {
-        let err = normalize_relative(PathBuf::from("..\\outside.txt"))
+        let err = normalize_relative(path(&["..", "outside.txt"]))
             .expect_err("parent traversal should be rejected");
 
         assert!(err.to_string().contains("inside the selected root"));
@@ -124,9 +153,8 @@ mod tests {
 
     #[test]
     fn absolute_destination_outside_root_is_rejected() {
-        let err =
-            safe_destination_path(PathBuf::from("C:\\root"), PathBuf::from("C:\\other\\x.txt"))
-                .expect_err("outside-root destination should be rejected");
+        let err = safe_destination_path(test_root(), outside_root())
+            .expect_err("outside-root destination should be rejected");
 
         assert!(err.to_string().contains("inside the selected root"));
     }

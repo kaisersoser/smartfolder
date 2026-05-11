@@ -268,6 +268,14 @@ mod tests {
     use crate::rules::RuleProfile;
     use crate::scanner::{scan_folder, ScanOptions};
 
+    fn path(parts: &[&str]) -> PathBuf {
+        let mut path = PathBuf::new();
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
     #[test]
     fn generated_builtin_plan_keeps_destinations_inside_root() {
         let fixture = fixture_dir();
@@ -285,7 +293,7 @@ mod tests {
         assert!(plan.operations[0].destination.starts_with(fixture.path()));
         assert_eq!(
             plan.operations[0].destination,
-            fixture.path().join(PathBuf::from("Documents\\report.pdf"))
+            fixture.path().join(path(&["Documents", "report.pdf"]))
         );
     }
 

@@ -44,6 +44,8 @@ const HIDDEN_ATTRIBUTE: u32 = 0x2;
 #[cfg(windows)]
 const SYSTEM_ATTRIBUTE: u32 = 0x4;
 
+const STREAMING_SCAN_PROGRESS_INTERVAL: usize = 128;
+
 /// Configuration options for directory scanning.
 ///
 /// - `include_hidden`: Include dotfiles (`.gitignore`, etc.)
@@ -107,6 +109,41 @@ pub struct ScanSummary {
     pub warnings: usize,
 }
 
+/// Bounded-memory result from streaming a scan into a sink.
+///
+/// Contains only aggregate metadata and cancellation state. Individual file rows
+/// are delivered to the provided [`ScanRecordSink`] instead of retained in memory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamingScanResult {
+    pub root: PathBuf,
+    pub summary: ScanSummary,
+    pub cancelled: bool,
+}
+
+/// Live progress snapshot emitted by streaming scans.
+///
+/// Directory scans cannot know the final total before traversal completes, so
+/// progress is expressed as counters plus the most recent path being inspected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamingScanProgress {
+    pub root: PathBuf,
+    pub current_path: Option<PathBuf>,
+    pub summary: ScanSummary,
+    pub cancelled: bool,
+}
+
+/// Destination for streamed scan rows.
+///
+/// Implementations can persist records to SQLite, write JSON lines, or collect
+/// rows in memory for tests. The scanner calls these methods as each row is found.
+pub trait ScanRecordSink {
+    /// Accept one file inventory record.
+    fn push_record(&mut self, record: FileInventoryRecord) -> Result<()>;
+
+    /// Accept one scan warning.
+    fn push_warning(&mut self, warning: ScanWarning) -> Result<()>;
+}
+
 /// Scan a directory tree with default cancellation token (non-cancellable).
 ///
 /// # Errors
@@ -160,6 +197,74 @@ pub fn scan_folder_with_cancellation(
     scanner.scan_dir(root, 0)?;
     scanner.result.summary.records_collected = scanner.result.records.len();
     scanner.result.summary.warnings = scanner.result.warnings.len();
+    Ok(scanner.result)
+}
+
+/// Stream a directory scan into a sink with optional cancellation support.
+///
+/// This API is intended for GUI and large-folder workflows. It avoids retaining
+/// every [`FileInventoryRecord`] in memory while still returning summary counters.
+///
+/// # Logical Flow
+///
+/// 1. Validate that root is a directory
+/// 2. Traverse the folder tree with the same filtering rules as [`scan_folder`]
+/// 3. Send each record and warning to the sink immediately
+/// 4. Track summary counters locally
+/// 5. Return aggregate summary and cancellation state
+///
+/// # Errors
+///
+/// Returns error if the root path is invalid, not a directory, or the sink fails.
+pub fn scan_folder_to_sink(
+    root: impl AsRef<Path>,
+    options: &ScanOptions,
+    cancellation: &CancellationToken,
+    sink: &mut impl ScanRecordSink,
+) -> Result<StreamingScanResult> {
+    let mut ignore_progress = |_| {};
+    scan_folder_to_sink_with_progress(root, options, cancellation, sink, &mut ignore_progress)
+}
+
+/// Stream a directory scan into a sink and report live progress snapshots.
+///
+/// Progress callbacks are emitted when entering folders, when warnings occur,
+/// periodically while scanning entries, and once at completion. The callback is
+/// intended for UI updates and should avoid long-running work.
+///
+/// # Errors
+///
+/// Returns error if the root path is invalid, not a directory, or the sink fails.
+pub fn scan_folder_to_sink_with_progress(
+    root: impl AsRef<Path>,
+    options: &ScanOptions,
+    cancellation: &CancellationToken,
+    sink: &mut impl ScanRecordSink,
+    progress: &mut impl FnMut(StreamingScanProgress),
+) -> Result<StreamingScanResult> {
+    let root = root.as_ref();
+    let metadata = fs::metadata(root).map_err(|source| SmartfolderError::io(root, source))?;
+
+    if !metadata.is_dir() {
+        return Err(SmartfolderError::ScanRootNotDirectory {
+            path: root.to_path_buf(),
+        });
+    }
+
+    let mut scanner = StreamingScanner {
+        root: root.to_path_buf(),
+        options,
+        cancellation,
+        sink,
+        progress: Some(progress),
+        result: StreamingScanResult {
+            root: root.to_path_buf(),
+            ..StreamingScanResult::default()
+        },
+    };
+
+    scanner.scan_dir(root, 0)?;
+    scanner.emit_progress(Some(root.to_path_buf()));
     Ok(scanner.result)
 }
 
@@ -296,6 +401,174 @@ impl Scanner<'_> {
             path,
             message,
         });
+    }
+}
+
+struct StreamingScanner<'a, S: ScanRecordSink> {
+    root: PathBuf,
+    options: &'a ScanOptions,
+    cancellation: &'a CancellationToken,
+    sink: &'a mut S,
+    progress: Option<&'a mut dyn FnMut(StreamingScanProgress)>,
+    result: StreamingScanResult,
+}
+
+impl<S: ScanRecordSink> StreamingScanner<'_, S> {
+    fn scan_dir(&mut self, directory: &Path, depth: usize) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            self.result.cancelled = true;
+            return Ok(());
+        }
+
+        if self.should_stop_at_depth(depth) {
+            return Ok(());
+        }
+
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(source) => {
+                self.warn(
+                    ScanWarningCode::UnreadableEntry,
+                    Some(directory.to_path_buf()),
+                    format!("could not read directory: {source}"),
+                )?;
+                return Ok(());
+            }
+        };
+
+        self.result.summary.folders_scanned += 1;
+        self.emit_progress(Some(directory.to_path_buf()));
+
+        for entry in entries {
+            if self.cancellation.is_cancelled() {
+                self.result.cancelled = true;
+                break;
+            }
+
+            match entry {
+                Ok(entry) => self.scan_entry(&entry, depth + 1)?,
+                Err(source) => self.warn(
+                    ScanWarningCode::UnreadableEntry,
+                    Some(directory.to_path_buf()),
+                    format!("could not read directory entry: {source}"),
+                )?,
+            }
+        }
+
+        Ok(())
+    }
+
+    fn scan_entry(&mut self, entry: &DirEntry, depth: usize) -> Result<()> {
+        self.result.summary.entries_seen += 1;
+
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                self.warn(
+                    ScanWarningCode::UnreadableEntry,
+                    Some(path),
+                    format!("could not read metadata: {source}"),
+                )?;
+                return Ok(());
+            }
+        };
+
+        if self.should_skip(&file_name, &metadata) {
+            self.result.summary.entries_skipped += 1;
+            self.maybe_emit_entry_progress(&path);
+            return Ok(());
+        }
+
+        let entry_kind = entry_kind(&metadata);
+        self.sink.push_record(record_from_metadata(
+            &self.root,
+            &path,
+            file_name.to_string_lossy().as_ref(),
+            &metadata,
+            depth,
+            entry_kind,
+        ))?;
+        self.result.summary.records_collected += 1;
+        self.maybe_emit_entry_progress(&path);
+
+        if metadata.is_dir() && entry_kind != FileEntryKind::Symlink {
+            self.scan_dir(&path, depth)?;
+        }
+
+        Ok(())
+    }
+
+    fn should_stop_at_depth(&self, depth: usize) -> bool {
+        if self.options.current_folder_only && depth > 0 {
+            return true;
+        }
+
+        self.options
+            .max_depth
+            .is_some_and(|max_depth| depth >= max_depth)
+    }
+
+    fn should_skip(&self, file_name: &OsStr, metadata: &Metadata) -> bool {
+        let name = file_name.to_string_lossy();
+
+        if self
+            .options
+            .exclude_names
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(&name))
+        {
+            return true;
+        }
+
+        if !self.options.include_project_folders && is_default_excluded_name(&name) {
+            return true;
+        }
+
+        if !self.options.include_hidden && is_hidden_name(&name) {
+            return true;
+        }
+
+        if !self.options.include_hidden && has_hidden_attribute(metadata) {
+            return true;
+        }
+
+        !self.options.include_system && has_system_attribute(metadata)
+    }
+
+    fn warn(
+        &mut self,
+        code: ScanWarningCode,
+        path: Option<PathBuf>,
+        message: String,
+    ) -> Result<()> {
+        self.result.summary.warnings += 1;
+        let warning_path = path.clone();
+        self.sink.push_warning(ScanWarning {
+            code,
+            path,
+            message,
+        })?;
+        self.emit_progress(warning_path);
+        Ok(())
+    }
+
+    fn maybe_emit_entry_progress(&mut self, path: &Path) {
+        if self.result.summary.entries_seen % STREAMING_SCAN_PROGRESS_INTERVAL == 0 {
+            self.emit_progress(Some(path.to_path_buf()));
+        }
+    }
+
+    fn emit_progress(&mut self, current_path: Option<PathBuf>) {
+        if let Some(progress) = &mut self.progress {
+            progress(StreamingScanProgress {
+                root: self.result.root.clone(),
+                current_path,
+                summary: self.result.summary.clone(),
+                cancelled: self.result.cancelled,
+            });
+        }
     }
 }
 
@@ -442,10 +715,10 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::model::{FileEntryKind, FileTypeBucket};
+    use crate::model::{FileEntryKind, FileInventoryRecord, FileTypeBucket, ScanWarning};
     use crate::scanner::{
-        is_default_excluded_name, scan_folder, scan_folder_with_cancellation, CancellationToken,
-        ScanOptions,
+        is_default_excluded_name, scan_folder, scan_folder_to_sink_with_progress,
+        scan_folder_with_cancellation, CancellationToken, ScanOptions, ScanRecordSink,
     };
 
     #[test]
@@ -545,6 +818,29 @@ mod tests {
     }
 
     #[test]
+    fn streaming_scan_reports_progress_snapshots() {
+        let fixture = fixture_dir();
+        fs::write(fixture.path().join("report.pdf"), b"content").expect("fixture write");
+        let mut sink = CollectingSink::default();
+        let mut snapshots = Vec::new();
+
+        let result = scan_folder_to_sink_with_progress(
+            fixture.path(),
+            &ScanOptions::default(),
+            &CancellationToken::default(),
+            &mut sink,
+            &mut |progress| snapshots.push(progress),
+        )
+        .expect("streaming scan succeeds");
+
+        assert_eq!(result.summary.records_collected, 1);
+        assert!(!snapshots.is_empty());
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.summary.records_collected == 1));
+    }
+
+    #[test]
     fn symlink_entries_are_not_followed_when_creation_is_available() {
         let fixture = fixture_dir();
         fs::write(fixture.path().join("target.txt"), b"target").expect("fixture write");
@@ -574,6 +870,24 @@ mod tests {
 
     fn fixture_dir() -> TempDir {
         tempfile::tempdir().expect("tempdir")
+    }
+
+    #[derive(Default)]
+    struct CollectingSink {
+        records: Vec<FileInventoryRecord>,
+        warnings: Vec<ScanWarning>,
+    }
+
+    impl ScanRecordSink for CollectingSink {
+        fn push_record(&mut self, record: FileInventoryRecord) -> crate::Result<()> {
+            self.records.push(record);
+            Ok(())
+        }
+
+        fn push_warning(&mut self, warning: ScanWarning) -> crate::Result<()> {
+            self.warnings.push(warning);
+            Ok(())
+        }
     }
 
     #[cfg(windows)]

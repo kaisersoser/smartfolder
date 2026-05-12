@@ -30,8 +30,12 @@ use crate::model::{
 };
 use crate::paths::safe_destination_path;
 use crate::rules::{builtin_rule_match, RuleMatch, RuleProfile};
-use crate::scanner::ScanResult;
-use crate::Result;
+use crate::scanner::{CancellationToken, ScanResult};
+use crate::session_store::SqliteSessionStore;
+use crate::{Result, SmartfolderError};
+
+const DEFAULT_STORE_PAGE_SIZE: usize = 1_000;
+const PLAN_PROGRESS_INTERVAL: usize = 250;
 
 /// Options for generating a plan.
 ///
@@ -76,6 +80,34 @@ impl PlanOptions {
 pub enum PlanningMode {
     BuiltIn(BuiltInMode),
     RuleProfile(RuleProfile),
+}
+
+/// Result of generating a plan into persistent session storage.
+///
+/// Contains the metadata and aggregate counters needed by UI callers. Individual
+/// operations are stored in [`SqliteSessionStore`] and should be queried by page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPlanResult {
+    pub plan_id: String,
+    pub root: PathBuf,
+    pub mode: PlanMode,
+    pub created_at: DateTime<Utc>,
+    pub summary: PlanSummary,
+}
+
+/// Live progress snapshot emitted while generating a stored plan.
+///
+/// Unlike directory scanning, stored plan generation knows the number of scan
+/// records up front, so UI callers can render a determinate progress bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanGenerationProgress {
+    pub processed_records: usize,
+    pub total_records: usize,
+    pub operations_created: usize,
+    pub ambiguous_files: usize,
+    pub conflicts: usize,
+    pub skipped: usize,
+    pub current_path: Option<PathBuf>,
 }
 
 /// Generate a plan from a scan result and planning options.
@@ -152,6 +184,281 @@ pub fn generate_plan(
 
     plan.summary = summarize_plan(&plan, scan);
     Ok(plan)
+}
+
+/// Generate a plan from records stored in SQLite and write operations back to SQLite.
+///
+/// # Logical Flow
+///
+/// 1. Clear any existing plan rows for the session
+/// 2. Read scan records in bounded pages
+/// 3. Apply the same rule matching and safety checks as [`generate_plan`]
+/// 4. Use an indexed destination key in SQLite to detect duplicate destinations
+/// 5. Persist each operation, ambiguous file, warning, and final summary
+/// 6. Return aggregate plan metadata for UI display
+///
+/// # Errors
+///
+/// Returns error for storage failures, JSON decoding failures, or invalid paths.
+pub fn generate_plan_to_store(
+    root: impl AsRef<Path>,
+    store: &mut SqliteSessionStore,
+    session_id: &str,
+    options: &PlanOptions,
+    page_size: usize,
+) -> Result<StoredPlanResult> {
+    let mut ignore_progress = |_| {};
+    generate_plan_to_store_with_progress(
+        root,
+        store,
+        session_id,
+        options,
+        page_size,
+        &mut ignore_progress,
+    )
+}
+
+/// Generate a stored plan and report live progress snapshots.
+///
+/// Progress callbacks are emitted at the beginning, periodically as records are
+/// processed, and once at completion. The callback is intended for UI updates and
+/// should avoid long-running work.
+///
+/// # Errors
+///
+/// Returns error for storage failures, JSON decoding failures, or invalid paths.
+pub fn generate_plan_to_store_with_progress(
+    root: impl AsRef<Path>,
+    store: &mut SqliteSessionStore,
+    session_id: &str,
+    options: &PlanOptions,
+    page_size: usize,
+    progress: &mut impl FnMut(PlanGenerationProgress),
+) -> Result<StoredPlanResult> {
+    let cancellation = CancellationToken::default();
+    generate_plan_to_store_with_progress_and_cancellation(
+        root,
+        store,
+        session_id,
+        options,
+        page_size,
+        &cancellation,
+        progress,
+    )
+}
+
+/// Generate a stored plan, report progress, and honor cancellation requests.
+///
+/// # Errors
+///
+/// Returns error for storage failures, JSON decoding failures, invalid paths, or
+/// cancellation.
+pub fn generate_plan_to_store_with_progress_and_cancellation(
+    root: impl AsRef<Path>,
+    store: &mut SqliteSessionStore,
+    session_id: &str,
+    options: &PlanOptions,
+    page_size: usize,
+    cancellation: &CancellationToken,
+    progress: &mut impl FnMut(PlanGenerationProgress),
+) -> Result<StoredPlanResult> {
+    let root = root.as_ref();
+    let mode = plan_mode(&options.mode);
+    let page_size = page_size.max(1);
+    let mut offset = 0;
+    let mut processed_records = 0;
+    let mut operation_count = 0;
+    let mut ambiguous_count = 0;
+    let mut conflict_count = 0;
+    let mut skipped_count = 0;
+    let total_records = store
+        .scan_summary(session_id)?
+        .map_or(0, |summary| summary.records_collected);
+
+    store.clear_plan(session_id)?;
+    store.begin_write_batch()?;
+    let generation_result = (|| {
+        progress(PlanGenerationProgress {
+            processed_records,
+            total_records,
+            operations_created: operation_count,
+            ambiguous_files: ambiguous_count,
+            conflicts: conflict_count,
+            skipped: skipped_count,
+            current_path: None,
+        });
+
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(SmartfolderError::ScanCancelled);
+            }
+
+            let records = store.scan_records_page(session_id, offset, page_size)?;
+            if records.is_empty() {
+                break;
+            }
+
+            for record in &records {
+                if cancellation.is_cancelled() {
+                    return Err(SmartfolderError::ScanCancelled);
+                }
+
+                processed_records += 1;
+                let Some(rule_match) = rule_match_for_record(record, &options.mode) else {
+                    ambiguous_count += 1;
+                    store.insert_ambiguous_file(session_id, &record.root_relative_path)?;
+                    maybe_emit_plan_progress(
+                        progress,
+                        PlanGenerationProgress {
+                            processed_records,
+                            total_records,
+                            operations_created: operation_count,
+                            ambiguous_files: ambiguous_count,
+                            conflicts: conflict_count,
+                            skipped: skipped_count,
+                            current_path: Some(record.root_relative_path.clone()),
+                        },
+                    );
+                    continue;
+                };
+
+                let source = root.join(&record.root_relative_path);
+                let destination = match safe_destination_path(root, &rule_match.destination) {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        store.insert_plan_warning(
+                            session_id,
+                            &PlanWarning {
+                                code: PlanWarningCode::SpecialFolder,
+                                message: format!(
+                                    "skipped {} because destination is unsafe: {error}",
+                                    record.root_relative_path.display()
+                                ),
+                            },
+                        )?;
+                        maybe_emit_plan_progress(
+                            progress,
+                            PlanGenerationProgress {
+                                processed_records,
+                                total_records,
+                                operations_created: operation_count,
+                                ambiguous_files: ambiguous_count,
+                                conflicts: conflict_count,
+                                skipped: skipped_count,
+                                current_path: Some(record.root_relative_path.clone()),
+                            },
+                        );
+                        continue;
+                    }
+                };
+
+                let destination_key = normalized_destination_key(&destination);
+                let already_planned = store.destination_key_exists(session_id, &destination_key)?;
+                let conflict = detect_conflict_from_store(&source, &destination, already_planned);
+                let selected = matches!(conflict, ConflictState::None);
+                if !selected {
+                    conflict_count += 1;
+                    skipped_count += 1;
+                }
+
+                operation_count += 1;
+                let operation = PlanOperation {
+                    operation_id: format!("op_{operation_count:06}"),
+                    operation_type: OperationType::Move,
+                    source,
+                    destination,
+                    reason: rule_match.reason,
+                    certainty: rule_match.certainty,
+                    conflict,
+                    selected,
+                    source_snapshot: SourceSnapshot {
+                        size_bytes: record.size_bytes,
+                        modified_at: record.modified_at,
+                    },
+                };
+                store.insert_plan_operation(session_id, &operation, &destination_key)?;
+                maybe_emit_plan_progress(
+                    progress,
+                    PlanGenerationProgress {
+                        processed_records,
+                        total_records,
+                        operations_created: operation_count,
+                        ambiguous_files: ambiguous_count,
+                        conflicts: conflict_count,
+                        skipped: skipped_count,
+                        current_path: Some(record.root_relative_path.clone()),
+                    },
+                );
+            }
+
+            offset += records.len();
+        }
+
+        let files_scanned = if total_records == 0 {
+            offset
+        } else {
+            total_records
+        };
+        let summary = PlanSummary {
+            files_scanned,
+            moves_proposed: operation_count,
+            ambiguous_files: ambiguous_count,
+            conflicts: conflict_count,
+            skipped: skipped_count,
+        };
+        store.save_plan_summary(session_id, &summary)?;
+        progress(PlanGenerationProgress {
+            processed_records,
+            total_records: files_scanned,
+            operations_created: operation_count,
+            ambiguous_files: ambiguous_count,
+            conflicts: conflict_count,
+            skipped: skipped_count,
+            current_path: None,
+        });
+
+        Ok(StoredPlanResult {
+            plan_id: options.plan_id.clone(),
+            root: root.to_path_buf(),
+            mode,
+            created_at: options.created_at,
+            summary,
+        })
+    })();
+
+    match generation_result {
+        Ok(result) => {
+            store.commit_write_batch()?;
+            Ok(result)
+        }
+        Err(error) => {
+            let _ = store.rollback_write_batch();
+            Err(error)
+        }
+    }
+}
+
+fn maybe_emit_plan_progress(
+    progress: &mut impl FnMut(PlanGenerationProgress),
+    snapshot: PlanGenerationProgress,
+) {
+    if snapshot.processed_records % PLAN_PROGRESS_INTERVAL == 0 {
+        progress(snapshot);
+    }
+}
+
+/// Generate a plan into SQLite using the default page size.
+///
+/// # Errors
+///
+/// Returns error for storage failures, JSON decoding failures, or invalid paths.
+pub fn generate_plan_to_store_default(
+    root: impl AsRef<Path>,
+    store: &mut SqliteSessionStore,
+    session_id: &str,
+    options: &PlanOptions,
+) -> Result<StoredPlanResult> {
+    generate_plan_to_store(root, store, session_id, options, DEFAULT_STORE_PAGE_SIZE)
 }
 
 /// Render a plan as human-readable text for terminal display.
@@ -254,6 +561,42 @@ fn detect_conflict(
     ConflictState::None
 }
 
+fn detect_conflict_from_store(
+    source: &Path,
+    destination: &Path,
+    already_planned: bool,
+) -> ConflictState {
+    if is_case_only_rename(source, destination) {
+        return ConflictState::CaseOnlyRename {
+            path: destination.to_path_buf(),
+        };
+    }
+
+    if has_legacy_windows_path_risk(destination) {
+        return ConflictState::UnsafeDestination {
+            reason: format!(
+                "destination path is longer than the legacy Windows MAX_PATH limit: {}",
+                destination.display()
+            ),
+        };
+    }
+
+    if destination.exists() || already_planned {
+        return ConflictState::DestinationExists {
+            path: destination.to_path_buf(),
+        };
+    }
+
+    ConflictState::None
+}
+
+fn normalized_destination_key(destination: &Path) -> String {
+    destination
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase()
+}
+
 fn is_case_only_rename(source: &Path, destination: &Path) -> bool {
     source != destination
         && source
@@ -310,9 +653,13 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::model::{BuiltInMode, ConflictState};
-    use crate::planner::{generate_plan, render_preview, render_preview_json, PlanOptions};
+    use crate::planner::{
+        generate_plan, generate_plan_to_store_with_progress, render_preview, render_preview_json,
+        PlanOptions,
+    };
     use crate::rules::RuleProfile;
-    use crate::scanner::{scan_folder, ScanOptions};
+    use crate::scanner::{scan_folder, scan_folder_to_sink, CancellationToken, ScanOptions};
+    use crate::session_store::{SessionScanSink, SqliteSessionStore};
 
     fn path(parts: &[&str]) -> PathBuf {
         let mut path = PathBuf::new();
@@ -419,6 +766,55 @@ extensions = ["pdf"]
         assert!(render_preview_json(&plan)
             .expect("json preview")
             .contains("\"schema_version\""));
+    }
+
+    #[test]
+    fn generated_plan_can_be_persisted_to_sqlite_store() {
+        let fixture = fixture_dir();
+        fs::write(fixture.path().join("report.pdf"), b"report").expect("fixture write");
+        let mut store = SqliteSessionStore::in_memory().expect("store opens");
+        let options = PlanOptions::built_in(BuiltInMode::Type, "plan_store_test", test_time());
+        store
+            .create_session_with_id(
+                "session_plan_test",
+                fixture.path(),
+                &crate::model::PlanMode::BuiltIn(BuiltInMode::Type),
+                test_time(),
+            )
+            .expect("session creates");
+        let mut sink = SessionScanSink::new(&mut store, "session_plan_test");
+        let scan = scan_folder_to_sink(
+            fixture.path(),
+            &ScanOptions::default(),
+            &CancellationToken::default(),
+            &mut sink,
+        )
+        .expect("scan streams");
+        drop(sink);
+        store
+            .save_scan_summary("session_plan_test", &scan.summary)
+            .expect("scan summary saves");
+
+        let mut progress_snapshots = Vec::new();
+        let result = generate_plan_to_store_with_progress(
+            fixture.path(),
+            &mut store,
+            "session_plan_test",
+            &options,
+            1,
+            &mut |progress| progress_snapshots.push(progress),
+        )
+        .expect("plan persists");
+
+        assert_eq!(result.summary.moves_proposed, 1);
+        assert!(progress_snapshots
+            .iter()
+            .any(|progress| progress.processed_records == 1));
+        let operations = store
+            .plan_operations_page("session_plan_test", 0, 10)
+            .expect("operations load");
+        assert_eq!(operations.len(), 1);
+        assert!(operations[0].destination.ends_with("report.pdf"));
     }
 
     #[test]

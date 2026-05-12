@@ -51,6 +51,9 @@ pub enum SmartfolderError {
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("SQLite storage error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     #[error("TOML rule profile error: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
 

@@ -46,6 +46,17 @@ pub struct UndoSummary {
     pub failed: usize,
 }
 
+/// Summary of a transaction resume operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeSummary {
+    pub transaction_id: String,
+    pub journal_path: PathBuf,
+    pub resumed: usize,
+    pub completed: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
 /// Metadata about a transaction for listing and inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionSummary {
@@ -135,6 +146,92 @@ pub fn undo_transaction(transaction_id: &str) -> Result<UndoSummary> {
         transaction_id: journal.transaction_id,
         journal_path,
         rolled_back,
+        skipped,
+        failed,
+    })
+}
+
+/// Resume an interrupted or failed transaction from its journal state.
+///
+/// # Logical Flow
+///
+/// 1. Load journal from transaction ID
+/// 2. Iterate operations in journal order
+/// 3. For each non-completed/non-rolled-back operation:
+///    - Attempt the recorded move from source to destination
+///    - Mark as completed on success, skipped/failed on error
+///    - Persist journal after each operation
+/// 4. Recompute aggregate counts and mark transaction status
+/// 5. Persist final journal and return summary
+///
+/// # Errors
+///
+/// Returns error if transaction ID is invalid or journal cannot be read.
+pub fn resume_transaction(transaction_id: &str) -> Result<ResumeSummary> {
+    let journal_path = journal_path(transaction_id)?;
+    let mut journal = load_journal_from_path(&journal_path)?;
+    let mut resumed = 0;
+
+    for index in 0..journal.operations.len() {
+        if matches!(
+            journal.operations[index].status,
+            OperationStatus::Completed | OperationStatus::RolledBack
+        ) {
+            continue;
+        }
+
+        match resume_operation(&journal.operations[index]) {
+            Ok(()) => {
+                journal.operations[index].status = OperationStatus::Completed;
+                journal.operations[index].error = None;
+                resumed += 1;
+            }
+            Err(error) => {
+                journal.operations[index].status = match error.code {
+                    OperationErrorCode::DestinationExists => OperationStatus::Skipped,
+                    _ => OperationStatus::Failed,
+                };
+                journal.operations[index].error = Some(error);
+            }
+        }
+
+        save_journal(&journal, &journal_path)?;
+    }
+
+    let completed = journal
+        .operations
+        .iter()
+        .filter(|operation| operation.status == OperationStatus::Completed)
+        .count();
+    let skipped = journal
+        .operations
+        .iter()
+        .filter(|operation| operation.status == OperationStatus::Skipped)
+        .count();
+    let failed = journal
+        .operations
+        .iter()
+        .filter(|operation| operation.status == OperationStatus::Failed)
+        .count();
+
+    if matches!(
+        journal.status,
+        TransactionStatus::InProgress | TransactionStatus::Interrupted | TransactionStatus::Failed
+    ) {
+        journal.status = if failed == 0 {
+            TransactionStatus::Completed
+        } else {
+            TransactionStatus::Failed
+        };
+        journal.completed_at = Some(Utc::now());
+        save_journal(&journal, &journal_path)?;
+    }
+
+    Ok(ResumeSummary {
+        transaction_id: journal.transaction_id,
+        journal_path,
+        resumed,
+        completed,
         skipped,
         failed,
     })
@@ -235,6 +332,40 @@ fn undo_operation(operation: &TransactionOperation) -> std::result::Result<(), O
     })
 }
 
+fn resume_operation(operation: &TransactionOperation) -> std::result::Result<(), OperationError> {
+    if operation.destination.exists() {
+        return Err(operation_error(
+            OperationErrorCode::DestinationExists,
+            "destination already exists",
+        ));
+    }
+
+    if !operation.source.exists() {
+        return Err(operation_error(
+            OperationErrorCode::SourceMissing,
+            "source file no longer exists",
+        ));
+    }
+
+    if let Some(parent) = operation.destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                operation_error(OperationErrorCode::PermissionDenied, error.to_string())
+            } else {
+                operation_error(OperationErrorCode::IoError, error.to_string())
+            }
+        })?;
+    }
+
+    fs::rename(&operation.source, &operation.destination).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            operation_error(OperationErrorCode::PermissionDenied, error.to_string())
+        } else {
+            operation_error(OperationErrorCode::IoError, error.to_string())
+        }
+    })
+}
+
 fn load_journal_from_path(path: &Path) -> Result<TransactionJournal> {
     let contents = fs::read_to_string(path).map_err(|source| SmartfolderError::io(path, source))?;
     serde_json::from_str(&contents).map_err(Into::into)
@@ -269,8 +400,11 @@ mod tests {
     use crate::apply::{apply_plan, ApplyOptions};
     use crate::model::{BuiltInMode, OperationStatus, TransactionStatus};
     use crate::planner::{generate_plan, PlanOptions};
-    use crate::recovery::{inspect_transaction, list_transactions, undo_transaction};
+    use crate::recovery::{
+        inspect_transaction, list_transactions, resume_transaction, undo_transaction,
+    };
     use crate::scanner::{scan_folder, ScanOptions};
+    use crate::storage::journal_path;
 
     #[test]
     fn undo_restores_moved_file_to_original_location() {
@@ -322,6 +456,37 @@ mod tests {
         assert!(transactions
             .iter()
             .any(|transaction| transaction.transaction_id == transaction_id));
+    }
+
+    #[test]
+    fn resume_continues_pending_operations_in_an_interrupted_journal() {
+        let fixture = fixture_dir();
+        fs::write(fixture.path().join("report.pdf"), b"report").expect("fixture write");
+        let transaction_id = apply_fixture(&fixture);
+        let journal_file = journal_path(&transaction_id).expect("journal path resolves");
+
+        let mut journal = inspect_transaction(&transaction_id).expect("journal loads");
+        let operation = journal.operations[0].clone();
+        fs::rename(&operation.destination, &operation.source).expect("reset source path");
+        journal.status = TransactionStatus::Interrupted;
+        journal.completed_at = None;
+        journal.operations[0].status = OperationStatus::Pending;
+        journal.operations[0].error = None;
+        fs::write(
+            &journal_file,
+            serde_json::to_string_pretty(&journal).expect("journal serializes"),
+        )
+        .expect("journal writes");
+
+        let summary = resume_transaction(&transaction_id).expect("resume succeeds");
+        assert_eq!(summary.resumed, 1);
+        assert_eq!(summary.completed, 1);
+        assert!(operation.destination.exists());
+        assert!(!operation.source.exists());
+
+        let resumed = inspect_transaction(&transaction_id).expect("resumed journal loads");
+        assert_eq!(resumed.status, TransactionStatus::Completed);
+        assert_eq!(resumed.operations[0].status, OperationStatus::Completed);
     }
 
     fn apply_fixture(fixture: &TempDir) -> String {

@@ -1,13 +1,14 @@
 //! Command-line interface for smartfolder.
 //!
 //! Provides a user-friendly interface to the smartfolder core library.
-//! The CLI supports five main commands: analyze, preview, apply, undo, and transactions.
+//! The CLI supports six main commands: analyze, preview, apply, resume, undo, and transactions.
 //!
 //! # Commands
 //!
 //! - **analyze**: Scan a directory and generate an organization plan
 //! - **preview**: View a previously saved plan
 //! - **apply**: Execute a plan and organize files
+//! - **resume**: Continue an interrupted or failed transaction
 //! - **undo**: Reverse the effects of a transaction
 //! - **transactions**: List, inspect, and cleanup transaction journals
 //!
@@ -37,10 +38,11 @@ use std::process::ExitCode;
 
 use chrono::Utc;
 use smartfolder_core::apply::{apply_plan, ApplyCancellationToken, ApplyOptions};
-use smartfolder_core::model::{BuiltInMode, PlanRecord, TransactionJournal};
+use smartfolder_core::model::{BuiltInMode, PlanRecord, TransactionJournal, TransactionStatus};
 use smartfolder_core::planner::{generate_plan, render_preview, render_preview_json, PlanOptions};
 use smartfolder_core::recovery::{
-    cleanup_transactions, inspect_transaction, list_transactions, undo_transaction,
+    cleanup_transactions, inspect_transaction, list_transactions, resume_transaction,
+    undo_transaction,
 };
 use smartfolder_core::rules::RuleProfile;
 use smartfolder_core::scanner::{scan_folder, ScanOptions};
@@ -84,6 +86,7 @@ fn run() -> Result<()> {
         Some("analyze") => run_analyze(&args[1..]),
         Some("preview") => run_preview(&args[1..]),
         Some("apply") => run_apply(&args[1..]),
+        Some("resume" | "continue") => run_resume(&args[1..]),
         Some("undo") => run_undo(&args[1..]),
         Some("transactions") => run_transactions(&args[1..]),
         Some(command) => Err(CliError::UnknownCommand {
@@ -234,6 +237,36 @@ fn run_undo(args: &[String]) -> Result<()> {
     println!(
         "Rolled back: {} | Skipped: {} | Failed: {}",
         summary.rolled_back, summary.skipped, summary.failed
+    );
+
+    Ok(())
+}
+
+/// Continue an interrupted or failed transaction from its journal.
+fn run_resume(args: &[String]) -> Result<()> {
+    let command = ResumeCommand::parse(args)?;
+    let journal = inspect_transaction(&command.transaction_id)?;
+    if !matches!(
+        journal.status,
+        TransactionStatus::InProgress | TransactionStatus::Interrupted | TransactionStatus::Failed
+    ) {
+        return Err(CliError::TransactionNotResumable {
+            transaction_id: command.transaction_id,
+            status: journal.status,
+        });
+    }
+
+    if !command.yes {
+        print_journal_summary(&journal);
+        confirm_or_decline("Resume pending operations from this transaction?")?;
+    }
+
+    let summary = resume_transaction(&journal.transaction_id)?;
+    println!("Transaction: {}", summary.transaction_id);
+    println!("Journal: {}", summary.journal_path.display());
+    println!(
+        "Resumed: {} | Completed: {} | Skipped: {} | Failed: {}",
+        summary.resumed, summary.completed, summary.skipped, summary.failed
     );
 
     Ok(())
@@ -452,6 +485,42 @@ struct UndoCommand {
     yes: bool,
 }
 
+/// Arguments for the 'resume' command: continue a transaction.
+#[derive(Debug)]
+struct ResumeCommand {
+    transaction_id: String,
+    yes: bool,
+}
+
+impl ResumeCommand {
+    /// Parse resume command arguments from CLI.
+    fn parse(args: &[String]) -> Result<Self> {
+        let transaction_id = args
+            .first()
+            .ok_or(CliError::MissingArgument {
+                name: "transaction-id",
+            })?
+            .clone();
+        let mut command = Self {
+            transaction_id,
+            yes: false,
+        };
+
+        for option in &args[1..] {
+            match option.as_str() {
+                "--yes" => command.yes = true,
+                unknown => {
+                    return Err(CliError::UnknownOption {
+                        option: unknown.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(command)
+    }
+}
+
 impl UndoCommand {
     /// Parse undo command arguments from CLI.
     fn parse(args: &[String]) -> Result<Self> {
@@ -579,6 +648,7 @@ PLANNED COMMANDS:
     analyze <root>              Analyze a folder and optionally write a plan
     preview <plan.json>         Preview a generated plan
     apply <plan.json>           Apply a confirmed plan
+    resume <transaction-id>     Resume an interrupted or failed transaction
     undo <transaction-id>       Undo a transaction
     transactions <SUBCOMMAND>   List, inspect, or clean transaction journals
 
@@ -606,6 +676,9 @@ APPLY OPTIONS:
 
 UNDO OPTIONS:
     --yes                       Undo without interactive confirmation
+
+RESUME OPTIONS:
+    --yes                       Resume without interactive confirmation
 
 TRANSACTION SUBCOMMANDS:
     transactions list
@@ -646,6 +719,12 @@ enum CliError {
     #[error("confirmation declined")]
     ConfirmationDeclined,
 
+    #[error("transaction '{transaction_id}' is not resumable because it is '{status:?}'")]
+    TransactionNotResumable {
+        transaction_id: String,
+        status: TransactionStatus,
+    },
+
     #[error(
         "cloud-synced folder requires explicit confirmation; rerun with --confirm-cloud-folder: {root}"
     )]
@@ -675,6 +754,7 @@ impl CliError {
             | Self::InvalidMode { .. }
             | Self::InvalidNumber { .. }
             | Self::ConfirmationDeclined
+            | Self::TransactionNotResumable { .. }
             | Self::CloudFolderRequiresConfirmation { .. } => 2,
             Self::Io(_) | Self::Core(_) | Self::Json(_) | Self::SignalHandler(_) => 1,
         }
@@ -763,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_apply_and_undo_parsers_support_mvp_options() {
+    fn preview_apply_resume_and_undo_parsers_support_mvp_options() {
         let preview =
             PreviewCommand::parse(&strings(&["plan.json", "--json"])).expect("preview parses");
         assert_eq!(preview.plan_path, PathBuf::from("plan.json"));
@@ -781,6 +861,10 @@ mod tests {
         assert!(apply.yes);
         assert!(apply.confirm_cloud_folder);
         assert_eq!(apply.journal_export, Some(PathBuf::from("journal.json")));
+
+        let resume = ResumeCommand::parse(&strings(&["txn_123", "--yes"])).expect("resume parses");
+        assert_eq!(resume.transaction_id, "txn_123");
+        assert!(resume.yes);
 
         let undo = UndoCommand::parse(&strings(&["txn_123", "--yes"])).expect("undo parses");
         assert_eq!(undo.transaction_id, "txn_123");

@@ -49,6 +49,8 @@ smartfolder analyze <root> --mode type-date --quiet --output plan.json
 smartfolder preview plan.json
 smartfolder apply plan.json
 smartfolder apply plan.json --yes
+smartfolder resume <transaction-id>
+smartfolder continue <transaction-id>
 smartfolder undo <transaction-id>
 smartfolder undo <transaction-id> --yes
 smartfolder transactions list

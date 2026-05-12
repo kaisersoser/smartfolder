@@ -60,6 +60,7 @@ pub mod planner;
 pub mod recovery;
 pub mod rules;
 pub mod scanner;
+pub mod session_store;
 pub mod storage;
 
 pub use error::{Result, SmartfolderError};

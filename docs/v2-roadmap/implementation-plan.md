@@ -25,6 +25,7 @@ The implementation plan intentionally keeps 2.0 focused:
 | Shared core first | GUI and CLI must reuse the same Rust logic |
 | Safety preserved | GUI cannot weaken preview, confirmation, no-overwrite, or undo guarantees |
 | Windows-first | Optimize the first release for Windows packaging, shell launch, and UX |
+| Bounded memory | Large scan, plan, and transaction data must be page-oriented instead of retained wholesale in memory |
 | Incremental migration | Evolve schemas deliberately and version them clearly |
 | Product over experimentation | Defer AI and deeper engine expansion until after a successful GUI release |
 
@@ -71,6 +72,39 @@ Acceptance criteria:
 - GUI and CLI can use the same plan/journal model layer
 - migration behavior is documented and testable
 
+### Milestone 1A - Bounded-memory session storage
+
+**Status:** in_progress
+
+Scope:
+
+- introduce an embedded SQLite session store for large working sets
+- stream scan records into durable storage instead of retaining every record in memory
+- generate plans from stored scan rows in bounded pages
+- store plan operations for paged GUI retrieval
+- batch database writes so large scans do not stall on per-row commits
+- expose progress, cancellation, and current-work detail during scan and planning
+- provide cleanup/compaction paths for stale working-session data
+- preserve existing CLI JSON workflows during migration
+
+Acceptance criteria:
+
+- large GUI scans do not retain all scan records in process memory
+- plan previews can be queried page-by-page from storage
+- duplicate destination detection uses indexed storage instead of a process-wide destination set
+- scan and plan work can be cancelled from the GUI
+- stale session data can be deleted and the database can be compacted
+- existing in-memory CLI APIs remain compatible until CLI migration is intentional
+
+Progress so far:
+
+- added SQLite-backed session database under app-local data
+- added streaming scan sink API
+- added paged plan generation into session storage
+- moved GUI analysis to session-backed scan and preview storage
+- added live scan/planning progress and cancellation controls
+- added stale-session cleanup and database compaction APIs
+
 ### Milestone 2 - Desktop app shell and portable packaging baseline
 
 **Status:** in_progress
@@ -98,7 +132,7 @@ Progress so far:
 
 ### Milestone 3 - Analyze experience and plan summary UI
 
-**Status:** planned
+**Status:** in_progress
 
 Scope:
 
@@ -114,9 +148,17 @@ Acceptance criteria:
 - long-running scans keep the UI responsive
 - warnings and exclusions are visible
 
+Progress so far:
+
+- added GUI analysis through the shared core
+- added bounded-memory progress reporting for scan and planning
+- added a high-level plan summary with ready, attention, ambiguous, and warning counts
+- added paged preview controls for all operations, ready operations, and operations needing attention
+- kept preview rows truncated and loaded from SQLite by page
+
 ### Milestone 4 - Preview details and safe apply flow
 
-**Status:** planned
+**Status:** in_progress
 
 Scope:
 
@@ -132,9 +174,17 @@ Acceptance criteria:
 - apply uses the shared safety model
 - apply progress and failures are visible in the GUI
 
+Progress so far:
+
+- added a core stored-plan apply path that pages ready operations from SQLite
+- reused the existing journaled move executor and no-overwrite safety checks
+- added explicit GUI confirmation before applying file moves
+- added cloud-synced folder caution in the confirmation step
+- added apply progress and final transaction summary in the GUI
+
 ### Milestone 5 - Undo, transaction history, and recovery UX
 
-**Status:** planned
+**Status:** in_progress
 
 Scope:
 
@@ -148,6 +198,15 @@ Acceptance criteria:
 - a GUI user can undo a prior completed transaction
 - journal-backed recovery states are visible
 - rollback results are clearly reported
+
+Progress so far:
+
+- added recent transaction history to the GUI from journal storage
+- added a bounded transaction detail inspector for journal metadata and recorded operations
+- added transaction status visibility and refresh controls
+- added explicit undo confirmation before rollback
+- wired GUI undo through the shared recovery model
+- added undo result summaries with rolled back, skipped, failed, and journal path details
 
 ### Milestone 6 - GUI rule editor and profile management
 

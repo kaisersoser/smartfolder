@@ -647,6 +647,60 @@ fn cleanup_can_optionally_remove_incomplete_transactions() {
 }
 
 #[test]
+fn resume_continues_interrupted_transactions_from_cli() {
+    let context = TestContext::new("root");
+    write_file(&context.root.join("report.pdf"), b"report");
+    let plan_path = context.plan_path("plan.json");
+    smartfolder(&context.app_data_root)
+        .args([
+            "analyze",
+            context.root.to_str().expect("root path should be utf-8"),
+            "--output",
+            plan_path.to_str().expect("plan path should be utf-8"),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    let apply = smartfolder(&context.app_data_root)
+        .args([
+            "apply",
+            plan_path.to_str().expect("plan path should be utf-8"),
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let apply_stdout = stdout_text(&apply);
+    let transaction_id = extract_line_value(&apply_stdout, "Transaction: ");
+    let journal_path = PathBuf::from(extract_line_value(&apply_stdout, "Journal: "));
+
+    let mut interrupted = read_journal(&journal_path);
+    let operation = interrupted.operations[0].clone();
+    fs::rename(&operation.destination, &operation.source).expect("reset source path");
+    interrupted.status = TransactionStatus::Interrupted;
+    interrupted.completed_at = None;
+    interrupted.operations[0].status = smartfolder_core::model::OperationStatus::Pending;
+    interrupted.operations[0].error = None;
+    fs::write(
+        &journal_path,
+        serde_json::to_string_pretty(&interrupted).expect("journal should serialize"),
+    )
+    .expect("interrupted journal should be written");
+
+    let resume = smartfolder(&context.app_data_root)
+        .args(["resume", &transaction_id, "--yes"])
+        .assert()
+        .success();
+    let resume_stdout = stdout_text(&resume);
+    assert!(resume_stdout.contains("Resumed: 1 | Completed: 1 | Skipped: 0 | Failed: 0"));
+    assert!(operation.destination.exists());
+    assert!(!operation.source.exists());
+
+    let resumed = read_journal(&journal_path);
+    assert_eq!(resumed.status, TransactionStatus::Completed);
+}
+
+#[test]
 fn invalid_cli_inputs_return_documented_error_shapes() {
     let context = TestContext::new("root");
     write_file(&context.root.join("report.pdf"), b"report");

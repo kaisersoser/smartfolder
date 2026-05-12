@@ -1,3 +1,26 @@
+//! File organization rules and matching logic.
+//!
+//! Provides both built-in rules (organize by type, date, extension) and support for
+//! custom rule profiles loaded from TOML files.
+//!
+//! # Built-in modes
+//!
+//! - `Type`: Group by `FileTypeBucket` (Documents, Images, Videos, etc.)
+//! - `Date`: Organize by year and month from file modification time
+//! - `Extension`: Folder per file extension
+//! - `TypeYear`: Combine type and year (e.g., Documents/2024/report.pdf)
+//!
+//! # Custom rules
+//!
+//! Define rules in TOML with conditions like:
+//! - File extensions (e.g., "pdf", "docx")
+//! - Filename patterns (e.g., contains "invoice")
+//! - Path patterns (e.g., contains "downloads")
+//! - File size ranges
+//! - Year from modification time
+//!
+//! Rules are matched in priority order; first match wins.
+
 use std::path::PathBuf;
 
 use chrono::Datelike;
@@ -9,6 +32,9 @@ use crate::{Result, SmartfolderError};
 
 const DEFAULT_RULE_PRIORITY: u32 = 1_000;
 
+/// Result of applying a rule to a file.
+///
+/// Contains the destination folder path, human-readable reason, and certainty level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleMatch {
     pub destination: PathBuf,
@@ -16,6 +42,10 @@ pub struct RuleMatch {
     pub certainty: Certainty,
 }
 
+/// Collection of custom rules for organizing files.
+///
+/// Loaded from TOML and applied in priority order (ascending).
+/// Can be validated and searched for matching rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleProfile {
@@ -25,6 +55,7 @@ pub struct RuleProfile {
 }
 
 impl RuleProfile {
+    /// Parse a rule profile from TOML string and validate it.
     pub fn from_toml(input: &str) -> Result<Self> {
         let profile: Self = toml::from_str(input)?;
         profile.validate()?;
@@ -51,6 +82,7 @@ impl RuleProfile {
         Ok(())
     }
 
+    /// Find the first rule matching a file record (ordered by priority).
     pub fn first_match(&self, record: &FileInventoryRecord) -> Option<RuleMatch> {
         let mut ordered_rules = self.rules.iter().enumerate().collect::<Vec<_>>();
         ordered_rules
@@ -62,6 +94,16 @@ impl RuleProfile {
     }
 }
 
+/// A custom rule for organizing files.
+///
+/// Matches files based on multiple conditions (all must match):
+/// - Extensions (e.g., "pdf", "jpg")
+/// - Filename patterns (substring match)
+/// - Path patterns (substring match)
+/// - File size range
+/// - Year from modification date
+///
+/// When a file matches all conditions, it is moved to the `destination` folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomRule {

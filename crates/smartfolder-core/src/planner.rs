@@ -1,3 +1,23 @@
+//! Plan generation for file organization.
+//!
+//! This module takes a scan result and generates a concrete plan of file moves.
+//! It applies built-in organization modes (type, date, extension) or custom rule profiles
+//! to determine destination folders for each file.
+//!
+//! # Key features
+//!
+//! - **Conflict detection**: Identifies files that would overwrite each other
+//! - **Certainty levels**: Marks operations with High/Medium/Low confidence
+//! - **Selection**: Marks conflicts as "not selected" so they won't be applied
+//! - **Warnings**: Tracks files that couldn't be classified or have unsafe destinations
+//!
+//! # Workflow
+//!
+//! 1. Create [`PlanOptions`] with either built-in mode or rule profile
+//! 2. Call [`generate_plan`] with scan result
+//! 3. Review results with [`render_preview`] or [`render_preview_json`]
+//! 4. Pass plan to apply module for execution
+
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -13,6 +33,9 @@ use crate::rules::{builtin_rule_match, RuleMatch, RuleProfile};
 use crate::scanner::ScanResult;
 use crate::Result;
 
+/// Options for generating a plan.
+///
+/// Specifies the organization mode (built-in or rule profile) and metadata (ID, creation time).
 #[derive(Debug, Clone)]
 pub struct PlanOptions {
     pub mode: PlanningMode,
@@ -21,6 +44,7 @@ pub struct PlanOptions {
 }
 
 impl PlanOptions {
+    /// Create options for a built-in organization mode.
     pub fn built_in(
         mode: BuiltInMode,
         plan_id: impl Into<String>,
@@ -33,6 +57,7 @@ impl PlanOptions {
         }
     }
 
+    /// Create options for a custom rule profile.
     pub fn rule_profile(
         profile: RuleProfile,
         plan_id: impl Into<String>,
@@ -46,12 +71,31 @@ impl PlanOptions {
     }
 }
 
+/// Organization mode used during planning (built-in or custom rules).
 #[derive(Debug, Clone)]
 pub enum PlanningMode {
     BuiltIn(BuiltInMode),
     RuleProfile(RuleProfile),
 }
 
+/// Generate a plan from a scan result and planning options.
+///
+/// # Logical Flow
+///
+/// 1. For each file in the scan:
+///    - Apply rule matching (built-in or profile) to determine destination
+///    - Check if destination path is safe (doesn't escape root)
+/// 2. Detect conflicts:
+///    - Destination already exists
+///    - Case-only rename on case-insensitive filesystem
+///    - Path exceeds Windows `MAX_PATH` limit
+/// 3. Mark conflicting operations as "not selected"
+/// 4. Generate summary statistics
+/// 5. Return complete plan ready for review and execution
+///
+/// # Errors
+///
+/// Returns error for IO failures or invalid paths.
 pub fn generate_plan(
     root: impl AsRef<Path>,
     scan: &ScanResult,
@@ -110,6 +154,7 @@ pub fn generate_plan(
     Ok(plan)
 }
 
+/// Render a plan as human-readable text for terminal display.
 pub fn render_preview(plan: &PlanRecord) -> String {
     let mut output = String::new();
     writeln!(&mut output, "Plan: {}", plan.plan_id).expect("writing to string should not fail");
@@ -150,6 +195,7 @@ pub fn render_preview(plan: &PlanRecord) -> String {
     output
 }
 
+/// Render a plan as formatted JSON.
 pub fn render_preview_json(plan: &PlanRecord) -> Result<String> {
     plan.to_pretty_json()
 }

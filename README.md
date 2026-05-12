@@ -26,6 +26,22 @@ The first version focuses on safe, transparent, reversible organization:
 
 ## CLI
 
+From a source checkout, the repository does **not** include a prebuilt `smartfolder.exe` in the project root. Run it in one of these ways:
+
+```powershell
+cargo run -p smartfolder-cli -- analyze <root> --output plan.json
+cargo build --release
+.\target\release\smartfolder.exe analyze <root> --output plan.json
+```
+
+When built without `--release`, the executable is created at `.\target\debug\smartfolder.exe`.
+
+An experimental Windows-first GUI crate also exists and can be started with:
+
+```powershell
+cargo run -p smartfolder-gui -- <root>
+```
+
 ```powershell
 smartfolder analyze <root> --output plan.json
 smartfolder analyze <root> --profile rules.toml --output plan.json
@@ -84,7 +100,25 @@ Expected checks:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+.\scripts\test-mvp.ps1
 ```
+
+## Contributing
+
+All contributions must follow the development standards in [CONTRIBUTING.md](CONTRIBUTING.md) and [DEVELOPMENT_STANDARDS.md](DEVELOPMENT_STANDARDS.md).
+
+**Mandatory requirement:** All code must be comprehensively documented:
+- Module-level doc comments explaining purpose
+- Every public function documented with logical flow, parameters, errors, and examples
+- Every public type documented with field/variant descriptions
+- Clear, concise documentation explaining *why* and *what*
+
+Documentation is **not optional**. Pull requests without proper documentation will be rejected.
+
+See:
+- [CONTRIBUTING.md](CONTRIBUTING.md) – Code standards and documentation guidelines
+- [DEVELOPMENT_STANDARDS.md](DEVELOPMENT_STANDARDS.md) – Quick reference for standards
+- [copilot-instructions.md](copilot-instructions.md) – AI-assisted development guidelines
 
 ## License
 

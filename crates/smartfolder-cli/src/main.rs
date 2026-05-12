@@ -1,3 +1,32 @@
+//! Command-line interface for smartfolder.
+//!
+//! Provides a user-friendly interface to the smartfolder core library.
+//! The CLI supports five main commands: analyze, preview, apply, undo, and transactions.
+//!
+//! # Commands
+//!
+//! - **analyze**: Scan a directory and generate an organization plan
+//! - **preview**: View a previously saved plan
+//! - **apply**: Execute a plan and organize files
+//! - **undo**: Reverse the effects of a transaction
+//! - **transactions**: List, inspect, and cleanup transaction journals
+//!
+//! # Workflow
+//!
+//! ```ignore
+//! # Analyze and save a plan
+//! smartfolder analyze ~/Downloads --output plan.json --mode type
+//!
+//! # Review the plan
+//! smartfolder preview plan.json
+//!
+//! # Execute the plan
+//! smartfolder apply plan.json
+//!
+//! # Later, undo if needed
+//! smartfolder undo txn_20240512123456
+//! ```
+
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 use std::env;
@@ -19,6 +48,7 @@ use thiserror::Error;
 
 type Result<T> = std::result::Result<T, CliError>;
 
+/// CLI entry point. Handles argument parsing and error display.
 fn main() -> ExitCode {
     let json_errors = env::args().any(|arg| arg == "--json");
     match run() {
@@ -30,6 +60,10 @@ fn main() -> ExitCode {
     }
 }
 
+/// Parse arguments and dispatch to appropriate command handler.
+///
+/// Matches first argument (--version, --help, analyze, preview, apply, undo, transactions)
+/// and calls the corresponding command function.
 fn run() -> Result<()> {
     let mut args = env::args().collect::<Vec<_>>();
     let program = args
@@ -58,6 +92,15 @@ fn run() -> Result<()> {
     }
 }
 
+/// Scan a directory and generate an organization plan.
+///
+/// # Logical Flow
+///
+/// 1. Parse command-line arguments
+/// 2. Scan the directory with specified options
+/// 3. Generate a plan using built-in mode or rule profile
+/// 4. Optionally save plan to file
+/// 5. Display preview to user
 fn run_analyze(args: &[String]) -> Result<()> {
     let command = AnalyzeCommand::parse(args)?;
     let scan_options = command.scan_options;
@@ -99,6 +142,7 @@ fn run_analyze(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Display a previously saved plan.
 fn run_preview(args: &[String]) -> Result<()> {
     let command = PreviewCommand::parse(args)?;
     let plan: PlanRecord = serde_json::from_str(&fs::read_to_string(&command.plan_path)?)?;
@@ -112,6 +156,16 @@ fn run_preview(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Execute a plan and organize files.
+///
+/// # Logical Flow
+///
+/// 1. Load plan from file
+/// 2. Warn if root is in cloud-synced folder
+/// 3. Display preview and request confirmation (unless --yes)
+/// 4. Set up Ctrl+C handler for graceful cancellation
+/// 5. Execute plan with transaction journaling
+/// 6. Display results and journal path
 fn run_apply(args: &[String]) -> Result<()> {
     let command = ApplyCommand::parse(args)?;
     let plan: PlanRecord = serde_json::from_str(&fs::read_to_string(&command.plan_path)?)?;
@@ -164,6 +218,7 @@ fn run_apply(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Undo operations from a completed transaction.
 fn run_undo(args: &[String]) -> Result<()> {
     let command = UndoCommand::parse(args)?;
     let journal = inspect_transaction(&command.transaction_id)?;
@@ -184,6 +239,7 @@ fn run_undo(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// List, inspect, or cleanup transactions.
 fn run_transactions(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("list") => {
@@ -233,6 +289,7 @@ fn run_transactions(args: &[String]) -> Result<()> {
     }
 }
 
+/// Arguments for the 'analyze' command: scan and plan generation.
 #[derive(Debug)]
 struct AnalyzeCommand {
     root: PathBuf,
@@ -245,6 +302,7 @@ struct AnalyzeCommand {
 }
 
 impl AnalyzeCommand {
+    /// Parse analyze command arguments from CLI.
     fn parse(args: &[String]) -> Result<Self> {
         let root = args
             .first()
@@ -308,6 +366,7 @@ impl AnalyzeCommand {
     }
 }
 
+/// Arguments for the 'preview' command: display a saved plan.
 #[derive(Debug)]
 struct PreviewCommand {
     plan_path: PathBuf,
@@ -315,6 +374,7 @@ struct PreviewCommand {
 }
 
 impl PreviewCommand {
+    /// Parse preview command arguments from CLI.
     fn parse(args: &[String]) -> Result<Self> {
         let plan_path = args
             .first()
@@ -339,6 +399,7 @@ impl PreviewCommand {
     }
 }
 
+/// Arguments for the 'apply' command: execute a plan.
 #[derive(Debug)]
 struct ApplyCommand {
     plan_path: PathBuf,
@@ -348,6 +409,7 @@ struct ApplyCommand {
 }
 
 impl ApplyCommand {
+    /// Parse apply command arguments from CLI.
     fn parse(args: &[String]) -> Result<Self> {
         let plan_path = args
             .first()
@@ -383,6 +445,7 @@ impl ApplyCommand {
     }
 }
 
+/// Arguments for the 'undo' command: rollback a transaction.
 #[derive(Debug)]
 struct UndoCommand {
     transaction_id: String,
@@ -390,6 +453,7 @@ struct UndoCommand {
 }
 
 impl UndoCommand {
+    /// Parse undo command arguments from CLI.
     fn parse(args: &[String]) -> Result<Self> {
         let transaction_id = args
             .first()
@@ -417,12 +481,14 @@ impl UndoCommand {
     }
 }
 
+/// Get a required option value or error if not provided.
 fn value_arg<'a>(args: &'a [String], index: usize, option: &'static str) -> Result<&'a str> {
     args.get(index)
         .map(String::as_str)
         .ok_or(CliError::MissingOptionValue { option })
 }
 
+/// Parse an organization mode from a string.
 fn parse_mode(value: &str) -> Result<BuiltInMode> {
     match value {
         "type" => Ok(BuiltInMode::Type),
@@ -435,6 +501,7 @@ fn parse_mode(value: &str) -> Result<BuiltInMode> {
     }
 }
 
+/// Parse an unsigned integer from a string with error context.
 fn parse_usize(value: &str, option: &'static str) -> Result<usize> {
     value.parse().map_err(|_| CliError::InvalidNumber {
         option,
@@ -442,6 +509,7 @@ fn parse_usize(value: &str, option: &'static str) -> Result<usize> {
     })
 }
 
+/// Ask user for confirmation, requiring explicit 'yes' response.
 fn confirm_or_decline(message: &str) -> Result<()> {
     print!("{message} Type 'yes' to continue: ");
     io::stdout().flush()?;
@@ -456,6 +524,8 @@ fn confirm_or_decline(message: &str) -> Result<()> {
     }
 }
 
+/// Check if path is in a cloud-synced folder (`OneDrive`, `Dropbox`, etc.).
+/// Such folders should prompt for confirmation before organizing.
 fn is_cloud_synced_path(path: &std::path::Path) -> bool {
     path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
@@ -472,6 +542,7 @@ fn is_cloud_synced_path(path: &std::path::Path) -> bool {
     })
 }
 
+/// Display a summary of a transaction for user confirmation.
 fn print_journal_summary(journal: &TransactionJournal) {
     println!("Transaction: {}", journal.transaction_id);
     println!("Status: {:?}", journal.status);
@@ -479,6 +550,7 @@ fn print_journal_summary(journal: &TransactionJournal) {
     println!("Operations: {}", journal.operations.len());
 }
 
+/// Print an error, optionally as JSON.
 fn print_error(error: &CliError, json: bool) {
     if json {
         eprintln!(
@@ -544,6 +616,11 @@ TRANSACTION SUBCOMMANDS:
     );
 }
 
+/// CLI error types with associated metadata for error reporting.
+///
+/// Maps to specific exit codes:
+/// - 1: IO, core library, JSON serialization, or signal handler errors
+/// - 2: User input errors (unknown command, missing args, invalid values)
 #[derive(Debug, Error)]
 enum CliError {
     #[error("unknown command '{command}'. Use --help to see available commands")]
@@ -588,6 +665,7 @@ enum CliError {
 }
 
 impl CliError {
+    /// Get the exit code for this error.
     const fn exit_code(&self) -> u8 {
         match self {
             Self::UnknownCommand { .. }
@@ -600,5 +678,199 @@ impl CliError {
             | Self::CloudFolderRequiresConfirmation { .. } => 2,
             Self::Io(_) | Self::Core(_) | Self::Json(_) | Self::SignalHandler(_) => 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn analyze_parser_supports_all_mvp_flags() {
+        let command = AnalyzeCommand::parse(&strings(&[
+            r"D:\Root",
+            "--output",
+            "plan.json",
+            "--profile",
+            "rules.toml",
+            "--mode",
+            "type-year-month-day",
+            "--max-depth",
+            "2",
+            "--current-folder-only",
+            "--include-hidden",
+            "--include-system",
+            "--include-project-folders",
+            "--exclude",
+            "node_modules",
+            "--exclude",
+            "skipme",
+            "--json",
+            "--quiet",
+        ]))
+        .expect("all options should parse");
+
+        assert_eq!(command.root, PathBuf::from(r"D:\Root"));
+        assert_eq!(command.output, Some(PathBuf::from("plan.json")));
+        assert_eq!(command.profile, Some(PathBuf::from("rules.toml")));
+        assert_eq!(command.mode, BuiltInMode::TypeYear);
+        assert_eq!(command.scan_options.max_depth, Some(2));
+        assert!(command.scan_options.current_folder_only);
+        assert!(command.scan_options.include_hidden);
+        assert!(command.scan_options.include_system);
+        assert!(command.scan_options.include_project_folders);
+        assert_eq!(
+            command.scan_options.exclude_names,
+            vec!["node_modules".to_string(), "skipme".to_string()]
+        );
+        assert!(command.json);
+        assert!(command.quiet);
+    }
+
+    #[test]
+    fn analyze_parser_rejects_missing_values_and_invalid_numbers() {
+        let missing_output = AnalyzeCommand::parse(&strings(&[r"D:\Root", "--output"]))
+            .expect_err("missing output path should fail");
+        assert!(matches!(
+            missing_output,
+            CliError::MissingOptionValue { option: "--output" }
+        ));
+
+        let missing_profile = AnalyzeCommand::parse(&strings(&[r"D:\Root", "--profile"]))
+            .expect_err("missing profile path should fail");
+        assert!(matches!(
+            missing_profile,
+            CliError::MissingOptionValue {
+                option: "--profile"
+            }
+        ));
+
+        let invalid_number = AnalyzeCommand::parse(&strings(&[r"D:\Root", "--max-depth", "nope"]))
+            .expect_err("invalid max depth should fail");
+        assert!(matches!(
+            invalid_number,
+            CliError::InvalidNumber {
+                option: "--max-depth",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn preview_apply_and_undo_parsers_support_mvp_options() {
+        let preview =
+            PreviewCommand::parse(&strings(&["plan.json", "--json"])).expect("preview parses");
+        assert_eq!(preview.plan_path, PathBuf::from("plan.json"));
+        assert!(preview.json);
+
+        let apply = ApplyCommand::parse(&strings(&[
+            "plan.json",
+            "--yes",
+            "--confirm-cloud-folder",
+            "--journal-export",
+            "journal.json",
+        ]))
+        .expect("apply parses");
+        assert_eq!(apply.plan_path, PathBuf::from("plan.json"));
+        assert!(apply.yes);
+        assert!(apply.confirm_cloud_folder);
+        assert_eq!(apply.journal_export, Some(PathBuf::from("journal.json")));
+
+        let undo = UndoCommand::parse(&strings(&["txn_123", "--yes"])).expect("undo parses");
+        assert_eq!(undo.transaction_id, "txn_123");
+        assert!(undo.yes);
+    }
+
+    #[test]
+    fn parse_mode_supports_aliases_and_rejects_unknown_values() {
+        assert_eq!(parse_mode("type").expect("type mode"), BuiltInMode::Type);
+        assert_eq!(parse_mode("date").expect("date mode"), BuiltInMode::Date);
+        assert_eq!(
+            parse_mode("extension").expect("extension mode"),
+            BuiltInMode::Extension
+        );
+        assert_eq!(
+            parse_mode("type-year").expect("type-year mode"),
+            BuiltInMode::TypeYear
+        );
+        assert_eq!(
+            parse_mode("type-date").expect("type-date alias"),
+            BuiltInMode::TypeYear
+        );
+        assert_eq!(
+            parse_mode("type-year-month-day").expect("type-year-month-day alias"),
+            BuiltInMode::TypeYear
+        );
+
+        let error = parse_mode("invalid").expect_err("invalid mode should fail");
+        assert!(matches!(error, CliError::InvalidMode { .. }));
+    }
+
+    #[test]
+    fn cloud_sync_detection_matches_supported_provider_names() {
+        assert!(is_cloud_synced_path(Path::new(
+            r"C:\Users\User\OneDrive\Documents"
+        )));
+        assert!(is_cloud_synced_path(Path::new(
+            r"C:\Users\User\OneDrive - Personal\Documents"
+        )));
+        assert!(is_cloud_synced_path(Path::new(
+            r"C:\Users\User\Google Drive\Documents"
+        )));
+        assert!(is_cloud_synced_path(Path::new(
+            r"C:\Users\User\Dropbox\Documents"
+        )));
+        assert!(!is_cloud_synced_path(Path::new(r"C:\Users\User\Documents")));
+    }
+
+    #[test]
+    fn transaction_subcommands_validate_arguments() {
+        let missing = run_transactions(&[]).expect_err("missing subcommand should be rejected");
+        assert!(matches!(
+            missing,
+            CliError::MissingArgument {
+                name: "transactions subcommand"
+            }
+        ));
+
+        let unknown_cleanup = run_transactions(&strings(&["cleanup", "--bogus"]))
+            .expect_err("cleanup should reject unknown options");
+        assert!(matches!(unknown_cleanup, CliError::UnknownOption { .. }));
+
+        let unknown_subcommand = run_transactions(&strings(&["bogus"]))
+            .expect_err("unknown transaction subcommand should fail");
+        assert!(matches!(
+            unknown_subcommand,
+            CliError::UnknownCommand { .. }
+        ));
+    }
+
+    #[test]
+    fn cli_error_exit_codes_match_documented_contract() {
+        assert_eq!(
+            CliError::UnknownCommand {
+                command: "bogus".to_string()
+            }
+            .exit_code(),
+            2
+        );
+        assert_eq!(CliError::ConfirmationDeclined.exit_code(), 2);
+        assert_eq!(
+            CliError::CloudFolderRequiresConfirmation {
+                root: PathBuf::from(r"D:\OneDrive")
+            }
+            .exit_code(),
+            2
+        );
+        assert_eq!(
+            CliError::Io(std::io::Error::other("io failure")).exit_code(),
+            1
+        );
     }
 }

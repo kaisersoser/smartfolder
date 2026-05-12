@@ -1,3 +1,29 @@
+//! Directory scanning with file metadata collection.
+//!
+//! This module recursively traverses a directory tree, collecting metadata about files
+//! (names, sizes, timestamps, types) without reading file contents. It supports:
+//! - Filtering by depth, hidden files, system files, and project folders
+//! - Cancellable scans via `CancellationToken`
+//! - Detailed warnings for unreadable or skipped entries
+//!
+//! # Workflow
+//!
+//! 1. Create a [`ScanOptions`] to configure filtering (depth, exclusions, etc.)
+//! 2. Call [`scan_folder`] or [`scan_folder_with_cancellation`] to traverse the tree
+//! 3. Inspect the returned [`ScanResult`] which contains records and warnings
+//!
+//! # Example
+//!
+//! ```ignore
+//! let options = ScanOptions {
+//!     max_depth: Some(3),
+//!     include_hidden: false,
+//!     ..Default::default()
+//! };
+//! let result = scan_folder("./Downloads", &options)?;
+//! println!("Scanned {} files", result.records.len());
+//! ```
+
 use std::ffi::OsStr;
 use std::fs::{self, DirEntry, Metadata};
 use std::path::{Path, PathBuf};
@@ -18,6 +44,14 @@ const HIDDEN_ATTRIBUTE: u32 = 0x2;
 #[cfg(windows)]
 const SYSTEM_ATTRIBUTE: u32 = 0x4;
 
+/// Configuration options for directory scanning.
+///
+/// - `include_hidden`: Include dotfiles (`.gitignore`, etc.)
+/// - `include_system`: Include system-marked files (Windows-specific)
+/// - `include_project_folders`: Include folders like `.git`, `node_modules`, `target`
+/// - `max_depth`: Limit recursion depth (None = unlimited)
+/// - `current_folder_only`: Don't recurse into subdirectories
+/// - `exclude_names`: Additional exact names to skip (case-insensitive)
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
@@ -29,21 +63,31 @@ pub struct ScanOptions {
     pub exclude_names: Vec<String>,
 }
 
+/// Token for cancelling an in-progress scan.
+///
+/// Clone and share with scan tasks to signal cancellation.
+/// The scan will check this flag periodically and return early if cancelled.
 #[derive(Debug, Default, Clone)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
 }
 
 impl CancellationToken {
+    /// Signal that the scan should stop.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Check if cancellation was requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 }
 
+/// Result of scanning a directory tree.
+///
+/// Contains all collected file records, warnings, and summary statistics.
+/// The `cancelled` flag indicates if the scan was interrupted by cancellation.
 #[derive(Debug, Clone, Default)]
 pub struct ScanResult {
     pub root: PathBuf,
@@ -53,6 +97,7 @@ pub struct ScanResult {
     pub cancelled: bool,
 }
 
+/// Summary statistics from a scan operation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanSummary {
     pub entries_seen: usize,
@@ -62,10 +107,32 @@ pub struct ScanSummary {
     pub warnings: usize,
 }
 
+/// Scan a directory tree with default cancellation token (non-cancellable).
+///
+/// # Errors
+///
+/// Returns error if the root path is invalid or not a directory.
 pub fn scan_folder(root: impl AsRef<Path>, options: &ScanOptions) -> Result<ScanResult> {
     scan_folder_with_cancellation(root, options, &CancellationToken::default())
 }
 
+/// Scan a directory tree with optional cancellation support.
+///
+/// Call `cancellation.cancel()` from another task to stop the scan gracefully.
+/// The scan will complete current entry before checking for cancellation.
+///
+/// # Logical Flow
+///
+/// 1. Validate that root is a directory
+/// 2. Create Scanner state with provided options
+/// 3. Recursively scan from root (depth 0)
+/// 4. For each entry: classify, create record, recurse into subdirectories if not symlink
+/// 5. Check cancellation flag before each directory
+/// 6. Return partial result if cancelled
+///
+/// # Errors
+///
+/// Returns error if the root path is invalid or not a directory.
 pub fn scan_folder_with_cancellation(
     root: impl AsRef<Path>,
     options: &ScanOptions,
@@ -232,6 +299,10 @@ impl Scanner<'_> {
     }
 }
 
+/// Create a file inventory record from file system metadata.
+///
+/// Determines file type by extension, entry kind, and other attributes.
+/// Converts absolute path to root-relative for portability.
 fn record_from_metadata(
     root: &Path,
     path: &Path,
@@ -262,6 +333,7 @@ fn record_from_metadata(
     }
 }
 
+/// Determine the file entry kind (file, directory, symlink, etc.) from metadata.
 fn entry_kind(metadata: &Metadata) -> FileEntryKind {
     let file_type = metadata.file_type();
 
@@ -276,6 +348,10 @@ fn entry_kind(metadata: &Metadata) -> FileEntryKind {
     }
 }
 
+/// Classify a file into a `FileTypeBucket` based on extension and entry kind.
+///
+/// Maps common extensions to categories (Document, Image, Video, etc.).
+/// Falls back to `Other` for unknown extensions.
 fn detect_type(path: &Path, entry_kind: FileEntryKind) -> FileTypeBucket {
     if entry_kind == FileEntryKind::Directory {
         return FileTypeBucket::Directory;
@@ -307,6 +383,9 @@ fn detect_type(path: &Path, entry_kind: FileEntryKind) -> FileTypeBucket {
     }
 }
 
+/// Check if a name matches known project/build folders to skip by default.
+///
+/// Includes: `.git`, `node_modules`, `target`, `build`, `dist`, `venv`, `vendor`, etc.
 fn is_default_excluded_name(name: &str) -> bool {
     matches!(
         name,
@@ -327,6 +406,7 @@ fn is_default_excluded_name(name: &str) -> bool {
     )
 }
 
+/// Check if a file name is hidden (starts with dot).
 fn is_hidden_name(name: &str) -> bool {
     name.starts_with('.') && name != "." && name != ".."
 }

@@ -1,6 +1,6 @@
 [package]
-name = "smartfolder-cli"
-description = "Command-line interface for smartfolder."
+name = "smartfolder-gui"
+description = "Windows-first desktop GUI for smartfolder."
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,20 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
-[[bin]]
-name = "smartfolder"
-path = "src/main.rs"
-
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-ctrlc = "3"
-serde_json = "1"
+eframe = "0.28"
+rfd = "0.15"
 smartfolder-core = { path = "../smartfolder-core" }
-thiserror = "2"
-
-[dev-dependencies]
-assert_cmd = "2"
-tempfile = "3"
 
 [lints]
 workspace = true

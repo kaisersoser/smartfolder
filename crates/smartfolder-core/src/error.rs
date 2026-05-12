@@ -1,9 +1,20 @@
+//! Error types used throughout the smartfolder crate.
+//!
+//! Provides a unified error type (`SmartfolderError`) with variants for
+//! different failure modes: IO errors, invalid configurations, path escapes, etc.
+//!
+//! Uses the `thiserror` crate for ergonomic error handling.
+
 use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// Result type alias using `SmartfolderError` as the error type.
 pub type Result<T> = std::result::Result<T, SmartfolderError>;
 
+/// All errors that can occur in smartfolder operations.
+///
+/// Each variant captures relevant context (paths, messages) to help diagnose issues.
 #[derive(Debug, Error)]
 pub enum SmartfolderError {
     #[error("failed to resolve app-local data directory")]

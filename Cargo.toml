@@ -2,6 +2,7 @@
 members = [
     "crates/smartfolder-core",
     "crates/smartfolder-cli",
+    "crates/smartfolder-gui",
 ]
 resolver = "2"
 

@@ -1,7 +1,30 @@
+//! Path validation and normalization for safe file operations.
+//!
+//! Ensures that destination paths:
+//! - Don't escape the root directory (prevents ~/../../etc/passwd attacks)
+//! - Don't contain Windows drive prefixes (e.g., `C:`, `\\server\share`)
+//! - Are absolute paths starting from the intended root
+//!
+//! Normalizes paths by:
+//! - Removing `.` (current dir) references
+//! - Rejecting `..` (parent dir) references
+//! - Rejecting absolute paths unless they stay within root
+//! - Preserving directory separators appropriate to the platform
+
 use std::path::{Component, Path, PathBuf};
 
 use crate::{Result, SmartfolderError};
 
+/// Compute a safe destination path relative to root.
+///
+/// Accepts either absolute paths (must stay within root) or relative paths (no `..`).
+/// Returns the absolute path ready for file operations.
+///
+/// # Errors
+///
+/// - `EmptyDestination`: Destination is empty
+/// - `DestinationHasPrefix`: Contains Windows drive letter or UNC prefix
+/// - `DestinationEscapesRoot`: Uses `..` or tries to go outside root
 pub fn safe_destination_path(
     root: impl AsRef<Path>,
     destination: impl AsRef<Path>,

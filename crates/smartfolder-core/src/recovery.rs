@@ -1,3 +1,28 @@
+//! Transaction inspection, undo, and cleanup.
+//!
+//! Provides utilities to:
+//! - List all transactions that have been executed
+//! - Inspect a specific transaction's journal and operations
+//! - Undo (rollback) completed operations in reverse order
+//! - Clean up completed transaction journals
+//!
+//! # Workflow
+//!
+//! ```ignore
+//! // View all transactions
+//! let transactions = list_transactions()?;
+//!
+//! // Inspect one
+//! let journal = inspect_transaction("txn_20240512123456")?;
+//!
+//! // Undo it
+//! let summary = undo_transaction("txn_20240512123456")?;
+//! println!("Rolled back {} operations", summary.rolled_back);
+//!
+//! // Clean up
+//! let cleanup = cleanup_transactions(include_incomplete)?;
+//! ```
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +36,7 @@ use crate::model::{
 use crate::storage::{journal_path, journals_dir};
 use crate::{Result, SmartfolderError};
 
+/// Summary of an undo operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoSummary {
     pub transaction_id: String,
@@ -20,6 +46,7 @@ pub struct UndoSummary {
     pub failed: usize,
 }
 
+/// Metadata about a transaction for listing and inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionSummary {
     pub transaction_id: String,
@@ -31,12 +58,30 @@ pub struct TransactionSummary {
     pub path: PathBuf,
 }
 
+/// Summary of a cleanup operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupSummary {
     pub removed: Vec<PathBuf>,
     pub kept: Vec<PathBuf>,
 }
 
+/// Undo (rollback) all completed operations in a transaction.
+///
+/// # Logical Flow
+///
+/// 1. Load journal from transaction ID
+/// 2. Iterate operations in reverse order
+/// 3. For each completed operation:
+///    - Attempt to move file back to original location
+///    - Mark as rolled back if successful, failed otherwise
+///    - Persist journal after each operation
+/// 4. Update transaction status (`RolledBack`, `PartiallyRolledBack`, or `Failed`)
+/// 5. Set completion timestamp
+/// 6. Return summary with counts
+///
+/// # Errors
+///
+/// Returns error if transaction ID is invalid or journal cannot be read.
 pub fn undo_transaction(transaction_id: &str) -> Result<UndoSummary> {
     let journal_path = journal_path(transaction_id)?;
     let mut journal = load_journal_from_path(&journal_path)?;
@@ -95,6 +140,7 @@ pub fn undo_transaction(transaction_id: &str) -> Result<UndoSummary> {
     })
 }
 
+/// Load and inspect a transaction journal.
 pub fn inspect_transaction(transaction_id: &str) -> Result<TransactionJournal> {
     load_journal_from_path(&journal_path(transaction_id)?)
 }

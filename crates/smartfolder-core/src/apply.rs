@@ -1,3 +1,24 @@
+//! Safe execution of file organization plans with transaction journaling.
+//!
+//! This module applies a plan to the file system while maintaining a transaction journal.
+//! The journal enables rollback if needed and provides a detailed audit trail of what was done.
+//!
+//! # Key features
+//!
+//! - **Transaction journaling**: Every operation is recorded before and after execution
+//! - **Cancellation support**: Can be interrupted gracefully via cancellation token
+//! - **Conflict handling**: Respects "selected" flag on operations (skips conflicts)
+//! - **File change detection**: Verifies files haven't changed since plan was created
+//! - **Same-volume detection**: Optimizes moves on same partition
+//!
+//! # Workflow
+//!
+//! 1. Create [`ApplyOptions`] with transaction ID
+//! 2. Set up cancellation handling if desired
+//! 3. Call [`apply_plan`] with plan and options
+//! 4. Review [`ApplySummary`] for results
+//! 5. Later: inspect with [`inspect_transaction`] or undo with [`undo_transaction`]
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
@@ -14,6 +35,12 @@ use crate::model::{
 use crate::storage::journal_path;
 use crate::{Result, SmartfolderError};
 
+/// Configuration options for applying a plan.
+///
+/// - `transaction_id`: Unique identifier for this execution (used for journal filename)
+/// - `started_at`: Timestamp when execution began
+/// - `journal_export`: Optional path to copy journal to (in addition to app data directory)
+/// - `cancellation`: Token to signal graceful cancellation
 #[derive(Debug, Clone)]
 pub struct ApplyOptions {
     pub transaction_id: String,
@@ -23,6 +50,7 @@ pub struct ApplyOptions {
 }
 
 impl ApplyOptions {
+    /// Create apply options with transaction ID and timestamp.
     pub fn new(transaction_id: impl Into<String>, started_at: DateTime<Utc>) -> Self {
         Self {
             transaction_id: transaction_id.into(),
@@ -33,21 +61,27 @@ impl ApplyOptions {
     }
 }
 
+/// Token for cancelling an in-progress plan application.
+///
+/// Clone and share with execution task. Checked before each operation.
 #[derive(Debug, Default, Clone)]
 pub struct ApplyCancellationToken {
     cancelled: Arc<AtomicBool>,
 }
 
 impl ApplyCancellationToken {
+    /// Signal that execution should stop.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Check if cancellation was requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 }
 
+/// Summary of a plan execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplySummary {
     pub transaction_id: String,
@@ -57,6 +91,25 @@ pub struct ApplySummary {
     pub failed: usize,
 }
 
+/// Apply a plan to the file system, creating a transaction journal.
+///
+/// # Logical Flow
+///
+/// 1. Verify plan has selected operations
+/// 2. Create and persist transaction journal
+/// 3. For each operation:
+///    - Check for cancellation
+///    - Skip if not selected (has conflict)
+///    - Verify source file hasn't changed since plan was created
+///    - Perform the move operation
+///    - Record result (success, error, rollback status)
+///    - Persist journal after each operation
+/// 4. Mark transaction complete or interrupted
+/// 5. Return summary
+///
+/// # Errors
+///
+/// Returns error if plan has no selected operations or if IO operations fail.
 pub fn apply_plan(plan: &PlanRecord, options: &ApplyOptions) -> Result<ApplySummary> {
     if plan.operations.is_empty() {
         return Err(SmartfolderError::NoSelectedOperations);

@@ -48,6 +48,20 @@ pub fn profiles_dir() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("profiles"))
 }
 
+/// Get the directory containing user-facing app configuration.
+pub fn config_dir() -> Result<PathBuf> {
+    Ok(app_data_dir()?.join("config"))
+}
+
+/// Get the path to the GUI preference file.
+///
+/// The GUI stores user preferences separately from working-session data so
+/// cleanup operations can remove cached previews without losing appearance or
+/// wizard settings.
+pub fn gui_preferences_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("gui-preferences.json"))
+}
+
 /// Get the path to the SQLite working-session database.
 ///
 /// The database stores large scan and plan working sets so GUI workflows can
@@ -67,6 +81,14 @@ pub fn ensure_journals_dir() -> Result<PathBuf> {
 /// Ensure rule profile directory exists, creating it if necessary.
 pub fn ensure_profiles_dir() -> Result<PathBuf> {
     let directory = profiles_dir()?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|source| SmartfolderError::io(&directory, source))?;
+    Ok(directory)
+}
+
+/// Ensure GUI configuration directory exists, creating it if necessary.
+pub fn ensure_config_dir() -> Result<PathBuf> {
+    let directory = config_dir()?;
     std::fs::create_dir_all(&directory)
         .map_err(|source| SmartfolderError::io(&directory, source))?;
     Ok(directory)
@@ -98,7 +120,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::storage::{
-        app_data_dir, journal_path, journals_dir, plans_dir, profiles_dir, session_db_path,
+        app_data_dir, config_dir, gui_preferences_path, journal_path, journals_dir, plans_dir,
+        profiles_dir, session_db_path,
     };
 
     #[test]
@@ -116,6 +139,12 @@ mod tests {
             .starts_with(&app_data));
         assert!(session_db_path()
             .expect("session db path should resolve")
+            .starts_with(&app_data));
+        assert!(config_dir()
+            .expect("config dir should resolve")
+            .starts_with(&app_data));
+        assert!(gui_preferences_path()
+            .expect("GUI preferences path should resolve")
             .starts_with(&app_data));
     }
 

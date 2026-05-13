@@ -3322,6 +3322,8 @@ dependencies = [
  "chrono",
  "eframe",
  "rfd",
+ "serde",
+ "serde_json",
  "smartfolder-core",
 ]
 

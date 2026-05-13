@@ -13,6 +13,7 @@
 //! 4. Stream plan operations into the store.
 //! 5. Query summaries or pages of operations for GUI display.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -516,6 +517,34 @@ impl SqliteSessionStore {
         Ok(operations)
     }
 
+    /// Load representative ready operations for a simplified GUI preview.
+    ///
+    /// The returned rows favor diverse file extensions and destination folders
+    /// before falling back to insertion order. This gives the GUI a small,
+    /// metadata-only example set without materializing the full preview table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite query or JSON decoding fails.
+    pub fn representative_plan_examples(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<PlanOperation>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let candidate_limit = (limit * 64).clamp(32, 512);
+        let candidates = self.plan_operations_page_filtered(
+            session_id,
+            PlanOperationFilter::Ready,
+            0,
+            candidate_limit,
+        )?;
+        Ok(select_representative_operations(candidates, limit))
+    }
+
     /// Load user-facing warning messages for a session.
     ///
     /// # Errors
@@ -694,6 +723,51 @@ impl ScanRecordSink for SessionScanSink<'_> {
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn select_representative_operations(
+    candidates: Vec<PlanOperation>,
+    limit: usize,
+) -> Vec<PlanOperation> {
+    let mut examples = Vec::new();
+    let mut seen_keys = BTreeSet::new();
+    let mut remaining = Vec::new();
+
+    for operation in candidates {
+        let key = representative_operation_key(&operation);
+        if examples.len() < limit && seen_keys.insert(key) {
+            examples.push(operation);
+        } else {
+            remaining.push(operation);
+        }
+    }
+
+    for operation in remaining {
+        if examples.len() >= limit {
+            break;
+        }
+        examples.push(operation);
+    }
+
+    examples
+}
+
+fn representative_operation_key(operation: &PlanOperation) -> String {
+    let extension = operation
+        .source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map_or_else(
+            || "no-extension".to_string(),
+            |value| value.to_ascii_lowercase(),
+        );
+    let destination_group = operation
+        .destination
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .map_or_else(String::new, ToString::to_string);
+    format!("{extension}:{destination_group}")
 }
 
 #[cfg(test)]
@@ -893,5 +967,61 @@ mod tests {
             )
             .expect("attention page loads");
         assert_eq!(attention_page, vec![conflict_operation]);
+    }
+
+    #[test]
+    fn representative_examples_prefer_diverse_ready_operations() {
+        let fixture = TempDir::new().expect("temp dir");
+        let mut store = SqliteSessionStore::in_memory().expect("store opens");
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        store
+            .create_session_with_id(
+                "session_examples",
+                fixture.path(),
+                &PlanMode::BuiltIn(BuiltInMode::Type),
+                created_at,
+            )
+            .expect("session creates");
+
+        for (index, (name, destination)) in [
+            ("report.pdf", "Documents"),
+            ("notes.pdf", "Documents"),
+            ("photo.jpg", "Images"),
+            ("clip.mp4", "Videos"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let operation = PlanOperation {
+                operation_id: format!("op_{index:06}"),
+                operation_type: OperationType::Move,
+                source: fixture.path().join(name),
+                destination: fixture.path().join(destination).join(name),
+                reason: "Built-in rule: Type".to_string(),
+                certainty: Certainty::High,
+                conflict: ConflictState::None,
+                selected: true,
+                source_snapshot: SourceSnapshot {
+                    size_bytes: 10,
+                    modified_at: None,
+                },
+            };
+            store
+                .insert_plan_operation(
+                    "session_examples",
+                    &operation,
+                    &format!("{destination}/{name}"),
+                )
+                .expect("operation inserts");
+        }
+
+        let examples = store
+            .representative_plan_examples("session_examples", 3)
+            .expect("examples load");
+
+        assert_eq!(examples.len(), 3);
+        assert_eq!(examples[0].source, fixture.path().join("report.pdf"));
+        assert_eq!(examples[1].source, fixture.path().join("photo.jpg"));
+        assert_eq!(examples[2].source, fixture.path().join("clip.mp4"));
     }
 }

@@ -11,6 +11,9 @@
 //! - Paged preview and transaction history backed by the on-disk session store
 #![allow(clippy::module_name_repetitions)]
 
+mod preferences;
+mod ui;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,16 +43,19 @@ use smartfolder_core::scanner::{
 use smartfolder_core::session_store::{PlanOperationFilter, SessionScanSink, SqliteSessionStore};
 use smartfolder_core::storage::ensure_profiles_dir;
 
+use preferences::{GuiPreferences, MotionPreference, StylePreference, ThemePreference};
+
 type AnalysisMessage = std::result::Result<AnalysisOutput, String>;
 type ApplyMessage = std::result::Result<ApplyOutput, String>;
 type UndoMessage = std::result::Result<UndoOutput, String>;
 
 const PREVIEW_PAGE_SIZE: usize = 100;
 const TRANSACTION_DETAIL_ROW_LIMIT: usize = 100;
-const WINDOW_WIDTH: f32 = 860.0;
-const WINDOW_HEIGHT: f32 = 720.0;
-const SHELL_NAV_WIDTH: f32 = 196.0;
+const WINDOW_WIDTH: f32 = 1160.0;
+const WINDOW_HEIGHT: f32 = 780.0;
+const SHELL_NAV_WIDTH: f32 = ui::theme::spacing::SIDEBAR_WIDTH;
 const CARD_MIN_WIDTH: f32 = 220.0;
+const PREVIEW_EXAMPLE_LIMIT: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppSection {
@@ -95,7 +101,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
-            .with_min_inner_size([720.0, 560.0]),
+            .with_min_inner_size([1024.0, 720.0]),
         ..eframe::NativeOptions::default()
     };
     let preloaded_root = preloaded_root_from_args(std::env::args());
@@ -109,6 +115,7 @@ fn main() -> eframe::Result<()> {
 
 #[derive(Debug)]
 struct SmartfolderApp {
+    preferences: GuiPreferences,
     active_section: AppSection,
     root_input: String,
     launched_with_preselected_root: bool,
@@ -142,19 +149,28 @@ struct SmartfolderApp {
 
 impl SmartfolderApp {
     fn new(preloaded_root: Option<PathBuf>) -> Self {
+        let (preferences, preferences_message) = match GuiPreferences::load() {
+            Ok(preferences) => (preferences, None),
+            Err(message) => (GuiPreferences::default(), Some(message)),
+        };
         let launched_with_preselected_root = preloaded_root.is_some();
         let (transaction_rows, transaction_message) = match load_transaction_rows() {
             Ok(rows) => (rows, None),
             Err(message) => (Vec::new(), Some(message)),
         };
+        let initial_mode = preferences
+            .last_style
+            .built_in_mode()
+            .unwrap_or(BuiltInMode::TypeYear);
 
         Self {
+            preferences,
             active_section: AppSection::Organize,
             root_input: preloaded_root
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             launched_with_preselected_root,
-            mode: BuiltInMode::TypeYear,
+            mode: initial_mode,
             planning_source: PlanningSource::BuiltIn,
             loaded_profile: None,
             profile_editor: ProfileEditorState::default(),
@@ -179,7 +195,7 @@ impl SmartfolderApp {
             show_recovery_log: false,
             show_undo_confirmation: None,
             error_message: None,
-            maintenance_message: None,
+            maintenance_message: preferences_message,
         }
     }
 
@@ -209,8 +225,81 @@ impl SmartfolderApp {
 
     fn browse_for_root(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            self.root_input = path.display().to_string();
-            self.launched_with_preselected_root = false;
+            self.set_root(path, false);
+        }
+    }
+
+    fn set_root(&mut self, path: PathBuf, preselected_at_launch: bool) {
+        let root_input = path.display().to_string();
+        if self.root_input != root_input {
+            self.invalidate_preview_state();
+        }
+        self.preferences.remember_folder(&path);
+        self.root_input = root_input;
+        self.launched_with_preselected_root = preselected_at_launch;
+        self.save_preferences_quietly();
+    }
+
+    fn choose_recent_root(&mut self, path: PathBuf) {
+        self.set_root(path, false);
+    }
+
+    fn select_builtin_style(&mut self, mode: BuiltInMode) {
+        if self.planning_source != PlanningSource::BuiltIn || self.mode != mode {
+            self.invalidate_preview_state();
+        }
+        self.planning_source = PlanningSource::BuiltIn;
+        self.mode = mode;
+        self.preferences.last_style = StylePreference::from(mode);
+        self.save_preferences_quietly();
+    }
+
+    fn select_custom_rules_style(&mut self) {
+        if self.loaded_profile.is_none() {
+            self.planning_source = PlanningSource::BuiltIn;
+            self.mode = BuiltInMode::TypeYear;
+            self.preferences.last_style = StylePreference::TypeYear;
+            self.maintenance_message = Some(
+                "Custom Rules needs a saved profile, so Type + Date stayed selected.".to_string(),
+            );
+            self.save_preferences_quietly();
+            return;
+        }
+
+        if self.planning_source != PlanningSource::RuleProfile {
+            self.invalidate_preview_state();
+        }
+        self.planning_source = PlanningSource::RuleProfile;
+        self.preferences.last_style = StylePreference::CustomRules;
+        self.save_preferences_quietly();
+    }
+
+    fn invalidate_preview_state(&mut self) {
+        self.analysis_result = None;
+        self.apply_result = None;
+        self.undo_result = None;
+        self.show_apply_confirmation = false;
+        self.preview_filter = PreviewFilter::All;
+        self.preview_offset = 0;
+        self.selected_preview_row = None;
+    }
+
+    fn save_preferences_quietly(&mut self) {
+        if let Err(message) = self.preferences.save() {
+            self.error_message = Some(message);
+        }
+    }
+
+    fn save_preferences_with_message(&mut self) {
+        match self.preferences.save() {
+            Ok(()) => {
+                self.maintenance_message = Some("Saved interface preferences.".to_string());
+                self.error_message = None;
+            }
+            Err(message) => {
+                self.error_message = Some(message);
+                self.maintenance_message = None;
+            }
         }
     }
 
@@ -222,6 +311,8 @@ impl SmartfolderApp {
         }
 
         let root = PathBuf::from(root_text);
+        self.preferences.remember_folder(&root);
+        self.save_preferences_quietly();
         let plan_source = match self.analysis_plan_source() {
             Ok(plan_source) => plan_source,
             Err(message) => {
@@ -295,6 +386,8 @@ impl SmartfolderApp {
                 self.profile_editor = ProfileEditorState::from_profile(&profile);
                 self.loaded_profile = Some(LoadedRuleProfile { path, profile });
                 self.planning_source = PlanningSource::RuleProfile;
+                self.preferences.last_style = StylePreference::CustomRules;
+                self.save_preferences_quietly();
                 self.maintenance_message = Some(format!("Imported rule profile '{profile_id}'."));
                 self.error_message = None;
             }
@@ -312,6 +405,8 @@ impl SmartfolderApp {
                 let path = loaded_profile.path.display().to_string();
                 self.loaded_profile = Some(loaded_profile);
                 self.planning_source = PlanningSource::RuleProfile;
+                self.preferences.last_style = StylePreference::CustomRules;
+                self.save_preferences_quietly();
                 self.maintenance_message =
                     Some(format!("Saved rule profile '{profile_id}' to {path}."));
                 self.error_message = None;
@@ -718,16 +813,34 @@ impl SmartfolderApp {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     let root_input_width = (ui.available_width() - 110.0).max(240.0);
-                    ui.add_sized(
+                    let response = ui.add_sized(
                         [root_input_width, 30.0],
                         egui::TextEdit::singleline(&mut self.root_input).hint_text("D:\\Documents"),
                     );
+                    if response.changed() {
+                        self.launched_with_preselected_root = false;
+                        self.invalidate_preview_state();
+                    }
                     if ui.button("Browse...").clicked() {
                         self.browse_for_root();
                     }
                 });
                 ui.add_space(6.0);
                 ui.label(self.root_readiness_copy());
+
+                if !self.preferences.recent_folders.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Recent folders").strong());
+                    let recent_folders = self.preferences.recent_folders.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        for folder in recent_folders.into_iter().take(4) {
+                            let label = folder_name_label(&folder);
+                            if ui.button(label).clicked() {
+                                self.choose_recent_root(folder);
+                            }
+                        }
+                    });
+                }
             });
 
         ui.add_space(12.0);
@@ -749,8 +862,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::BuiltIn;
-                self.mode = BuiltInMode::Type;
+                self.select_builtin_style(BuiltInMode::Type);
             }
 
             if render_style_card(
@@ -762,8 +874,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::BuiltIn;
-                self.mode = BuiltInMode::Date;
+                self.select_builtin_style(BuiltInMode::Date);
             }
 
             if render_style_card(
@@ -776,8 +887,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::BuiltIn;
-                self.mode = BuiltInMode::TypeYear;
+                self.select_builtin_style(BuiltInMode::TypeYear);
             }
 
             if render_style_card(
@@ -789,7 +899,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::RuleProfile;
+                self.select_custom_rules_style();
             }
         });
 
@@ -885,6 +995,9 @@ impl SmartfolderApp {
         if let Some(result) = &self.analysis_result {
             ui.add_space(14.0);
             render_plan_summary(ui, result);
+
+            ui.add_space(10.0);
+            render_preview_examples(ui, result);
 
             ui.add_space(10.0);
             render_apply_entry(
@@ -988,8 +1101,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::BuiltIn;
-                self.mode = BuiltInMode::Type;
+                self.select_builtin_style(BuiltInMode::Type);
                 self.active_section = AppSection::Organize;
             }
 
@@ -1002,8 +1114,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::BuiltIn;
-                self.mode = BuiltInMode::Date;
+                self.select_builtin_style(BuiltInMode::Date);
                 self.active_section = AppSection::Organize;
             }
 
@@ -1017,8 +1128,7 @@ impl SmartfolderApp {
             )
             .clicked()
             {
-                self.planning_source = PlanningSource::BuiltIn;
-                self.mode = BuiltInMode::TypeYear;
+                self.select_builtin_style(BuiltInMode::TypeYear);
                 self.active_section = AppSection::Organize;
             }
         });
@@ -1053,7 +1163,7 @@ impl SmartfolderApp {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Use Custom Rules").clicked() {
-                        self.planning_source = PlanningSource::RuleProfile;
+                        self.select_custom_rules_style();
                         self.active_section = AppSection::Organize;
                     }
                     if ui.button("Validate profile").clicked() {
@@ -1109,10 +1219,67 @@ impl SmartfolderApp {
             render_info_card(
                 ui,
                 "Appearance",
-                "The v2 interface currently uses one built-in visual style while the workflow stabilizes.",
-                "No saved theme setting yet",
+                "Theme and motion preferences are saved locally as the RC2 design system comes online.",
+                "Preferences saved",
             );
         });
+
+        ui.add_space(10.0);
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(250, 246, 240))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Appearance and motion").strong().size(18.0));
+                ui.label("These preferences are saved locally and will carry into the RC2 wizard.");
+                ui.add_space(8.0);
+
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Theme");
+                    egui::ComboBox::from_id_source("theme-preference")
+                        .selected_text(self.preferences.theme.label())
+                        .show_ui(ui, |ui| {
+                            for preference in [
+                                ThemePreference::System,
+                                ThemePreference::Light,
+                                ThemePreference::Dark,
+                            ] {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.preferences.theme,
+                                        preference,
+                                        preference.label(),
+                                    )
+                                    .changed();
+                            }
+                        });
+
+                    ui.label("Motion");
+                    egui::ComboBox::from_id_source("motion-preference")
+                        .selected_text(self.preferences.motion.label())
+                        .show_ui(ui, |ui| {
+                            for preference in [
+                                MotionPreference::System,
+                                MotionPreference::Reduced,
+                                MotionPreference::Subtle,
+                                MotionPreference::Full,
+                            ] {
+                                changed |= ui
+                                    .selectable_value(
+                                        &mut self.preferences.motion,
+                                        preference,
+                                        preference.label(),
+                                    )
+                                    .changed();
+                            }
+                        });
+                });
+
+                if changed {
+                    self.save_preferences_with_message();
+                }
+            });
 
         ui.add_space(10.0);
         egui::Frame::group(ui.style())
@@ -1290,7 +1457,7 @@ impl eframe::App for SmartfolderApp {
         self.poll_analysis();
         self.poll_apply();
         self.poll_undo();
-        apply_visual_style(ctx);
+        ui::theme::apply_visual_theme(ctx, self.preferences.visual_theme());
 
         if self.is_analyzing() || self.is_applying() || self.is_undoing() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -1783,6 +1950,7 @@ struct AnalysisOutput {
     summary: PlanSummary,
     warning_messages: Vec<String>,
     preview_counts: PreviewCounts,
+    preview_examples: Vec<PreviewRow>,
     preview_total_rows: usize,
     preview_rows: Vec<PreviewRow>,
 }
@@ -1967,6 +2135,7 @@ fn analyze_root(
     .map_err(|error| format!("Failed to generate plan for {}: {error}", root.display()))?;
     send_progress(sender, AnalysisProgress::loading_preview());
     let preview_counts = load_preview_counts_from_store(&store, &session_id)?;
+    let preview_examples = load_preview_examples_from_store(&store, &session_id, root)?;
     let preview_page =
         load_preview_page_from_store(&store, &session_id, root, PreviewFilter::All, 0)?;
     let warning_messages = store
@@ -1980,9 +2149,21 @@ fn analyze_root(
         summary: plan.summary,
         warning_messages,
         preview_counts,
+        preview_examples,
         preview_total_rows: preview_page.total_rows,
         preview_rows: preview_page.rows,
     })
+}
+
+fn load_preview_examples_from_store(
+    store: &SqliteSessionStore,
+    session_id: &str,
+    root: &Path,
+) -> std::result::Result<Vec<PreviewRow>, String> {
+    let operations = store
+        .representative_plan_examples(session_id, PREVIEW_EXAMPLE_LIMIT)
+        .map_err(|error| format!("Failed to load preview examples: {error}"))?;
+    Ok(preview_rows(&operations, root))
 }
 
 fn load_preview_page(
@@ -2439,6 +2620,52 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput) {
             "Review the attention and warnings views before organizing these files.",
         );
     }
+}
+
+fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
+    ui.label(RichText::new("Example changes").strong().size(18.0));
+    ui.label("A few representative moves show the kind of organization smartfolder found.");
+    ui.add_space(6.0);
+
+    if result.preview_examples.is_empty() {
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(250, 246, 240))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("No ready examples yet").strong());
+                ui.label("Files with unclear destinations were left untouched. Open the detailed list to inspect them.");
+            });
+        return;
+    }
+
+    ui.horizontal_wrapped(|ui| {
+        for row in &result.preview_examples {
+            egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(255, 255, 255))
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(216, 210, 200)))
+                .rounding(egui::Rounding::same(10.0))
+                .inner_margin(egui::Margin::same(14.0))
+                .show(ui, |ui| {
+                    ui.set_min_width(240.0);
+                    truncated_label(ui, &row.file_name);
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Before")
+                            .small()
+                            .color(Color32::from_rgb(90, 90, 90)),
+                    );
+                    truncated_label(ui, &row.original_folder);
+                    ui.label(RichText::new("to").color(Color32::from_rgb(47, 128, 237)));
+                    ui.label(
+                        RichText::new("After")
+                            .small()
+                            .color(Color32::from_rgb(90, 90, 90)),
+                    );
+                    truncated_label(ui, &row.target_folder);
+                });
+        }
+    });
 }
 
 fn render_apply_entry(
@@ -3406,28 +3633,6 @@ fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
             Color32::from_rgb(246, 236, 211),
         ),
     }
-}
-
-fn apply_visual_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(14.0, 8.0);
-    ctx.set_style(style);
-
-    let mut visuals = egui::Visuals::light();
-    visuals.panel_fill = Color32::from_rgb(244, 238, 230);
-    visuals.window_fill = Color32::from_rgb(252, 248, 242);
-    visuals.extreme_bg_color = Color32::from_rgb(236, 229, 220);
-    visuals.faint_bg_color = Color32::from_rgb(248, 243, 236);
-    visuals.override_text_color = Some(Color32::from_rgb(57, 48, 39));
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(244, 238, 230);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(246, 240, 232);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(236, 227, 214);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(230, 219, 206);
-    visuals.widgets.inactive.fg_stroke.color = Color32::from_rgb(57, 48, 39);
-    visuals.widgets.hovered.fg_stroke.color = Color32::from_rgb(57, 48, 39);
-    visuals.widgets.active.fg_stroke.color = Color32::from_rgb(57, 48, 39);
-    ctx.set_visuals(visuals);
 }
 
 fn render_screen_heading(ui: &mut egui::Ui, title: &str, detail: &str) {

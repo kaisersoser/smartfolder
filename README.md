@@ -44,6 +44,7 @@ cargo run -p smartfolder-gui -- <root>
 
 ```powershell
 smartfolder analyze <root> --output plan.json
+smartfolder analyze <root> --include-subfolders --output plan.json
 smartfolder analyze <root> --profile rules.toml --output plan.json
 smartfolder analyze <root> --mode type-date --quiet --output plan.json
 smartfolder preview plan.json
@@ -58,7 +59,7 @@ smartfolder transactions inspect <transaction-id>
 smartfolder transactions cleanup
 ```
 
-Use `--json` with commands that support machine-readable output. If an error occurs while `--json` is present, errors are emitted as JSON on stderr.
+Analyze scans only the selected folder by default. Add `--include-subfolders` or `--recursive` when you want to include nested folders, and combine it with `--max-depth <n>` to limit recursion. Use `--json` with commands that support machine-readable output. If an error occurs while `--json` is present, errors are emitted as JSON on stderr.
 
 Built-in `type-year`, `type-date`, and `type-year-month-day` modes currently produce `Type\Year\Month\Day\filename` with full month names, for example `Documents\2026\May\11\report.pdf`. Custom TOML rule destinations support `{year}`, `{month}`, and `{day}` placeholders.
 

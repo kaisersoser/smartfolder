@@ -1,7 +1,8 @@
 //! Directory scanning with file metadata collection.
 //!
-//! This module recursively traverses a directory tree, collecting metadata about files
-//! (names, sizes, timestamps, types) without reading file contents. It supports:
+//! This module traverses a selected folder, collecting metadata about files
+//! (names, sizes, timestamps, types) without reading file contents. By default it
+//! scans only the current folder; callers can opt into subfolder recursion. It supports:
 //! - Filtering by depth, hidden files, system files, and project folders
 //! - Cancellable scans via `CancellationToken`
 //! - Detailed warnings for unreadable or skipped entries
@@ -51,11 +52,11 @@ const STREAMING_SCAN_PROGRESS_INTERVAL: usize = 128;
 /// - `include_hidden`: Include dotfiles (`.gitignore`, etc.)
 /// - `include_system`: Include system-marked files (Windows-specific)
 /// - `include_project_folders`: Include folders like `.git`, `node_modules`, `target`
-/// - `max_depth`: Limit recursion depth (None = unlimited)
-/// - `current_folder_only`: Don't recurse into subdirectories
+/// - `max_depth`: Limit recursion depth when subfolders are included
+/// - `current_folder_only`: Don't recurse into subdirectories; defaults to true
 /// - `exclude_names`: Additional exact names to skip (case-insensitive)
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub include_hidden: bool,
     pub include_system: bool,
@@ -63,6 +64,19 @@ pub struct ScanOptions {
     pub max_depth: Option<usize>,
     pub current_folder_only: bool,
     pub exclude_names: Vec<String>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            include_hidden: false,
+            include_system: false,
+            include_project_folders: false,
+            max_depth: None,
+            current_folder_only: true,
+            exclude_names: Vec::new(),
+        }
+    }
 }
 
 /// Token for cancelling an in-progress scan.
@@ -722,7 +736,7 @@ mod tests {
     };
 
     #[test]
-    fn scans_metadata_without_file_contents() {
+    fn default_scan_stays_in_current_folder() {
         let fixture = fixture_dir();
         fs::write(fixture.path().join("report.pdf"), b"content").expect("fixture write");
         fs::create_dir(fixture.path().join("nested")).expect("fixture dir");
@@ -734,11 +748,32 @@ mod tests {
 
         let result = scan_folder(fixture.path(), &ScanOptions::default()).expect("scan succeeds");
 
-        assert_eq!(result.summary.records_collected, 3);
+        assert_eq!(result.summary.records_collected, 2);
         assert!(result
             .records
             .iter()
             .any(|record| record.detected_type == FileTypeBucket::Document));
+        assert!(!result.records.iter().any(|record| record.name == "main.rs"));
+    }
+
+    #[test]
+    fn recursive_scan_collects_subfolder_metadata() {
+        let fixture = fixture_dir();
+        fs::write(fixture.path().join("report.pdf"), b"content").expect("fixture write");
+        fs::create_dir(fixture.path().join("nested")).expect("fixture dir");
+        fs::write(
+            fixture.path().join("nested").join("main.rs"),
+            b"fn main() {}",
+        )
+        .expect("fixture write");
+
+        let options = ScanOptions {
+            current_folder_only: false,
+            ..ScanOptions::default()
+        };
+        let result = scan_folder(fixture.path(), &options).expect("scan succeeds");
+
+        assert_eq!(result.summary.records_collected, 3);
         assert!(result
             .records
             .iter()
@@ -773,6 +808,7 @@ mod tests {
 
         let options = ScanOptions {
             include_project_folders: true,
+            current_folder_only: false,
             ..ScanOptions::default()
         };
         let result = scan_folder(fixture.path(), &options).expect("scan succeeds");
@@ -792,6 +828,7 @@ mod tests {
 
         let options = ScanOptions {
             max_depth: Some(1),
+            current_folder_only: false,
             ..ScanOptions::default()
         };
         let result = scan_folder(fixture.path(), &options).expect("scan succeeds");

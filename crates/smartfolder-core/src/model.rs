@@ -348,6 +348,8 @@ pub struct TransactionOperation {
     pub source: PathBuf,
     pub destination: PathBuf,
     pub status: OperationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub same_volume: Option<bool>,
     pub error: Option<OperationError>,
 }

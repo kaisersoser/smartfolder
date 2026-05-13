@@ -465,6 +465,7 @@ fn transaction_operation_from_plan(operation: &PlanOperation) -> TransactionOper
         source: operation.source.clone(),
         destination: operation.destination.clone(),
         status: OperationStatus::Pending,
+        reason: Some(operation.reason.clone()),
         same_volume: None,
         error: None,
     }
@@ -542,6 +543,10 @@ mod tests {
 
         let journal = load_journal(&transaction_id).expect("journal loads");
         assert_eq!(journal.operations[0].status, OperationStatus::Completed);
+        assert_eq!(
+            journal.operations[0].reason.as_deref(),
+            Some("Built-in rule: Type")
+        );
     }
 
     #[test]
@@ -646,6 +651,10 @@ mod tests {
         let journal = load_journal(&transaction_id).expect("journal loads");
         assert_eq!(journal.operations.len(), 1);
         assert_eq!(journal.operations[0].status, OperationStatus::Completed);
+        assert_eq!(
+            journal.operations[0].reason.as_deref(),
+            Some("Built-in rule: Type")
+        );
     }
 
     fn fixture_plan(fixture: &TempDir, mode: BuiltInMode) -> crate::model::PlanRecord {

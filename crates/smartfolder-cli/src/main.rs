@@ -371,6 +371,10 @@ impl AnalyzeCommand {
                         value_arg(args, index, "--max-depth")?,
                         "--max-depth",
                     )?);
+                    command.scan_options.current_folder_only = false;
+                }
+                "--include-subfolders" | "--recursive" => {
+                    command.scan_options.current_folder_only = false;
                 }
                 "--current-folder-only" => command.scan_options.current_folder_only = true,
                 "--include-hidden" => command.scan_options.include_hidden = true,
@@ -660,8 +664,10 @@ ANALYZE OPTIONS:
     --output <plan.json>        Write the generated plan as JSON
     --profile <rules.toml>      Use a TOML custom rule profile
     --mode <mode>               Built-in mode: type, date, extension, type-year, type-date
-    --max-depth <n>             Limit recursive scan depth
-    --current-folder-only       Do not recurse into subfolders
+    --include-subfolders        Recurse into subfolders during analysis
+    --recursive                 Alias for --include-subfolders
+    --max-depth <n>             Recurse into subfolders up to this depth
+    --current-folder-only       Do not recurse into subfolders (default)
     --include-hidden            Include hidden files/folders
     --include-system            Include system files/folders where detectable
     --include-project-folders   Include default project/dependency exclusions
@@ -811,6 +817,27 @@ mod tests {
         );
         assert!(command.json);
         assert!(command.quiet);
+    }
+
+    #[test]
+    fn analyze_parser_defaults_to_current_folder_and_supports_recursive_aliases() {
+        let default_command =
+            AnalyzeCommand::parse(&strings(&[r"D:\Root"])).expect("default analyze parses");
+        assert!(default_command.scan_options.current_folder_only);
+
+        let include_subfolders =
+            AnalyzeCommand::parse(&strings(&[r"D:\Root", "--include-subfolders"]))
+                .expect("include subfolders parses");
+        assert!(!include_subfolders.scan_options.current_folder_only);
+
+        let recursive = AnalyzeCommand::parse(&strings(&[r"D:\Root", "--recursive"]))
+            .expect("recursive alias parses");
+        assert!(!recursive.scan_options.current_folder_only);
+
+        let max_depth = AnalyzeCommand::parse(&strings(&[r"D:\Root", "--max-depth", "2"]))
+            .expect("max depth parses");
+        assert!(!max_depth.scan_options.current_folder_only);
+        assert_eq!(max_depth.scan_options.max_depth, Some(2));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 #![allow(clippy::module_name_repetitions)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
@@ -66,6 +67,7 @@ fn main() -> eframe::Result<()> {
 struct SmartfolderApp {
     root_input: String,
     mode: BuiltInMode,
+    include_subfolders: bool,
     preview_filter: PreviewFilter,
     preview_offset: usize,
     analysis_receiver: Option<Receiver<AnalysisEvent>>,
@@ -82,6 +84,7 @@ struct SmartfolderApp {
     transaction_message: Option<String>,
     transaction_detail: Option<TransactionDetail>,
     transaction_detail_message: Option<String>,
+    show_recovery_log: bool,
     show_undo_confirmation: Option<String>,
     error_message: Option<String>,
     maintenance_message: Option<String>,
@@ -99,6 +102,7 @@ impl SmartfolderApp {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             mode: BuiltInMode::TypeYear,
+            include_subfolders: false,
             preview_filter: PreviewFilter::All,
             preview_offset: 0,
             analysis_receiver: None,
@@ -115,6 +119,7 @@ impl SmartfolderApp {
             transaction_message,
             transaction_detail: None,
             transaction_detail_message: None,
+            show_recovery_log: false,
             show_undo_confirmation: None,
             error_message: None,
             maintenance_message: None,
@@ -142,6 +147,7 @@ impl SmartfolderApp {
 
         let root = PathBuf::from(root_text);
         let mode = self.mode;
+        let include_subfolders = self.include_subfolders;
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::channel::<AnalysisEvent>();
@@ -158,7 +164,13 @@ impl SmartfolderApp {
         self.preview_offset = 0;
 
         std::thread::spawn(move || {
-            let result = analyze_root(&root, mode, &worker_cancellation, &sender);
+            let result = analyze_root(
+                &root,
+                mode,
+                include_subfolders,
+                &worker_cancellation,
+                &sender,
+            );
             let _ = sender.send(AnalysisEvent::Finished(result));
         });
     }
@@ -336,6 +348,16 @@ impl SmartfolderApp {
         }
     }
 
+    fn active_root(&self) -> Option<PathBuf> {
+        self.analysis_result.as_ref().map_or_else(
+            || {
+                let root = self.root_input.trim();
+                (!root.is_empty()).then(|| PathBuf::from(root))
+            },
+            |result| Some(result.root.clone()),
+        )
+    }
+
     fn start_undo(&mut self, transaction_id: String) {
         let (sender, receiver) = mpsc::channel::<UndoMessage>();
         self.undo_receiver = Some(receiver);
@@ -420,8 +442,9 @@ impl SmartfolderApp {
             return;
         };
         let session_id = result.session_id.clone();
+        let root = result.root.clone();
 
-        match load_preview_page(&session_id, filter, offset) {
+        match load_preview_page(&session_id, &root, filter, offset) {
             Ok(page) => {
                 if let Some(result) = &mut self.analysis_result {
                     result.preview_rows = page.rows;
@@ -481,6 +504,8 @@ impl eframe::App for SmartfolderApp {
                             ui.selectable_value(&mut self.mode, mode, Self::mode_label(mode));
                         }
                     });
+
+                ui.checkbox(&mut self.include_subfolders, "Include subfolders");
 
                 if ui
                     .add_enabled(
@@ -593,10 +618,12 @@ impl eframe::App for SmartfolderApp {
             render_transaction_history(
                 ui,
                 &self.transaction_rows,
+                self.active_root().as_deref(),
                 self.transaction_message.as_deref(),
                 self.undo_result.as_ref(),
                 self.transaction_detail.as_ref(),
                 self.transaction_detail_message.as_deref(),
+                self.show_recovery_log,
                 self.is_analyzing() || self.is_applying() || self.is_undoing(),
                 &mut history_action,
             );
@@ -610,6 +637,9 @@ impl eframe::App for SmartfolderApp {
                     HistoryAction::CloseDetails => {
                         self.transaction_detail = None;
                         self.transaction_detail_message = None;
+                    }
+                    HistoryAction::ToggleRecoveryLog => {
+                        self.show_recovery_log = !self.show_recovery_log;
                     }
                     HistoryAction::ConfirmUndo(transaction_id) => {
                         self.show_undo_confirmation = Some(transaction_id);
@@ -697,6 +727,7 @@ enum HistoryAction {
     Refresh,
     ViewDetails(String),
     CloseDetails,
+    ToggleRecoveryLog,
     ConfirmUndo(String),
 }
 
@@ -855,8 +886,11 @@ struct PreviewPage {
 
 #[derive(Debug, Clone)]
 struct PreviewRow {
-    source: String,
-    destination: String,
+    file_name: String,
+    original_folder: String,
+    target_folder: String,
+    source_full_path: String,
+    destination_full_path: String,
     reason: String,
     status: String,
 }
@@ -914,9 +948,17 @@ struct ApplyOutput {
 #[derive(Debug, Clone)]
 struct TransactionRow {
     transaction_id: String,
-    root: String,
+    root: PathBuf,
+    root_label: String,
     status: TransactionStatus,
     started_at: String,
+    reason_summary: String,
+    completed: usize,
+    skipped: usize,
+    failed: usize,
+    rolled_back: usize,
+    pending: usize,
+    total_operations: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -927,6 +969,7 @@ struct TransactionDetail {
     status: TransactionStatus,
     started_at: String,
     completed_at: String,
+    reason_summary: String,
     operation_counts: TransactionOperationCounts,
     operation_rows: Vec<TransactionOperationRow>,
     total_operations: usize,
@@ -941,11 +984,18 @@ struct TransactionOperationCounts {
     rolled_back: usize,
 }
 
+impl TransactionOperationCounts {
+    fn total(self) -> usize {
+        self.pending + self.completed + self.skipped + self.failed + self.rolled_back
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TransactionOperationRow {
     operation_id: String,
     source: String,
     destination: String,
+    reason: String,
     status: OperationStatus,
     error: String,
 }
@@ -962,6 +1012,7 @@ struct UndoOutput {
 fn analyze_root(
     root: &Path,
     mode: BuiltInMode,
+    include_subfolders: bool,
     cancellation: &CancellationToken,
     sender: &Sender<AnalysisEvent>,
 ) -> AnalysisMessage {
@@ -974,7 +1025,14 @@ fn analyze_root(
         .create_session(root, &plan_mode, now)
         .map_err(|error| format!("Failed to create analysis session: {error}"))?;
 
-    let scan = stream_scan_to_store(root, &mut store, &session_id, cancellation, sender)?;
+    let scan = stream_scan_to_store(
+        root,
+        &mut store,
+        &session_id,
+        include_subfolders,
+        cancellation,
+        sender,
+    )?;
     if scan.cancelled {
         let _ = store.delete_session(&session_id);
         return Err("Analysis cancelled.".to_string());
@@ -993,7 +1051,8 @@ fn analyze_root(
     .map_err(|error| format!("Failed to generate plan for {}: {error}", root.display()))?;
     send_progress(sender, AnalysisProgress::loading_preview());
     let preview_counts = load_preview_counts_from_store(&store, &session_id)?;
-    let preview_page = load_preview_page_from_store(&store, &session_id, PreviewFilter::All, 0)?;
+    let preview_page =
+        load_preview_page_from_store(&store, &session_id, root, PreviewFilter::All, 0)?;
     let warning_messages = store
         .warning_messages(&session_id)
         .map_err(|error| format!("Failed to load warning messages: {error}"))?;
@@ -1012,17 +1071,19 @@ fn analyze_root(
 
 fn load_preview_page(
     session_id: &str,
+    root: &Path,
     filter: PreviewFilter,
     offset: usize,
 ) -> std::result::Result<PreviewPage, String> {
     let store = SqliteSessionStore::open_default()
         .map_err(|error| format!("Failed to open session store: {error}"))?;
-    load_preview_page_from_store(&store, session_id, filter, offset)
+    load_preview_page_from_store(&store, session_id, root, filter, offset)
 }
 
 fn load_preview_page_from_store(
     store: &SqliteSessionStore,
     session_id: &str,
+    root: &Path,
     filter: PreviewFilter,
     offset: usize,
 ) -> std::result::Result<PreviewPage, String> {
@@ -1033,7 +1094,7 @@ fn load_preview_page_from_store(
         .plan_operations_page_filtered(session_id, filter.core_filter(), offset, PREVIEW_PAGE_SIZE)
         .map_err(|error| format!("Failed to load preview operations: {error}"))?;
     Ok(PreviewPage {
-        rows: preview_rows(&operations),
+        rows: preview_rows(&operations, root),
         total_rows,
     })
 }
@@ -1059,6 +1120,7 @@ fn stream_scan_to_store(
     root: &Path,
     store: &mut SqliteSessionStore,
     session_id: &str,
+    include_subfolders: bool,
     cancellation: &CancellationToken,
     sender: &Sender<AnalysisEvent>,
 ) -> std::result::Result<StreamingScanResult, String> {
@@ -1069,7 +1131,10 @@ fn stream_scan_to_store(
         let mut sink = SessionScanSink::new(store, session_id.to_string());
         let result = scan_folder_to_sink_with_progress(
             root,
-            &ScanOptions::default(),
+            &ScanOptions {
+                current_folder_only: !include_subfolders,
+                ..ScanOptions::default()
+            },
             cancellation,
             &mut sink,
             &mut |progress| send_progress(sender, AnalysisProgress::scanning(progress)),
@@ -1138,11 +1203,30 @@ fn load_transaction_rows() -> std::result::Result<Vec<TransactionRow>, String> {
 }
 
 fn transaction_row(summary: TransactionSummary) -> TransactionRow {
+    let journal = inspect_transaction(&summary.transaction_id).ok();
+    let counts = journal
+        .as_ref()
+        .map(|journal| transaction_operation_counts(&journal.operations))
+        .unwrap_or_default();
+    let reason_summary = journal.as_ref().map_or_else(
+        || "No rule reason recorded in this journal.".to_string(),
+        |journal| transaction_reason_summary(&journal.operations),
+    );
+    let total_operations = counts.total();
+
     TransactionRow {
         transaction_id: summary.transaction_id,
-        root: summary.root.display().to_string(),
+        root_label: summary.root.display().to_string(),
+        root: summary.root,
         status: summary.status,
         started_at: summary.started_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+        reason_summary,
+        completed: counts.completed,
+        skipped: counts.skipped,
+        failed: counts.failed,
+        rolled_back: counts.rolled_back,
+        pending: counts.pending,
+        total_operations,
     }
 }
 
@@ -1172,6 +1256,7 @@ fn transaction_detail(journal: smartfolder_core::model::TransactionJournal) -> T
             || "not completed".to_string(),
             |completed| completed.format("%Y-%m-%d %H:%M:%S").to_string(),
         ),
+        reason_summary: transaction_reason_summary(&journal.operations),
         operation_counts,
         operation_rows,
         total_operations,
@@ -1201,10 +1286,41 @@ fn transaction_operation_row(
         operation_id: operation.operation_id.clone(),
         source: operation.source.display().to_string(),
         destination: operation.destination.display().to_string(),
+        reason: operation
+            .reason
+            .clone()
+            .unwrap_or_else(|| "not recorded".to_string()),
         status: operation.status,
         error: operation.error.as_ref().map_or_else(String::new, |error| {
             format!("{:?}: {}", error.code, error.message)
         }),
+    }
+}
+
+fn transaction_reason_summary(
+    operations: &[smartfolder_core::model::TransactionOperation],
+) -> String {
+    let mut reason_counts = BTreeMap::<String, usize>::new();
+    for operation in operations {
+        if let Some(reason) = &operation.reason {
+            *reason_counts.entry(reason.clone()).or_default() += 1;
+        }
+    }
+
+    let Some((reason, count)) = reason_counts
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
+    else {
+        return "No rule reason recorded in this journal.".to_string();
+    };
+
+    if count == operations.len() {
+        reason
+    } else {
+        format!(
+            "{reason} ({count} of {} recorded operations)",
+            operations.len()
+        )
     }
 }
 
@@ -1476,20 +1592,30 @@ fn render_undo_progress(ui: &mut egui::Ui) {
 fn render_transaction_history(
     ui: &mut egui::Ui,
     rows: &[TransactionRow],
+    active_root: Option<&Path>,
     message: Option<&str>,
     undo_result: Option<&UndoOutput>,
     detail: Option<&TransactionDetail>,
     detail_message: Option<&str>,
+    show_recovery_log: bool,
     busy: bool,
     action: &mut Option<HistoryAction>,
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Transaction history").strong());
+        ui.label(RichText::new("Current folder activity").strong());
         if ui
             .add_enabled(!busy, egui::Button::new("Refresh"))
             .clicked()
         {
             *action = Some(HistoryAction::Refresh);
+        }
+        let toggle_label = if show_recovery_log {
+            "Hide recovery log"
+        } else {
+            "Show recovery log"
+        };
+        if ui.button(toggle_label).clicked() {
+            *action = Some(HistoryAction::ToggleRecoveryLog);
         }
     });
 
@@ -1503,38 +1629,154 @@ fn render_transaction_history(
         return;
     }
 
+    let Some(active_root) = active_root else {
+        ui.label("Choose a folder to see activity for that folder.");
+        return;
+    };
+
+    let scoped_rows: Vec<&TransactionRow> = rows
+        .iter()
+        .filter(|row| same_folder(&row.root, active_root))
+        .collect();
+    let hidden_count = rows.len().saturating_sub(scoped_rows.len());
+
+    render_current_folder_activity(ui, &scoped_rows, hidden_count, busy, action);
+
+    if show_recovery_log {
+        ui.add_space(10.0);
+        render_recovery_log(ui, rows, busy, action);
+    }
+
+    if let Some(message) = detail_message {
+        ui.add_space(8.0);
+        ui.colored_label(Color32::from_rgb(190, 40, 40), message);
+    }
+
+    if let Some(detail) = detail {
+        ui.add_space(10.0);
+        render_transaction_detail(ui, detail, action);
+    }
+}
+
+fn render_current_folder_activity(
+    ui: &mut egui::Ui,
+    rows: &[&TransactionRow],
+    hidden_count: usize,
+    busy: bool,
+    action: &mut Option<HistoryAction>,
+) {
     if rows.is_empty() {
-        ui.label("No transaction journals found yet.");
+        ui.label("No activity has been recorded for this folder yet.");
+        if hidden_count > 0 {
+            ui.label(format!(
+                "{} transaction{} from other folders hidden.",
+                hidden_count,
+                plural(hidden_count)
+            ));
+        }
+        return;
+    }
+
+    let latest = rows[0];
+    ui.label(RichText::new(activity_headline(latest)).strong());
+    ui.label(activity_detail(latest));
+    ui.add_space(6.0);
+
+    egui::Grid::new("current-folder-activity-summary")
+        .num_columns(4)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            progress_stat(ui, "Moved", latest.completed);
+            progress_stat(
+                ui,
+                "Needs attention",
+                latest.skipped + latest.failed + latest.pending,
+            );
+            ui.end_row();
+            progress_stat(ui, "Undone", latest.rolled_back);
+            progress_stat(ui, "Recorded", latest.total_operations);
+            ui.end_row();
+        });
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!busy, egui::Button::new("View details"))
+            .clicked()
+        {
+            *action = Some(HistoryAction::ViewDetails(latest.transaction_id.clone()));
+        }
+        let can_undo = can_undo_status(latest.status) && !busy;
+        if ui
+            .add_enabled(can_undo, egui::Button::new("Undo"))
+            .on_disabled_hover_text("Only completed or failed transactions can be undone")
+            .clicked()
+        {
+            *action = Some(HistoryAction::ConfirmUndo(latest.transaction_id.clone()));
+        }
+    });
+
+    if rows.len() > 1 {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Earlier activity").strong());
+        for row in rows.iter().skip(1).take(3) {
+            ui.horizontal(|ui| {
+                ui.label(activity_short_label(row));
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Details"))
+                    .clicked()
+                {
+                    *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
+                }
+            });
+        }
+    }
+
+    if hidden_count > 0 {
+        ui.add_space(6.0);
+        ui.label(format!(
+            "{} transaction{} from other folders hidden from this overview.",
+            hidden_count,
+            plural(hidden_count)
+        ));
+    }
+}
+
+fn render_recovery_log(
+    ui: &mut egui::Ui,
+    rows: &[TransactionRow],
+    busy: bool,
+    action: &mut Option<HistoryAction>,
+) {
+    ui.label(RichText::new("Technical recovery log").strong());
+    if rows.is_empty() {
+        ui.label("No transaction journals found.");
         return;
     }
 
     let width = ui.available_width().max(360.0);
     let transaction_width = width * 0.18;
     let status_width = width * 0.14;
-    let started_width = width * 0.17;
-    let root_width = width * 0.29;
-    let action_width = width * 0.22;
+    let summary_width = width * 0.24;
+    let root_width = width * 0.28;
+    let action_width = width * 0.16;
 
-    egui::Grid::new("transaction-history")
+    egui::Grid::new("technical-recovery-log")
         .num_columns(5)
         .striped(true)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             preview_cell(ui, "Transaction", transaction_width, true);
             preview_cell(ui, "Status", status_width, true);
-            preview_cell(ui, "Started", started_width, true);
+            preview_cell(ui, "Summary", summary_width, true);
             preview_cell(ui, "Root", root_width, true);
             preview_cell(ui, "Action", action_width, true);
             ui.end_row();
 
             for row in rows.iter().take(8) {
                 preview_cell(ui, &row.transaction_id, transaction_width, false);
-                ui.add_sized(
-                    [status_width.max(40.0), 18.0],
-                    egui::Label::new(status_label(row.status)),
-                );
-                preview_cell(ui, &row.started_at, started_width, false);
-                preview_cell(ui, &row.root, root_width, false);
+                preview_cell(ui, status_label(row.status), status_width, false);
+                preview_cell(ui, &activity_count_summary(row), summary_width, false);
+                preview_cell(ui, &row.root_label, root_width, false);
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(!busy, egui::Button::new("Details"))
@@ -1542,7 +1784,6 @@ fn render_transaction_history(
                     {
                         *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
                     }
-
                     let can_undo = can_undo_status(row.status) && !busy;
                     if ui
                         .add_enabled(can_undo, egui::Button::new("Undo"))
@@ -1559,17 +1800,7 @@ fn render_transaction_history(
         });
 
     if rows.len() > 8 {
-        ui.label(format!("Showing 8 of {} recent transactions.", rows.len()));
-    }
-
-    if let Some(message) = detail_message {
-        ui.add_space(8.0);
-        ui.colored_label(Color32::from_rgb(190, 40, 40), message);
-    }
-
-    if let Some(detail) = detail {
-        ui.add_space(10.0);
-        render_transaction_detail(ui, detail, action);
+        ui.label(format!("Showing 8 of {} recovery journals.", rows.len()));
     }
 }
 
@@ -1604,6 +1835,9 @@ fn render_transaction_detail(
             ui.label("Completed");
             ui.label(&detail.completed_at);
             ui.end_row();
+            ui.label("Why");
+            ui.label(&detail.reason_summary);
+            ui.end_row();
         });
     truncated_label(ui, &format!("Root: {}", detail.root));
 
@@ -1634,11 +1868,12 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
     }
 
     let width = ui.available_width().max(360.0);
-    let operation_width = width * 0.15;
-    let status_width = width * 0.14;
-    let source_width = width * 0.27;
-    let destination_width = width * 0.27;
-    let error_width = width * 0.17;
+    let operation_width = width * 0.13;
+    let status_width = width * 0.12;
+    let source_width = width * 0.22;
+    let destination_width = width * 0.22;
+    let reason_width = width * 0.18;
+    let error_width = width * 0.13;
 
     ui.label(RichText::new("Recorded operations").strong());
     egui::ScrollArea::vertical()
@@ -1646,7 +1881,7 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
         .max_height(180.0)
         .show(ui, |ui| {
             egui::Grid::new("transaction-detail-operations")
-                .num_columns(5)
+                .num_columns(6)
                 .striped(true)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
@@ -1654,6 +1889,7 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
                     preview_cell(ui, "Status", status_width, true);
                     preview_cell(ui, "Source", source_width, true);
                     preview_cell(ui, "Destination", destination_width, true);
+                    preview_cell(ui, "Why", reason_width, true);
                     preview_cell(ui, "Error", error_width, true);
                     ui.end_row();
 
@@ -1662,6 +1898,7 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
                         preview_cell(ui, operation_status_label(row.status), status_width, false);
                         preview_cell(ui, &row.source, source_width, false);
                         preview_cell(ui, &row.destination, destination_width, false);
+                        preview_cell(ui, &row.reason, reason_width, false);
                         preview_cell(ui, &row.error, error_width, false);
                         ui.end_row();
                     }
@@ -1805,16 +2042,43 @@ fn render_preview_controls(
     });
 }
 
-fn preview_rows(operations: &[PlanOperation]) -> Vec<PreviewRow> {
+fn preview_rows(operations: &[PlanOperation], root: &Path) -> Vec<PreviewRow> {
     operations
         .iter()
         .map(|operation| PreviewRow {
-            source: operation.source.display().to_string(),
-            destination: operation.destination.display().to_string(),
+            file_name: file_name_label(&operation.source),
+            original_folder: relative_folder_label(&operation.source, root),
+            target_folder: relative_folder_label(&operation.destination, root),
+            source_full_path: operation.source.display().to_string(),
+            destination_full_path: operation.destination.display().to_string(),
             reason: operation.reason.clone(),
             status: operation_status(operation).to_string(),
         })
         .collect()
+}
+
+fn file_name_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn relative_folder_label(path: &Path, root: &Path) -> String {
+    let Some(parent) = path.parent() else {
+        return "Selected folder".to_string();
+    };
+    let Ok(relative) = parent.strip_prefix(root) else {
+        return parent.display().to_string();
+    };
+    if relative.as_os_str().is_empty() {
+        "Selected folder".to_string()
+    } else {
+        relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
 }
 
 fn render_preview_rows(ui: &mut egui::Ui, result: &AnalysisOutput) {
@@ -1824,25 +2088,49 @@ fn render_preview_rows(ui: &mut egui::Ui, result: &AnalysisOutput) {
     }
 
     let width = ui.available_width().max(360.0);
-    let source_width = width * 0.32;
-    let destination_width = width * 0.34;
-    let reason_width = width * 0.20;
-    let status_width = width * 0.14;
+    let file_width = width * 0.24;
+    let original_width = width * 0.22;
+    let target_width = width * 0.28;
+    let reason_width = width * 0.15;
+    let status_width = width * 0.11;
 
     egui::Grid::new("preview-rows")
-        .num_columns(4)
+        .num_columns(5)
         .striped(true)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
-            preview_cell(ui, "Source", source_width, true);
-            preview_cell(ui, "Destination", destination_width, true);
+            preview_cell(ui, "File", file_width, true);
+            preview_cell(ui, "Original folder", original_width, true);
+            preview_cell(ui, "Target folder", target_width, true);
             preview_cell(ui, "Reason", reason_width, true);
             preview_cell(ui, "Status", status_width, true);
             ui.end_row();
 
             for row in &result.preview_rows {
-                preview_cell(ui, &row.source, source_width, false);
-                preview_cell(ui, &row.destination, destination_width, false);
+                preview_cell_with_tooltip(
+                    ui,
+                    &row.file_name,
+                    file_width,
+                    false,
+                    format!(
+                        "From: {}\nTo: {}",
+                        row.source_full_path, row.destination_full_path
+                    ),
+                );
+                preview_cell_with_tooltip(
+                    ui,
+                    &row.original_folder,
+                    original_width,
+                    false,
+                    row.source_full_path.as_str(),
+                );
+                preview_cell_with_tooltip(
+                    ui,
+                    &row.target_folder,
+                    target_width,
+                    false,
+                    row.destination_full_path.as_str(),
+                );
                 preview_cell(ui, &row.reason, reason_width, false);
                 preview_cell(ui, &row.status, status_width, false);
                 ui.end_row();
@@ -1859,12 +2147,31 @@ fn render_preview_rows(ui: &mut egui::Ui, result: &AnalysisOutput) {
 }
 
 fn preview_cell(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) {
+    let _ = preview_cell_response(ui, text, width, strong);
+}
+
+fn preview_cell_with_tooltip(
+    ui: &mut egui::Ui,
+    text: &str,
+    width: f32,
+    strong: bool,
+    tooltip: impl Into<egui::WidgetText>,
+) {
+    preview_cell_response(ui, text, width, strong).on_hover_text(tooltip);
+}
+
+fn preview_cell_response(
+    ui: &mut egui::Ui,
+    text: &str,
+    width: f32,
+    strong: bool,
+) -> egui::Response {
     let text = if strong {
         RichText::new(text).strong().monospace()
     } else {
         RichText::new(text).monospace()
     };
-    ui.add_sized([width.max(40.0), 18.0], egui::Label::new(text).truncate());
+    ui.add_sized([width.max(40.0), 18.0], egui::Label::new(text).truncate())
 }
 
 fn operation_status(operation: &PlanOperation) -> &'static str {
@@ -1874,6 +2181,98 @@ fn operation_status(operation: &PlanOperation) -> &'static str {
         ConflictState::CaseOnlyRename { .. } => "conflict: case-only rename",
         ConflictState::UnsafeDestination { .. } => "skipped: unsafe destination",
     }
+}
+
+fn activity_headline(row: &TransactionRow) -> String {
+    match row.status {
+        TransactionStatus::Completed => format!(
+            "Moved {} file{} into organized folders.",
+            row.completed,
+            plural(row.completed)
+        ),
+        TransactionStatus::RolledBack => format!(
+            "Undid {} move{} from this folder.",
+            row.rolled_back,
+            plural(row.rolled_back)
+        ),
+        TransactionStatus::PartiallyRolledBack => format!(
+            "Partially undid this transaction: {} move{} restored, {} issue{} remain.",
+            row.rolled_back,
+            plural(row.rolled_back),
+            row.failed,
+            plural(row.failed)
+        ),
+        TransactionStatus::Interrupted => format!(
+            "Transaction interrupted after {} recorded operation{}.",
+            row.total_operations,
+            plural(row.total_operations)
+        ),
+        TransactionStatus::InProgress => format!(
+            "Transaction in progress with {} recorded operation{}.",
+            row.total_operations,
+            plural(row.total_operations)
+        ),
+        TransactionStatus::Failed => format!(
+            "Transaction needs attention: {} failed, {} completed.",
+            row.failed, row.completed
+        ),
+    }
+}
+
+fn activity_detail(row: &TransactionRow) -> String {
+    match row.status {
+        TransactionStatus::Completed => format!(
+            "Why: {}. Completed {}. {} item{} skipped or failed.",
+            row.reason_summary,
+            row.started_at,
+            row.skipped + row.failed,
+            plural(row.skipped + row.failed)
+        ),
+        TransactionStatus::RolledBack => format!(
+            "Rollback completed {}. Original file locations were restored where possible.",
+            row.started_at
+        ),
+        TransactionStatus::PartiallyRolledBack => {
+            "Rollback completed with remaining issues. Review details before making more changes."
+                .to_string()
+        }
+        TransactionStatus::Interrupted | TransactionStatus::InProgress => format!(
+            "Why: {}. {} completed, {} pending. Resume or undo from the recovery controls.",
+            row.reason_summary, row.completed, row.pending
+        ),
+        TransactionStatus::Failed => {
+            "Some file moves failed. Review details before retrying or undoing.".to_string()
+        }
+    }
+}
+
+fn activity_short_label(row: &TransactionRow) -> String {
+    format!(
+        "{} - {} - {}",
+        row.started_at,
+        status_label(row.status),
+        activity_count_summary(row)
+    )
+}
+
+fn activity_count_summary(row: &TransactionRow) -> String {
+    format!(
+        "{} moved, {} undone, {} attention",
+        row.completed,
+        row.rolled_back,
+        row.skipped + row.failed + row.pending
+    )
+}
+
+fn same_folder(left: &Path, right: &Path) -> bool {
+    normalized_path_key(left) == normalized_path_key(right)
+}
+
+fn normalized_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
 }
 
 fn summary_row(ui: &mut egui::Ui, label: &str, value: usize) {
@@ -1941,11 +2340,15 @@ fn preloaded_root_from_args(args: impl IntoIterator<Item = String>) -> Option<Pa
 mod tests {
     use std::path::PathBuf;
 
-    use smartfolder_core::model::{BuiltInMode, OperationStatus, TransactionStatus};
+    use smartfolder_core::model::{
+        BuiltInMode, Certainty, ConflictState, OperationStatus, OperationType, PlanOperation,
+        SourceSnapshot, TransactionStatus,
+    };
 
     use super::{
-        can_undo_status, is_cloud_synced_path, operation_status_label, preloaded_root_from_args,
-        status_label, transaction_operation_counts, SmartfolderApp,
+        activity_count_summary, activity_headline, can_undo_status, is_cloud_synced_path,
+        operation_status_label, preloaded_root_from_args, preview_rows, same_folder, status_label,
+        transaction_operation_counts, SmartfolderApp, TransactionRow,
     };
 
     #[test]
@@ -2015,6 +2418,58 @@ mod tests {
         assert_eq!(counts.rolled_back, 1);
     }
 
+    #[test]
+    fn activity_overview_scopes_to_selected_folder() {
+        assert!(same_folder(
+            &PathBuf::from(r"D:\OneDrive\Documents\"),
+            &PathBuf::from(r"d:/onedrive/documents")
+        ));
+        assert!(!same_folder(
+            &PathBuf::from(r"C:\Users\User\AppData\Local\Temp\root"),
+            &PathBuf::from(r"D:\OneDrive\Documents")
+        ));
+
+        let row = test_transaction_row(TransactionStatus::Completed);
+        assert_eq!(
+            activity_headline(&row),
+            "Moved 3 files into organized folders."
+        );
+        assert_eq!(
+            activity_count_summary(&row),
+            "3 moved, 0 undone, 1 attention"
+        );
+    }
+
+    #[test]
+    fn preview_rows_show_file_and_relative_folders() {
+        let root = PathBuf::from(r"D:\OneDrive\Documents");
+        let operations = [PlanOperation {
+            operation_id: "op_1".to_string(),
+            operation_type: OperationType::Move,
+            source: root.join("loose.jpg"),
+            destination: root
+                .join("Images")
+                .join("2013")
+                .join("January")
+                .join("loose.jpg"),
+            reason: "Built-in rule: TypeYear".to_string(),
+            certainty: Certainty::High,
+            conflict: ConflictState::None,
+            selected: true,
+            source_snapshot: SourceSnapshot {
+                size_bytes: 10,
+                modified_at: None,
+            },
+        }];
+
+        let rows = preview_rows(&operations, &root);
+
+        assert_eq!(rows[0].file_name, "loose.jpg");
+        assert_eq!(rows[0].original_folder, "Selected folder");
+        assert_eq!(rows[0].target_folder, "Images / 2013 / January");
+        assert!(rows[0].source_full_path.ends_with("loose.jpg"));
+    }
+
     fn test_transaction_operation(
         operation_id: &str,
         status: OperationStatus,
@@ -2025,8 +2480,26 @@ mod tests {
             source: PathBuf::from(format!(r"D:\Source\{operation_id}.txt")),
             destination: PathBuf::from(format!(r"D:\Destination\{operation_id}.txt")),
             status,
+            reason: Some("Built-in rule: Type".to_string()),
             same_volume: Some(true),
             error: None,
+        }
+    }
+
+    fn test_transaction_row(status: TransactionStatus) -> TransactionRow {
+        TransactionRow {
+            transaction_id: "txn_test".to_string(),
+            root: PathBuf::from(r"D:\OneDrive\Documents"),
+            root_label: r"D:\OneDrive\Documents".to_string(),
+            status,
+            started_at: "2026-05-12 13:00:00".to_string(),
+            reason_summary: "Built-in rule: Type".to_string(),
+            completed: 3,
+            skipped: 1,
+            failed: 0,
+            rolled_back: 0,
+            pending: 0,
+            total_operations: 4,
         }
     }
 }

@@ -103,6 +103,7 @@ Progress so far:
 - added paged plan generation into session storage
 - moved GUI analysis to session-backed scan and preview storage
 - added live scan/planning progress and cancellation controls
+- changed analysis to scan only the selected folder by default, with explicit CLI and GUI opt-in for subfolders
 - added stale-session cleanup and database compaction APIs
 
 ### Milestone 2 - Desktop app shell and portable packaging baseline
@@ -202,7 +203,10 @@ Acceptance criteria:
 Progress so far:
 
 - added recent transaction history to the GUI from journal storage
+- changed the default history view into a current-folder activity overview
+- hid unrelated transaction journals from the default overview while keeping a technical recovery log available
 - added a bounded transaction detail inspector for journal metadata and recorded operations
+- added deterministic non-AI why summaries by preserving plan rule reasons in new transaction journals
 - added transaction status visibility and refresh controls
 - added explicit undo confirmation before rollback
 - wired GUI undo through the shared recovery model

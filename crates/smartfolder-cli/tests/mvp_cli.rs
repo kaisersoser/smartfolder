@@ -177,6 +177,7 @@ fn analyze_respects_hidden_project_and_custom_exclusions() {
         .args([
             "analyze",
             context.root.to_str().expect("root path should be utf-8"),
+            "--include-subfolders",
             "--output",
             default_plan_path
                 .to_str()
@@ -197,6 +198,7 @@ fn analyze_respects_hidden_project_and_custom_exclusions() {
         .args([
             "analyze",
             context.root.to_str().expect("root path should be utf-8"),
+            "--include-subfolders",
             "--output",
             include_plan_path
                 .to_str()
@@ -219,7 +221,7 @@ fn analyze_respects_hidden_project_and_custom_exclusions() {
 }
 
 #[test]
-fn analyze_respects_current_folder_only_and_max_depth() {
+fn analyze_defaults_to_current_folder_and_can_include_subfolders_with_depth() {
     let context = TestContext::new("root");
     write_file(&context.root.join("top.txt"), b"top");
     write_file(&context.root.join("level1").join("one.txt"), b"one");
@@ -233,7 +235,6 @@ fn analyze_respects_current_folder_only_and_max_depth() {
         .args([
             "analyze",
             context.root.to_str().expect("root path should be utf-8"),
-            "--current-folder-only",
             "--output",
             current_plan_path
                 .to_str()
@@ -250,6 +251,7 @@ fn analyze_respects_current_folder_only_and_max_depth() {
         .args([
             "analyze",
             context.root.to_str().expect("root path should be utf-8"),
+            "--include-subfolders",
             "--max-depth",
             "2",
             "--output",

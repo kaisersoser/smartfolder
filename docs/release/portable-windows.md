@@ -16,7 +16,7 @@ You can also pass a folder path to preload it:
 
 ## Explorer launcher
 
-The optional Explorer launcher adds an `Open with smartfolder` entry for folders. It only opens the GUI with the selected folder preloaded.
+The optional Explorer launcher adds an `Organize with smartfolder` entry for folders. It only opens the GUI with the selected folder preloaded.
 
 ```powershell
 .\scripts\register-explorer-launcher.ps1 -AppPath .\smartfolder-gui.exe
@@ -30,8 +30,8 @@ Remove it with:
 
 ## Data location
 
-Analysis sessions, transaction journals, and saved rule profiles are stored in app-local data. Set `SMARTFOLDER_DATA_DIR` before launch to use a custom location.
+Analysis sessions, restore history, and saved rule profiles are stored in app-local data. Set `SMARTFOLDER_DATA_DIR` before launch to use a custom location.
 
 ## Safety model
 
-smartfolder scans metadata only, previews planned moves before apply, never overwrites existing files, and writes transaction journals so completed apply sessions can be undone.
+smartfolder scans metadata only, previews planned moves before Organize Files, never overwrites existing files, and writes restore history so completed organization sessions can be undone.

@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $resolvedAppPath = [System.IO.Path]::GetFullPath($AppPath)
 $folderShellKey = "Registry::HKEY_CURRENT_USER\Software\Classes\Directory\shell\smartfolder"
 $folderCommandKey = Join-Path $folderShellKey "command"
-$menuLabel = "Open with smartfolder"
+$menuLabel = "Organize with smartfolder"
 
 function Remove-SmartfolderExplorerLauncher {
     if (Test-Path $folderShellKey) {

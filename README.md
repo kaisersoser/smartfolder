@@ -51,7 +51,7 @@ cargo build -p smartfolder-gui --release
 .\scripts\register-explorer-launcher.ps1
 ```
 
-This adds an "Open with smartfolder" folder context-menu entry that only launches the GUI with the selected folder preloaded. Remove it with `.\scripts\register-explorer-launcher.ps1 -Unregister`.
+This adds an "Organize with smartfolder" folder context-menu entry that only launches the GUI with the selected folder preloaded. Remove it with `.\scripts\register-explorer-launcher.ps1 -Unregister`.
 
 To create a portable Windows package under `dist`:
 

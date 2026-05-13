@@ -1,3 +1,14 @@
+//! Desktop GUI shell for the smartfolder workflow.
+//!
+//! This binary wraps the shared Rust core with a Windows-first interface that can be
+//! launched directly or from a folder context action in Explorer. The GUI keeps the
+//! engine metadata-only and reversible while presenting a calmer, organize-first flow.
+//!
+//! Key features:
+//! - Explorer-preloaded folder launch support
+//! - Shared-core analysis, preview, apply, and undo operations
+//! - Organize-first shell with Activity, Rules, and Settings sections
+//! - Paged preview and transaction history backed by the on-disk session store
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::BTreeMap;
@@ -37,6 +48,36 @@ const PREVIEW_PAGE_SIZE: usize = 100;
 const TRANSACTION_DETAIL_ROW_LIMIT: usize = 100;
 const WINDOW_WIDTH: f32 = 860.0;
 const WINDOW_HEIGHT: f32 = 720.0;
+const SHELL_NAV_WIDTH: f32 = 196.0;
+const CARD_MIN_WIDTH: f32 = 220.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppSection {
+    Organize,
+    Activity,
+    Rules,
+    Settings,
+}
+
+impl AppSection {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Organize => "Organize",
+            Self::Activity => "Activity",
+            Self::Rules => "Rules",
+            Self::Settings => "Settings",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Organize => "Preview safe changes before organizing files.",
+            Self::Activity => "Review recent changes and undo them if needed.",
+            Self::Rules => "Manage built-in styles and custom rule profiles.",
+            Self::Settings => "Keep the app tidy and confirm launch behavior.",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 enum AnalysisEvent {
@@ -68,7 +109,9 @@ fn main() -> eframe::Result<()> {
 
 #[derive(Debug)]
 struct SmartfolderApp {
+    active_section: AppSection,
     root_input: String,
+    launched_with_preselected_root: bool,
     mode: BuiltInMode,
     planning_source: PlanningSource,
     loaded_profile: Option<LoadedRuleProfile>,
@@ -76,6 +119,7 @@ struct SmartfolderApp {
     include_subfolders: bool,
     preview_filter: PreviewFilter,
     preview_offset: usize,
+    selected_preview_row: Option<usize>,
     analysis_receiver: Option<Receiver<AnalysisEvent>>,
     analysis_cancellation: Option<CancellationToken>,
     analysis_progress: Option<AnalysisProgress>,
@@ -98,15 +142,18 @@ struct SmartfolderApp {
 
 impl SmartfolderApp {
     fn new(preloaded_root: Option<PathBuf>) -> Self {
+        let launched_with_preselected_root = preloaded_root.is_some();
         let (transaction_rows, transaction_message) = match load_transaction_rows() {
             Ok(rows) => (rows, None),
             Err(message) => (Vec::new(), Some(message)),
         };
 
         Self {
+            active_section: AppSection::Organize,
             root_input: preloaded_root
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
+            launched_with_preselected_root,
             mode: BuiltInMode::TypeYear,
             planning_source: PlanningSource::BuiltIn,
             loaded_profile: None,
@@ -114,6 +161,7 @@ impl SmartfolderApp {
             include_subfolders: false,
             preview_filter: PreviewFilter::All,
             preview_offset: 0,
+            selected_preview_row: None,
             analysis_receiver: None,
             analysis_cancellation: None,
             analysis_progress: None,
@@ -147,6 +195,25 @@ impl SmartfolderApp {
         self.undo_receiver.is_some()
     }
 
+    fn has_selected_root(&self) -> bool {
+        !self.root_input.trim().is_empty()
+    }
+
+    fn can_run_analysis(&self) -> bool {
+        self.has_selected_root()
+            && match self.planning_source {
+                PlanningSource::BuiltIn => true,
+                PlanningSource::RuleProfile => self.loaded_profile.is_some(),
+            }
+    }
+
+    fn browse_for_root(&mut self) {
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            self.root_input = path.display().to_string();
+            self.launched_with_preselected_root = false;
+        }
+    }
+
     fn start_analysis(&mut self) {
         let root_text = self.root_input.trim();
         if root_text.is_empty() {
@@ -177,6 +244,7 @@ impl SmartfolderApp {
         self.error_message = None;
         self.preview_filter = PreviewFilter::All;
         self.preview_offset = 0;
+        self.selected_preview_row = None;
 
         std::thread::spawn(move || {
             let result = analyze_root(
@@ -332,6 +400,7 @@ impl SmartfolderApp {
                     self.error_message = None;
                     self.preview_filter = PreviewFilter::All;
                     self.preview_offset = 0;
+                    self.sync_preview_selection();
                 }
                 Err(message) => {
                     self.analysis_result = None;
@@ -352,7 +421,7 @@ impl SmartfolderApp {
             return;
         };
         if result.preview_counts.ready == 0 {
-            self.error_message = Some("No ready moves are available to apply.".to_string());
+            self.error_message = Some("No safe moves are ready to organize.".to_string());
             return;
         }
 
@@ -499,6 +568,7 @@ impl SmartfolderApp {
         }
     }
 
+    #[cfg(test)]
     fn mode_label(mode: BuiltInMode) -> &'static str {
         match mode {
             BuiltInMode::Type => "Type",
@@ -506,6 +576,576 @@ impl SmartfolderApp {
             BuiltInMode::Extension => "Extension",
             BuiltInMode::TypeYear => "Type / Year / Month / Day",
         }
+    }
+
+    fn selected_style_title(&self) -> &'static str {
+        match self.planning_source {
+            PlanningSource::BuiltIn => match self.mode {
+                BuiltInMode::Type => "By Type",
+                BuiltInMode::Date => "By Date",
+                BuiltInMode::Extension => "By Extension",
+                BuiltInMode::TypeYear => "Type + Date",
+            },
+            PlanningSource::RuleProfile => "Custom Rules",
+        }
+    }
+
+    fn sync_preview_selection(&mut self) {
+        self.selected_preview_row = self
+            .analysis_result
+            .as_ref()
+            .and_then(|result| (!result.preview_rows.is_empty()).then_some(0));
+    }
+
+    fn root_readiness_copy(&self) -> String {
+        if !self.has_selected_root() {
+            return "Choose a folder to organize. If you launch from Explorer, smartfolder will preload the clicked folder here.".to_string();
+        }
+
+        if self.launched_with_preselected_root {
+            "This folder was preselected at launch and is ready for Analyze Folder.".to_string()
+        } else {
+            "This folder is selected and ready for Analyze Folder.".to_string()
+        }
+    }
+
+    fn render_status_messages(&mut self, ui: &mut egui::Ui) {
+        if let Some(message) = &self.error_message {
+            ui.add_space(6.0);
+            ui.colored_label(Color32::from_rgb(190, 40, 40), message);
+        }
+
+        if let Some(message) = &self.maintenance_message {
+            ui.add_space(6.0);
+            ui.colored_label(Color32::from_rgb(70, 140, 90), message);
+        }
+    }
+
+    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.label(RichText::new("smartfolder").size(26.0).strong());
+        ui.label("Organize files safely, then undo changes if you need to.");
+        ui.add_space(14.0);
+
+        for section in [
+            AppSection::Organize,
+            AppSection::Activity,
+            AppSection::Rules,
+            AppSection::Settings,
+        ] {
+            let selected = self.active_section == section;
+            let button = egui::Button::new(
+                RichText::new(format!("{}\n{}", section.title(), section.subtitle())).size(14.0),
+            )
+            .min_size(egui::vec2(SHELL_NAV_WIDTH - 28.0, 56.0))
+            .fill(if selected {
+                Color32::from_rgb(230, 219, 206)
+            } else {
+                Color32::from_rgb(246, 240, 232)
+            })
+            .stroke(egui::Stroke::new(
+                if selected { 2.0 } else { 1.0 },
+                if selected {
+                    Color32::from_rgb(166, 94, 53)
+                } else {
+                    Color32::from_rgb(212, 200, 186)
+                },
+            ));
+            if ui.add(button).clicked() {
+                self.active_section = section;
+            }
+            ui.add_space(4.0);
+        }
+
+        ui.add_space(12.0);
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(246, 240, 232))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(216, 202, 188)))
+            .inner_margin(egui::Margin::same(12.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Launch behavior").strong());
+                ui.label(
+                    "Right-clicking a folder in Explorer should open smartfolder with that folder already selected.",
+                );
+            });
+    }
+
+    fn render_organize_screen(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        preview_action: &mut Option<PreviewAction>,
+        history_action: &mut Option<HistoryAction>,
+    ) {
+        render_screen_heading(
+            ui,
+            "Organize Files",
+            "Open a folder from Explorer or choose one here, preview the safe changes, then organize with undo available afterward.",
+        );
+        self.render_status_messages(ui);
+        ui.add_space(10.0);
+
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(250, 246, 240))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+            .inner_margin(egui::Margin::same(16.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Choose a folder to organize")
+                                .strong()
+                                .size(18.0),
+                        );
+                        ui.label("This folder becomes the root for preview, organizing, and undo.");
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.has_selected_root() {
+                            render_status_chip(
+                                ui,
+                                if self.launched_with_preselected_root {
+                                    "Preselected at launch"
+                                } else {
+                                    "Folder ready"
+                                },
+                                Color32::from_rgb(92, 128, 78),
+                                Color32::from_rgb(231, 241, 228),
+                            );
+                        }
+                    });
+                });
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    let root_input_width = (ui.available_width() - 110.0).max(240.0);
+                    ui.add_sized(
+                        [root_input_width, 30.0],
+                        egui::TextEdit::singleline(&mut self.root_input).hint_text("D:\\Documents"),
+                    );
+                    if ui.button("Browse...").clicked() {
+                        self.browse_for_root();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(self.root_readiness_copy());
+            });
+
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new("Choose an organizing style")
+                .strong()
+                .size(18.0),
+        );
+        ui.label("Pick the layout that best matches this folder. You can change it before each analysis.");
+        ui.add_space(8.0);
+
+        ui.horizontal_wrapped(|ui| {
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::BuiltIn && self.mode == BuiltInMode::Type,
+                "By Type",
+                "Images / PDFs / Videos",
+                "Group similar file types together.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::BuiltIn;
+                self.mode = BuiltInMode::Type;
+            }
+
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::BuiltIn && self.mode == BuiltInMode::Date,
+                "By Date",
+                "2026 / May / 13",
+                "Sort files by when they were last modified.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::BuiltIn;
+                self.mode = BuiltInMode::Date;
+            }
+
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::BuiltIn
+                    && self.mode == BuiltInMode::TypeYear,
+                "Type + Date",
+                "Images / 2026 / May",
+                "Keep file types together and add date folders inside them.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::BuiltIn;
+                self.mode = BuiltInMode::TypeYear;
+            }
+
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::RuleProfile,
+                "Custom Rules",
+                "Documents / PDFs",
+                "Use an imported or saved rule profile.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::RuleProfile;
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.label(format!("Selected style: {}", self.selected_style_title()));
+
+        if self.planning_source == PlanningSource::RuleProfile {
+            ui.add_space(8.0);
+            egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(248, 242, 233))
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+                .inner_margin(egui::Margin::same(12.0))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Custom rule profile").strong());
+                    if let Some(profile) = &self.loaded_profile {
+                        ui.label(format!("Using {}.", profile.display_label()));
+                    } else {
+                        ui.colored_label(
+                            Color32::from_rgb(170, 110, 35),
+                            "Choose a profile before analyzing with Custom Rules.",
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Import profile...").clicked() {
+                            self.import_rule_profile();
+                        }
+                        if ui.button("Open Rules").clicked() {
+                            self.active_section = AppSection::Rules;
+                        }
+                    });
+                });
+        }
+
+        ui.add_space(10.0);
+        egui::CollapsingHeader::new("Advanced options")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.include_subfolders, "Include subfolders");
+                ui.label("By default, smartfolder analyzes only the selected folder.");
+            });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.is_analyzing()
+                        && !self.is_applying()
+                        && !self.is_undoing()
+                        && self.can_run_analysis(),
+                    egui::Button::new(RichText::new("Analyze Folder").strong())
+                        .min_size(egui::vec2(160.0, 34.0)),
+                )
+                .clicked()
+            {
+                self.start_analysis();
+            }
+
+            if ui
+                .add_enabled(self.is_analyzing(), egui::Button::new("Cancel Analysis"))
+                .clicked()
+            {
+                self.cancel_analysis();
+            }
+
+            if !self.can_run_analysis() && self.planning_source == PlanningSource::RuleProfile {
+                ui.label("Import a rule profile to analyze with Custom Rules.");
+            } else if !self.has_selected_root() {
+                ui.label("Choose a folder to enable analysis.");
+            } else {
+                ui.label("Analysis creates a preview first. Nothing moves until you confirm.");
+            }
+        });
+
+        if self.is_analyzing() {
+            ui.add_space(10.0);
+            if let Some(progress) = &self.analysis_progress {
+                render_analysis_progress(ui, ctx, progress);
+            }
+        }
+
+        if self.is_applying() {
+            ui.add_space(10.0);
+            if let Some(progress) = &self.apply_progress {
+                render_apply_progress(ui, progress);
+            }
+        }
+
+        if self.is_undoing() {
+            ui.add_space(10.0);
+            render_undo_progress(ui);
+        }
+
+        if let Some(result) = &self.analysis_result {
+            ui.add_space(14.0);
+            render_plan_summary(ui, result);
+
+            ui.add_space(10.0);
+            render_apply_entry(
+                ui,
+                result,
+                self.is_applying(),
+                self.apply_result.is_some(),
+                &mut self.show_apply_confirmation,
+            );
+
+            if let Some(apply_result) = &self.apply_result {
+                ui.add_space(10.0);
+                render_apply_result(
+                    ui,
+                    apply_result,
+                    self.is_analyzing() || self.is_applying() || self.is_undoing(),
+                    history_action,
+                );
+            }
+
+            if !result.warning_messages.is_empty() {
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new("Warnings and exclusions")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for warning in &result.warning_messages {
+                            truncated_label(ui, &format!("- {warning}"));
+                        }
+                    });
+            }
+
+            ui.add_space(10.0);
+            render_preview_controls(
+                ui,
+                result,
+                self.preview_filter,
+                self.preview_offset,
+                preview_action,
+            );
+            let mut selected_preview_row = self.selected_preview_row;
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    render_preview_rows(ui, result, &mut selected_preview_row);
+                });
+            self.selected_preview_row = selected_preview_row;
+
+            ui.add_space(10.0);
+            render_preview_detail(ui, result, self.selected_preview_row);
+        }
+    }
+
+    fn render_activity_screen(
+        &mut self,
+        ui: &mut egui::Ui,
+        history_action: &mut Option<HistoryAction>,
+    ) {
+        render_screen_heading(
+            ui,
+            "Activity",
+            "Review recent organization runs for this folder and undo changes when you need to restore the original layout.",
+        );
+        self.render_status_messages(ui);
+        ui.add_space(10.0);
+        render_transaction_history(
+            ui,
+            &self.transaction_rows,
+            self.active_root().as_deref(),
+            self.transaction_message.as_deref(),
+            self.undo_result.as_ref(),
+            self.transaction_detail.as_ref(),
+            self.transaction_detail_message.as_deref(),
+            self.show_recovery_log,
+            self.is_analyzing() || self.is_applying() || self.is_undoing(),
+            history_action,
+        );
+    }
+
+    fn render_rules_screen(&mut self, ui: &mut egui::Ui) {
+        render_screen_heading(
+            ui,
+            "Rules",
+            "Use a built-in style or manage a simple custom rule profile for folders that need a more specific destination.",
+        );
+        self.render_status_messages(ui);
+        ui.add_space(10.0);
+
+        ui.label(RichText::new("Built-in styles").strong().size(18.0));
+        ui.label(
+            "These are the ready-made organization styles available from the Organize screen.",
+        );
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::BuiltIn && self.mode == BuiltInMode::Type,
+                "By Type",
+                "Images / PDFs / Videos",
+                "Use this when a folder has mixed file kinds.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::BuiltIn;
+                self.mode = BuiltInMode::Type;
+                self.active_section = AppSection::Organize;
+            }
+
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::BuiltIn && self.mode == BuiltInMode::Date,
+                "By Date",
+                "2026 / May / 13",
+                "Use this when time is the clearest grouping.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::BuiltIn;
+                self.mode = BuiltInMode::Date;
+                self.active_section = AppSection::Organize;
+            }
+
+            if render_style_card(
+                ui,
+                self.planning_source == PlanningSource::BuiltIn
+                    && self.mode == BuiltInMode::TypeYear,
+                "Type + Date",
+                "Images / 2026 / May",
+                "Use this for large folders that need both structure and time.",
+            )
+            .clicked()
+            {
+                self.planning_source = PlanningSource::BuiltIn;
+                self.mode = BuiltInMode::TypeYear;
+                self.active_section = AppSection::Organize;
+            }
+        });
+
+        ui.add_space(12.0);
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(250, 246, 240))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Custom profile").strong().size(18.0));
+                ui.label("A profile gives one folder a specific rule without editing raw TOML.");
+                ui.add_space(8.0);
+                if let Some(profile) = &self.loaded_profile {
+                    render_status_chip(
+                        ui,
+                        "Profile loaded",
+                        Color32::from_rgb(92, 128, 78),
+                        Color32::from_rgb(231, 241, 228),
+                    );
+                    ui.label(format!("Current profile: {}", profile.profile.profile_id));
+                    truncated_label(ui, &format!("Saved at: {}", profile.path.display()));
+                } else {
+                    render_status_chip(
+                        ui,
+                        "No profile selected",
+                        Color32::from_rgb(170, 110, 35),
+                        Color32::from_rgb(248, 238, 217),
+                    );
+                    ui.label("Create a simple profile below or import an existing TOML profile.");
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Use Custom Rules").clicked() {
+                        self.planning_source = PlanningSource::RuleProfile;
+                        self.active_section = AppSection::Organize;
+                    }
+                    if ui.button("Validate profile").clicked() {
+                        self.validate_profile_editor();
+                    }
+                    if ui.button("Save profile").clicked() {
+                        self.save_profile_from_editor();
+                    }
+                });
+                egui::CollapsingHeader::new("Advanced TOML actions")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            "Import or export TOML when you want to share or hand-edit a profile.",
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Import TOML...").clicked() {
+                                self.import_rule_profile();
+                            }
+                            if ui.button("Export TOML...").clicked() {
+                                self.export_profile_from_editor();
+                            }
+                        });
+                    });
+            });
+
+        ui.add_space(12.0);
+        self.render_profile_editor(ui);
+    }
+
+    fn render_settings_screen(&mut self, ui: &mut egui::Ui) {
+        render_screen_heading(
+            ui,
+            "Settings",
+            "Keep the app clean, confirm Explorer launch behavior, and preserve the safer default of analyzing only the selected folder.",
+        );
+        self.render_status_messages(ui);
+        ui.add_space(10.0);
+
+        ui.horizontal_wrapped(|ui| {
+            render_info_card(
+                ui,
+                "Safety defaults",
+                "smartfolder previews first, never overwrites existing files, and keeps subfolders opt-in.",
+                "No automatic organizing",
+            );
+            render_info_card(
+                ui,
+                "History",
+                "Restore history is recorded before files move so Undo Changes can restore completed moves.",
+                "Undo-ready workflow",
+            );
+            render_info_card(
+                ui,
+                "Appearance",
+                "The v2 interface currently uses one built-in visual style while the workflow stabilizes.",
+                "No saved theme setting yet",
+            );
+        });
+
+        ui.add_space(10.0);
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(250, 246, 240))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Explorer integration").strong().size(18.0));
+                ui.label("The folder context menu entry should read Organize with smartfolder.");
+                render_safety_line(ui, "It only opens the app with the clicked folder selected.");
+                render_safety_line(ui, "It never organizes files directly from Explorer.");
+                ui.add_space(8.0);
+                ui.label("Register or unregister it with scripts/register-explorer-launcher.ps1 after building the release GUI.");
+            });
+
+        ui.add_space(10.0);
+        egui::Frame::group(ui.style())
+            .fill(Color32::from_rgb(250, 246, 240))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+            .inner_margin(egui::Margin::same(14.0))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Storage maintenance").strong().size(18.0));
+                ui.label("Cleanup removes old cached analysis sessions and preview pages. It does not remove restore history for organized files.");
+                if ui
+                    .add_enabled(
+                        !self.is_analyzing() && !self.is_applying() && !self.is_undoing(),
+                        egui::Button::new("Clean old session data"),
+                    )
+                    .clicked()
+                {
+                    self.cleanup_old_sessions();
+                }
+            });
     }
 
     fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
@@ -635,6 +1275,7 @@ impl SmartfolderApp {
                 }
                 self.preview_filter = filter;
                 self.preview_offset = offset;
+                self.sync_preview_selection();
                 self.error_message = None;
             }
             Err(message) => {
@@ -649,257 +1290,92 @@ impl eframe::App for SmartfolderApp {
         self.poll_analysis();
         self.poll_apply();
         self.poll_undo();
+        apply_visual_style(ctx);
 
         if self.is_analyzing() || self.is_applying() || self.is_undoing() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
+        let mut preview_action = None;
+        let mut history_action = None;
+
+        egui::SidePanel::left("app-shell-nav")
+            .resizable(false)
+            .exact_width(SHELL_NAV_WIDTH)
+            .show(ctx, |ui| self.render_sidebar(ui));
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("smartfolder 2.0");
-            ui.label("Windows-first GUI prototype using the shared Rust core.");
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Root folder");
-                let root_input_width = (ui.available_width() - 220.0).max(220.0);
-                ui.add_sized(
-                    [root_input_width, 22.0],
-                    egui::TextEdit::singleline(&mut self.root_input),
-                );
-                if ui.button("Browse...").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        self.root_input = path.display().to_string();
-                    }
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Rules");
-                ui.radio_value(&mut self.planning_source, PlanningSource::BuiltIn, "Built-in");
-                ui.radio_value(
-                    &mut self.planning_source,
-                    PlanningSource::RuleProfile,
-                    "Profile",
-                );
-
-                match self.planning_source {
-                    PlanningSource::BuiltIn => {
-                        egui::ComboBox::from_id_source("built-in-mode")
-                            .selected_text(Self::mode_label(self.mode))
-                            .show_ui(ui, |ui| {
-                                for mode in [
-                                    BuiltInMode::Type,
-                                    BuiltInMode::Date,
-                                    BuiltInMode::Extension,
-                                    BuiltInMode::TypeYear,
-                                ] {
-                                    ui.selectable_value(
-                                        &mut self.mode,
-                                        mode,
-                                        Self::mode_label(mode),
-                                    );
-                                }
-                            });
-                    }
-                    PlanningSource::RuleProfile => {
-                        let profile_label = self.loaded_profile.as_ref().map_or_else(
-                            || "No profile imported".to_string(),
-                            LoadedRuleProfile::display_label,
-                        );
-                        ui.add_sized(
-                            [220.0, 20.0],
-                            egui::Label::new(profile_label).truncate(),
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match self.active_section {
+                    AppSection::Organize => {
+                        self.render_organize_screen(
+                            ui,
+                            ctx,
+                            &mut preview_action,
+                            &mut history_action,
                         );
                     }
+                    AppSection::Activity => {
+                        self.render_activity_screen(ui, &mut history_action);
+                    }
+                    AppSection::Rules => {
+                        self.render_rules_screen(ui);
+                    }
+                    AppSection::Settings => {
+                        self.render_settings_screen(ui);
+                    }
+                });
+        });
+
+        if let Some(action) = preview_action {
+            self.apply_preview_action(action);
+        }
+
+        if let Some(action) = history_action {
+            match action {
+                HistoryAction::Refresh => self.refresh_transaction_history(),
+                HistoryAction::ViewDetails(transaction_id) => {
+                    self.load_transaction_detail(&transaction_id);
                 }
-
-                if ui.button("Import profile...").clicked() {
-                    self.import_rule_profile();
+                HistoryAction::CloseDetails => {
+                    self.transaction_detail = None;
+                    self.transaction_detail_message = None;
                 }
-
-                ui.checkbox(&mut self.include_subfolders, "Include subfolders");
-
-                if ui
-                    .add_enabled(
-                        !self.is_analyzing() && !self.is_applying() && !self.is_undoing(),
-                        egui::Button::new("Analyze"),
-                    )
-                    .clicked()
-                {
-                    self.start_analysis();
+                HistoryAction::ToggleRecoveryLog => {
+                    self.show_recovery_log = !self.show_recovery_log;
                 }
-
-                if ui
-                    .add_enabled(self.is_analyzing(), egui::Button::new("Cancel"))
-                    .clicked()
-                {
-                    self.cancel_analysis();
-                }
-
-                if ui
-                    .add_enabled(
-                        !self.is_analyzing() && !self.is_applying() && !self.is_undoing(),
-                        egui::Button::new("Clean old session data"),
-                    )
-                    .clicked()
-                {
-                    self.cleanup_old_sessions();
-                }
-            });
-
-            if self.planning_source == PlanningSource::RuleProfile {
-                self.render_profile_editor(ui);
-            }
-
-            if self.is_analyzing() {
-                ui.add_space(8.0);
-                if let Some(progress) = &self.analysis_progress {
-                    render_analysis_progress(ui, ctx, progress);
+                HistoryAction::ConfirmUndo(transaction_id) => {
+                    self.show_undo_confirmation = Some(transaction_id);
                 }
             }
+        }
 
-            if self.is_applying() {
-                ui.add_space(8.0);
-                if let Some(progress) = &self.apply_progress {
-                    render_apply_progress(ui, progress);
-                }
-            }
-
-            if self.is_undoing() {
-                ui.add_space(8.0);
-                render_undo_progress(ui);
-            }
-
-            if let Some(message) = &self.error_message {
-                ui.add_space(8.0);
-                ui.colored_label(Color32::from_rgb(190, 40, 40), message);
-            }
-
-            if let Some(message) = &self.maintenance_message {
-                ui.add_space(8.0);
-                ui.colored_label(Color32::from_rgb(70, 140, 90), message);
-            }
-
-            let mut preview_action = None;
-            let mut history_action = None;
-
+        if self.show_apply_confirmation {
             if let Some(result) = &self.analysis_result {
-                ui.add_space(12.0);
-                ui.separator();
-                ui.label(RichText::new(format!("Plan {}", result.plan_id)).strong());
-                ui.label(format!("Session: {}", result.session_id));
-                truncated_label(ui, &format!("Root: {}", result.root.display()));
-
-                ui.add_space(8.0);
-                render_plan_summary(ui, result);
-
-                ui.add_space(8.0);
-                render_apply_entry(ui, result, self.is_applying(), self.apply_result.is_some(), &mut self.show_apply_confirmation);
-
-                if let Some(apply_result) = &self.apply_result {
-                    ui.add_space(8.0);
-                    render_apply_result(
-                        ui,
-                        apply_result,
-                        self.is_analyzing() || self.is_applying() || self.is_undoing(),
-                        &mut history_action,
-                    );
-                }
-
-                if !result.warning_messages.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Warnings and exclusions").strong());
-                    for warning in &result.warning_messages {
-                        truncated_label(ui, &format!("- {warning}"));
-                    }
-                }
-
-                ui.add_space(8.0);
-                render_preview_controls(
-                    ui,
-                    result,
-                    self.preview_filter,
-                    self.preview_offset,
-                    &mut preview_action,
-                );
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        render_preview_rows(ui, result);
-                    });
-            }
-
-            if let Some(action) = preview_action {
-                self.apply_preview_action(action);
-            }
-
-            ui.add_space(12.0);
-            ui.separator();
-            render_transaction_history(
-                ui,
-                &self.transaction_rows,
-                self.active_root().as_deref(),
-                self.transaction_message.as_deref(),
-                self.undo_result.as_ref(),
-                self.transaction_detail.as_ref(),
-                self.transaction_detail_message.as_deref(),
-                self.show_recovery_log,
-                self.is_analyzing() || self.is_applying() || self.is_undoing(),
-                &mut history_action,
-            );
-
-            if let Some(action) = history_action {
-                match action {
-                    HistoryAction::Refresh => self.refresh_transaction_history(),
-                    HistoryAction::ViewDetails(transaction_id) => {
-                        self.load_transaction_detail(&transaction_id);
-                    }
-                    HistoryAction::CloseDetails => {
-                        self.transaction_detail = None;
-                        self.transaction_detail_message = None;
-                    }
-                    HistoryAction::ToggleRecoveryLog => {
-                        self.show_recovery_log = !self.show_recovery_log;
-                    }
-                    HistoryAction::ConfirmUndo(transaction_id) => {
-                        self.show_undo_confirmation = Some(transaction_id);
-                    }
-                }
-            }
-
-            if self.show_apply_confirmation {
-                if let Some(result) = &self.analysis_result {
-                    let mut confirmed = false;
-                    let mut dismissed = false;
-                    render_apply_confirmation(ctx, result, &mut confirmed, &mut dismissed);
-                    if confirmed {
-                        self.start_apply();
-                    } else if dismissed {
-                        self.show_apply_confirmation = false;
-                    }
-                } else {
-                    self.show_apply_confirmation = false;
-                }
-            }
-
-            if let Some(transaction_id) = self.show_undo_confirmation.clone() {
                 let mut confirmed = false;
                 let mut dismissed = false;
-                render_undo_confirmation(ctx, &transaction_id, &mut confirmed, &mut dismissed);
+                render_apply_confirmation(ctx, result, &mut confirmed, &mut dismissed);
                 if confirmed {
-                    self.start_undo(transaction_id);
+                    self.start_apply();
                 } else if dismissed {
-                    self.show_undo_confirmation = None;
+                    self.show_apply_confirmation = false;
                 }
+            } else {
+                self.show_apply_confirmation = false;
             }
+        }
 
-            ui.add_space(12.0);
-            ui.separator();
-            ui.label(
-                "This GUI milestone now covers app launch, folder preloading, built-in mode selection, shared-core analysis, plan summaries, paged previews, safe apply, and transaction undo. Rule editing remains an upcoming v2 milestone.",
-            );
-        });
+        if let Some(transaction_id) = self.show_undo_confirmation.clone() {
+            let mut confirmed = false;
+            let mut dismissed = false;
+            render_undo_confirmation(ctx, &transaction_id, &mut confirmed, &mut dismissed);
+            if confirmed {
+                self.start_undo(transaction_id);
+            } else if dismissed {
+                self.show_undo_confirmation = None;
+            }
+        }
     }
 }
 
@@ -1192,7 +1668,7 @@ struct AnalysisProgress {
 impl AnalysisProgress {
     fn preparing(root: PathBuf) -> Self {
         Self {
-            headline: "Preparing analysis session".to_string(),
+            headline: "Getting ready to analyze".to_string(),
             detail: root.display().to_string(),
             fraction: Some(0.0),
             entries_seen: 0,
@@ -1215,7 +1691,7 @@ impl AnalysisProgress {
             |path| path.display().to_string(),
         );
         Self {
-            headline: "Scanning folder metadata".to_string(),
+            headline: "Scanning the selected folder".to_string(),
             detail,
             fraction: None,
             entries_seen: progress.summary.entries_seen,
@@ -1243,7 +1719,7 @@ impl AnalysisProgress {
             |path| path.display().to_string(),
         );
         Self {
-            headline: "Generating organization plan".to_string(),
+            headline: "Working out safe destinations".to_string(),
             detail,
             fraction,
             entries_seen: 0,
@@ -1262,8 +1738,8 @@ impl AnalysisProgress {
 
     fn loading_preview() -> Self {
         Self {
-            headline: "Loading preview rows".to_string(),
-            detail: "Fetching the first page of stored operations".to_string(),
+            headline: "Preparing your preview".to_string(),
+            detail: "Loading the first page of planned changes".to_string(),
             fraction: Some(0.95),
             entries_seen: 0,
             records_collected: 0,
@@ -1349,8 +1825,8 @@ struct ApplyProgress {
 impl ApplyProgress {
     fn preparing(total: usize) -> Self {
         Self {
-            headline: "Preparing apply transaction".to_string(),
-            detail: "Creating transaction journal".to_string(),
+            headline: "Getting ready to organize".to_string(),
+            detail: "Creating the restore record before any files move".to_string(),
             processed: 0,
             total,
             completed: 0,
@@ -1365,7 +1841,7 @@ impl ApplyProgress {
             |path| path.display().to_string(),
         );
         Self {
-            headline: "Applying ready moves".to_string(),
+            headline: "Organizing files".to_string(),
             detail,
             processed: progress.processed,
             total: progress.total,
@@ -1621,7 +2097,7 @@ fn apply_session_plan(
             let _ = sender.send(ApplyEvent::Progress(ApplyProgress::applying(progress)));
         },
     )
-    .map_err(|error| format!("Failed to apply ready moves: {error}"))?;
+    .map_err(|error| format!("Failed to organize ready files: {error}"))?;
 
     Ok(apply_output(summary))
 }
@@ -1767,7 +2243,7 @@ fn transaction_reason_summary(
 fn undo_transaction_for_gui(transaction_id: &str) -> UndoMessage {
     undo_transaction(transaction_id)
         .map(undo_output)
-        .map_err(|error| format!("Failed to undo transaction: {error}"))
+        .map_err(|error| format!("Failed to undo changes: {error}"))
 }
 
 fn undo_output(summary: UndoSummary) -> UndoOutput {
@@ -1797,24 +2273,28 @@ fn render_analysis_progress(ui: &mut egui::Ui, ctx: &egui::Context, progress: &A
     );
     truncated_label(ui, &progress.detail);
     ui.add_space(6.0);
-    egui::Grid::new("analysis-progress-grid")
-        .num_columns(4)
-        .spacing([12.0, 4.0])
+    egui::CollapsingHeader::new("Analysis details")
+        .default_open(false)
         .show(ui, |ui| {
-            progress_stat(ui, "Entries", progress.entries_seen);
-            progress_stat(ui, "Records", progress.records_collected);
-            ui.end_row();
-            progress_stat(ui, "Folders", progress.folders_scanned);
-            progress_stat(ui, "Warnings", progress.warnings);
-            ui.end_row();
-            progress_stat(ui, "Skipped entries", progress.entries_skipped);
-            progress_stat(ui, "Planned", progress.moves_proposed);
-            ui.end_row();
-            progress_stat(ui, "Ambiguous", progress.ambiguous_files);
-            progress_stat(ui, "Conflicts", progress.conflicts);
-            ui.end_row();
-            progress_stat(ui, "Skipped plan items", progress.skipped);
-            ui.end_row();
+            egui::Grid::new("analysis-progress-grid")
+                .num_columns(4)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    progress_stat(ui, "Entries", progress.entries_seen);
+                    progress_stat(ui, "Records", progress.records_collected);
+                    ui.end_row();
+                    progress_stat(ui, "Folders", progress.folders_scanned);
+                    progress_stat(ui, "Warnings", progress.warnings);
+                    ui.end_row();
+                    progress_stat(ui, "Skipped entries", progress.entries_skipped);
+                    progress_stat(ui, "Planned", progress.moves_proposed);
+                    ui.end_row();
+                    progress_stat(ui, "Needs review", progress.ambiguous_files);
+                    progress_stat(ui, "Conflicts", progress.conflicts);
+                    ui.end_row();
+                    progress_stat(ui, "Skipped plan items", progress.skipped);
+                    ui.end_row();
+                });
         });
 }
 
@@ -1861,20 +2341,24 @@ fn render_apply_progress(ui: &mut egui::Ui, progress: &ApplyProgress) {
     );
     truncated_label(ui, &progress.detail);
     ui.add_space(6.0);
-    egui::Grid::new("apply-progress-grid")
-        .num_columns(4)
-        .spacing([12.0, 4.0])
+    egui::CollapsingHeader::new("Progress details")
+        .default_open(false)
         .show(ui, |ui| {
-            progress_stat(ui, "Completed", progress.completed);
-            progress_stat(ui, "Skipped", progress.skipped);
-            ui.end_row();
-            progress_stat(ui, "Failed", progress.failed);
-            progress_stat(
-                ui,
-                "Remaining",
-                progress.total.saturating_sub(progress.processed),
-            );
-            ui.end_row();
+            egui::Grid::new("apply-progress-grid")
+                .num_columns(4)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    progress_stat(ui, "Completed", progress.completed);
+                    progress_stat(ui, "Skipped", progress.skipped);
+                    ui.end_row();
+                    progress_stat(ui, "Failed", progress.failed);
+                    progress_stat(
+                        ui,
+                        "Remaining",
+                        progress.total.saturating_sub(progress.processed),
+                    );
+                    ui.end_row();
+                });
         });
 }
 
@@ -1898,20 +2382,48 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput) {
     let needs_attention = result.preview_counts.needs_attention;
     let left_in_place = result.summary.ambiguous_files + result.summary.skipped;
 
-    ui.label(RichText::new(plan_summary_headline(result)).strong());
+    ui.label(RichText::new("Analysis summary").strong().size(18.0));
+    ui.label(plan_summary_headline(result));
     ui.label(plan_summary_detail(ready, needs_attention, left_in_place));
-    ui.add_space(6.0);
+    ui.add_space(8.0);
 
-    egui::Grid::new("analysis-summary")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
-        .show(ui, |ui| {
-            summary_row(ui, "Files scanned", result.summary.files_scanned);
-            summary_row(ui, "Ready to apply", ready);
-            summary_row(ui, "Needs attention", needs_attention);
-            summary_row(ui, "Ambiguous files", result.summary.ambiguous_files);
-            summary_row(ui, "Warnings", result.warning_messages.len());
-        });
+    ui.horizontal_wrapped(|ui| {
+        render_summary_card(
+            ui,
+            "Ready to organize",
+            ready,
+            "Files that can be moved safely right now.",
+            Color32::from_rgb(231, 241, 228),
+            Color32::from_rgb(92, 128, 78),
+        );
+        render_summary_card(
+            ui,
+            "Needs review",
+            needs_attention,
+            "Planned moves with conflicts or other issues.",
+            Color32::from_rgb(248, 238, 217),
+            Color32::from_rgb(170, 110, 35),
+        );
+        render_summary_card(
+            ui,
+            "Left untouched",
+            left_in_place,
+            "Files smartfolder chose not to move automatically.",
+            Color32::from_rgb(243, 238, 234),
+            Color32::from_rgb(116, 103, 90),
+        );
+    });
+
+    ui.add_space(8.0);
+    truncated_label(
+        ui,
+        &format!(
+            "Scanned {} files. {} warning{} recorded.",
+            result.summary.files_scanned,
+            result.warning_messages.len(),
+            plural(result.warning_messages.len())
+        ),
+    );
 
     if needs_attention == 0
         && result.summary.ambiguous_files == 0
@@ -1924,7 +2436,7 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput) {
     } else {
         ui.colored_label(
             Color32::from_rgb(170, 110, 35),
-            "Review the attention and warnings views before applying this plan.",
+            "Review the attention and warnings views before organizing these files.",
         );
     }
 }
@@ -1938,26 +2450,41 @@ fn render_apply_entry(
 ) {
     let ready = result.preview_counts.ready;
     let can_apply = ready > 0 && !is_applying && !already_applied;
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(can_apply, egui::Button::new("Apply ready moves"))
-            .clicked()
-        {
-            *show_confirmation = true;
-        }
-
-        if already_applied {
-            ui.label("This plan has already been applied. Run analysis again for a fresh plan.");
-        } else if ready == 0 {
-            ui.label("No ready moves are available to apply.");
-        } else {
-            ui.label(format!(
-                "Applies {} ready move{} and leaves attention items untouched.",
-                ready,
-                plural(ready)
-            ));
-        }
-    });
+    egui::Frame::group(ui.style())
+        .fill(Color32::from_rgb(250, 246, 240))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Ready to organize").strong().size(18.0));
+                    if already_applied {
+                        ui.label("This preview has already been organized. Run Analyze Folder again for a fresh preview.");
+                    } else if ready == 0 {
+                        ui.label("No safe moves are ready to organize.");
+                    } else {
+                        ui.label(format!(
+                            "{} ready file{} will move. Needs-review items will stay untouched.",
+                            ready,
+                            plural(ready)
+                        ));
+                        ui.label("smartfolder records restore history before moving anything.");
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            can_apply,
+                            egui::Button::new(RichText::new("Organize Files").strong())
+                                .min_size(egui::vec2(160.0, 38.0)),
+                        )
+                        .clicked()
+                    {
+                        *show_confirmation = true;
+                    }
+                });
+            });
+        });
 }
 
 fn render_apply_confirmation(
@@ -1966,33 +2493,47 @@ fn render_apply_confirmation(
     confirmed: &mut bool,
     dismissed: &mut bool,
 ) {
-    egui::Window::new("Confirm apply")
+    egui::Window::new("Confirm organization")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label(RichText::new("Apply ready moves?").strong());
+            ui.label(RichText::new("Ready to organize these files").strong().size(20.0));
             ui.label(format!(
-                "smartfolder will move {} ready item{} and leave conflicts, warnings, and ambiguous files untouched.",
+                "smartfolder will move {} ready file{} into organized folders and leave review items untouched.",
                 result.preview_counts.ready,
                 plural(result.preview_counts.ready)
             ));
-            ui.add_space(6.0);
-            egui::Grid::new("apply-confirmation-summary")
-                .num_columns(2)
-                .spacing([16.0, 6.0])
-                .show(ui, |ui| {
-                    summary_row(ui, "Ready moves", result.preview_counts.ready);
-                    summary_row(ui, "Needs attention", result.preview_counts.needs_attention);
-                    summary_row(ui, "Ambiguous files", result.summary.ambiguous_files);
-                    summary_row(ui, "Warnings", result.warning_messages.len());
-                });
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                render_summary_card(
+                    ui,
+                    "Ready",
+                    result.preview_counts.ready,
+                    "Files that will move now.",
+                    Color32::from_rgb(231, 241, 228),
+                    Color32::from_rgb(92, 128, 78),
+                );
+                render_summary_card(
+                    ui,
+                    "Needs review",
+                    result.preview_counts.needs_attention,
+                    "Planned moves left untouched.",
+                    Color32::from_rgb(248, 238, 217),
+                    Color32::from_rgb(170, 110, 35),
+                );
+            });
+
+            ui.add_space(8.0);
+            render_safety_line(ui, "Existing files will not be overwritten.");
+            render_safety_line(ui, "Restore history is recorded before files move.");
+            render_safety_line(ui, "Undo Changes will be available after completion.");
 
             if is_cloud_synced_path(&result.root) {
                 ui.add_space(6.0);
                 ui.colored_label(
                     Color32::from_rgb(170, 110, 35),
-                    "This folder appears to be cloud-synced. Let sync settle before applying and review the transaction summary afterward.",
+                    "This folder appears to be cloud-synced. Let sync settle before organizing and review the completion summary afterward.",
                 );
             }
 
@@ -2001,7 +2542,7 @@ fn render_apply_confirmation(
                 if ui.button("Cancel").clicked() {
                     *dismissed = true;
                 }
-                if ui.button("Apply ready moves").clicked() {
+                if ui.button("Organize Files").clicked() {
                     *confirmed = true;
                 }
             });
@@ -2014,37 +2555,80 @@ fn render_apply_result(
     busy: bool,
     action: &mut Option<HistoryAction>,
 ) {
-    ui.label(RichText::new("Apply complete").strong());
-    egui::Grid::new("apply-result")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
+    egui::Frame::group(ui.style())
+        .fill(Color32::from_rgb(231, 241, 228))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(92, 128, 78)))
+        .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
-            summary_row(ui, "Completed", result.completed);
-            summary_row(ui, "Skipped", result.skipped);
-            summary_row(ui, "Failed", result.failed);
+            ui.label(RichText::new("Organization complete").strong().size(20.0));
+            ui.label(format!(
+                "{} file{} organized. Undo Changes is ready if you want to restore the original layout.",
+                result.completed,
+                plural(result.completed)
+            ));
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                render_summary_card(
+                    ui,
+                    "Organized",
+                    result.completed,
+                    "Files moved successfully.",
+                    Color32::from_rgb(231, 241, 228),
+                    Color32::from_rgb(92, 128, 78),
+                );
+                render_summary_card(
+                    ui,
+                    "Skipped",
+                    result.skipped,
+                    "Files left untouched.",
+                    Color32::from_rgb(243, 238, 234),
+                    Color32::from_rgb(116, 103, 90),
+                );
+                render_summary_card(
+                    ui,
+                    "Failed",
+                    result.failed,
+                    "Files needing attention.",
+                    Color32::from_rgb(248, 238, 217),
+                    Color32::from_rgb(170, 110, 35),
+                );
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new(RichText::new("Undo Changes").strong())
+                            .min_size(egui::vec2(150.0, 36.0)),
+                    )
+                    .clicked()
+                {
+                    *action = Some(HistoryAction::ConfirmUndo(result.transaction_id.clone()));
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("View Details"))
+                    .clicked()
+                {
+                    *action = Some(HistoryAction::ViewDetails(result.transaction_id.clone()));
+                }
+            });
+            ui.add_space(6.0);
+            egui::CollapsingHeader::new("Restore history details")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(format!("Activity id: {}", result.transaction_id));
+                    truncated_label(
+                        ui,
+                        &format!("Restore history: {}", result.journal_path.display()),
+                    );
+                });
         });
-    ui.label(format!("Transaction: {}", result.transaction_id));
-    truncated_label(ui, &format!("Journal: {}", result.journal_path.display()));
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!busy, egui::Button::new("Undo transaction"))
-            .clicked()
-        {
-            *action = Some(HistoryAction::ConfirmUndo(result.transaction_id.clone()));
-        }
-        if ui
-            .add_enabled(!busy, egui::Button::new("View transaction details"))
-            .clicked()
-        {
-            *action = Some(HistoryAction::ViewDetails(result.transaction_id.clone()));
-        }
-    });
 }
 
 fn render_undo_progress(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.label("Undoing transaction with the shared recovery model...");
+        ui.label("Undoing changes and restoring original file locations...");
     });
 }
 
@@ -2069,9 +2653,9 @@ fn render_transaction_history(
             *action = Some(HistoryAction::Refresh);
         }
         let toggle_label = if show_recovery_log {
-            "Hide recovery log"
+            "Hide restore history"
         } else {
-            "Show recovery log"
+            "Show restore history"
         };
         if ui.button(toggle_label).clicked() {
             *action = Some(HistoryAction::ToggleRecoveryLog);
@@ -2128,34 +2712,55 @@ fn render_current_folder_activity(
         ui.label("No activity has been recorded for this folder yet.");
         if hidden_count > 0 {
             ui.label(format!(
-                "{} transaction{} from other folders hidden.",
+                "{} activit{} from other folders hidden.",
                 hidden_count,
-                plural(hidden_count)
+                plural_y(hidden_count)
             ));
         }
         return;
     }
 
     let latest = rows[0];
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Latest activity").strong().size(18.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (stroke, fill) = activity_status_colors(latest.status);
+            render_status_chip(ui, status_label(latest.status), stroke, fill);
+        });
+    });
     ui.label(RichText::new(activity_headline(latest)).strong());
     ui.label(activity_detail(latest));
     ui.add_space(6.0);
 
-    egui::Grid::new("current-folder-activity-summary")
-        .num_columns(4)
-        .spacing([12.0, 4.0])
-        .show(ui, |ui| {
-            progress_stat(ui, "Moved", latest.completed);
-            progress_stat(
-                ui,
-                "Needs attention",
-                latest.skipped + latest.failed + latest.pending,
-            );
-            ui.end_row();
-            progress_stat(ui, "Undone", latest.rolled_back);
-            progress_stat(ui, "Recorded", latest.total_operations);
-            ui.end_row();
-        });
+    ui.horizontal_wrapped(|ui| {
+        render_summary_card(
+            ui,
+            "Organized",
+            latest.completed,
+            "Files moved into organized folders.",
+            Color32::from_rgb(231, 241, 228),
+            Color32::from_rgb(92, 128, 78),
+        );
+        render_summary_card(
+            ui,
+            "Restored",
+            latest.rolled_back,
+            "Files moved back during undo.",
+            Color32::from_rgb(236, 236, 244),
+            Color32::from_rgb(89, 102, 145),
+        );
+        render_summary_card(
+            ui,
+            "Needs review",
+            latest.skipped + latest.failed + latest.pending,
+            "Items skipped, failed, or still pending.",
+            Color32::from_rgb(248, 238, 217),
+            Color32::from_rgb(170, 110, 35),
+        );
+    });
+
+    ui.add_space(6.0);
+    ui.label(format!("Recorded on {}", latest.started_at));
 
     ui.horizontal(|ui| {
         if ui
@@ -2166,8 +2771,8 @@ fn render_current_folder_activity(
         }
         let can_undo = can_undo_status(latest.status) && !busy;
         if ui
-            .add_enabled(can_undo, egui::Button::new("Undo"))
-            .on_disabled_hover_text("Only completed or failed transactions can be undone")
+            .add_enabled(can_undo, egui::Button::new("Undo Changes"))
+            .on_disabled_hover_text("Only completed or failed activities can be undone")
             .clicked()
         {
             *action = Some(HistoryAction::ConfirmUndo(latest.transaction_id.clone()));
@@ -2178,24 +2783,47 @@ fn render_current_folder_activity(
         ui.add_space(8.0);
         ui.label(RichText::new("Earlier activity").strong());
         for row in rows.iter().skip(1).take(3) {
-            ui.horizontal(|ui| {
-                ui.label(activity_short_label(row));
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Details"))
-                    .clicked()
-                {
-                    *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
-                }
-            });
+            egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(250, 246, 240))
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+                .inner_margin(egui::Margin::same(10.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(activity_event_title(row)).strong());
+                            ui.label(activity_short_label(row));
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(!busy, egui::Button::new("Details"))
+                                .clicked()
+                            {
+                                *action =
+                                    Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
+                            }
+                            let can_undo = can_undo_status(row.status) && !busy;
+                            if ui
+                                .add_enabled(can_undo, egui::Button::new("Undo Changes"))
+                                .on_disabled_hover_text(
+                                    "Only completed or failed activities can be undone",
+                                )
+                                .clicked()
+                            {
+                                *action =
+                                    Some(HistoryAction::ConfirmUndo(row.transaction_id.clone()));
+                            }
+                        });
+                    });
+                });
         }
     }
 
     if hidden_count > 0 {
         ui.add_space(6.0);
         ui.label(format!(
-            "{} transaction{} from other folders hidden from this overview.",
+            "{} activit{} from other folders hidden from this overview.",
             hidden_count,
-            plural(hidden_count)
+            plural_y(hidden_count)
         ));
     }
 }
@@ -2206,17 +2834,17 @@ fn render_recovery_log(
     busy: bool,
     action: &mut Option<HistoryAction>,
 ) {
-    ui.label(RichText::new("Technical recovery log").strong());
+    ui.label(RichText::new("Restore history").strong());
     if rows.is_empty() {
-        ui.label("No transaction journals found.");
+        ui.label("No restore history has been recorded yet.");
         return;
     }
 
     let width = ui.available_width().max(360.0);
-    let transaction_width = width * 0.18;
+    let transaction_width = width * 0.24;
     let status_width = width * 0.14;
     let summary_width = width * 0.24;
-    let root_width = width * 0.28;
+    let root_width = width * 0.22;
     let action_width = width * 0.16;
 
     egui::Grid::new("technical-recovery-log")
@@ -2224,7 +2852,7 @@ fn render_recovery_log(
         .striped(true)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
-            preview_cell(ui, "Transaction", transaction_width, true);
+            preview_cell(ui, "Activity", transaction_width, true);
             preview_cell(ui, "Status", status_width, true);
             preview_cell(ui, "Summary", summary_width, true);
             preview_cell(ui, "Root", root_width, true);
@@ -2232,7 +2860,13 @@ fn render_recovery_log(
             ui.end_row();
 
             for row in rows.iter().take(8) {
-                preview_cell(ui, &row.transaction_id, transaction_width, false);
+                preview_cell_with_tooltip(
+                    ui,
+                    &activity_event_title(row),
+                    transaction_width,
+                    false,
+                    format!("Activity id: {}", row.transaction_id),
+                );
                 preview_cell(ui, status_label(row.status), status_width, false);
                 preview_cell(ui, &activity_count_summary(row), summary_width, false);
                 preview_cell(ui, &row.root_label, root_width, false);
@@ -2245,10 +2879,8 @@ fn render_recovery_log(
                     }
                     let can_undo = can_undo_status(row.status) && !busy;
                     if ui
-                        .add_enabled(can_undo, egui::Button::new("Undo"))
-                        .on_disabled_hover_text(
-                            "Only completed or failed transactions can be undone",
-                        )
+                        .add_enabled(can_undo, egui::Button::new("Undo Changes"))
+                        .on_disabled_hover_text("Only completed or failed activities can be undone")
                         .clicked()
                     {
                         *action = Some(HistoryAction::ConfirmUndo(row.transaction_id.clone()));
@@ -2269,51 +2901,72 @@ fn render_transaction_detail(
     action: &mut Option<HistoryAction>,
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Transaction details").strong());
+        ui.label(RichText::new("Activity details").strong().size(18.0));
+        let (stroke, fill) = activity_status_colors(detail.status);
+        render_status_chip(ui, status_label(detail.status), stroke, fill);
         if ui.button("Close").clicked() {
             *action = Some(HistoryAction::CloseDetails);
         }
     });
 
-    egui::Grid::new("transaction-detail-summary")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Transaction");
-            ui.label(&detail.transaction_id);
-            ui.end_row();
-            ui.label("Plan");
-            ui.label(&detail.plan_id);
-            ui.end_row();
-            ui.label("Status");
-            ui.label(status_label(detail.status));
-            ui.end_row();
-            ui.label("Started");
-            ui.label(&detail.started_at);
-            ui.end_row();
-            ui.label("Completed");
-            ui.label(&detail.completed_at);
-            ui.end_row();
-            ui.label("Why");
-            ui.label(&detail.reason_summary);
-            ui.end_row();
-        });
-    truncated_label(ui, &format!("Root: {}", detail.root));
+    ui.label(activity_detail_headline(detail));
+    ui.label(format!("Why: {}", detail.reason_summary));
+    truncated_label(ui, &format!("Folder: {}", detail.root));
 
     ui.add_space(6.0);
-    egui::Grid::new("transaction-detail-counts")
-        .num_columns(4)
-        .spacing([12.0, 4.0])
+    ui.horizontal_wrapped(|ui| {
+        render_summary_card(
+            ui,
+            "Organized",
+            detail.operation_counts.completed,
+            "Completed file moves.",
+            Color32::from_rgb(231, 241, 228),
+            Color32::from_rgb(92, 128, 78),
+        );
+        render_summary_card(
+            ui,
+            "Restored",
+            detail.operation_counts.rolled_back,
+            "Files restored by undo.",
+            Color32::from_rgb(236, 236, 244),
+            Color32::from_rgb(89, 102, 145),
+        );
+        render_summary_card(
+            ui,
+            "Needs review",
+            detail.operation_counts.skipped
+                + detail.operation_counts.failed
+                + detail.operation_counts.pending,
+            "Skipped, failed, or pending changes.",
+            Color32::from_rgb(248, 238, 217),
+            Color32::from_rgb(170, 110, 35),
+        );
+    });
+
+    ui.add_space(6.0);
+    egui::CollapsingHeader::new("Technical restore details")
+        .default_open(false)
         .show(ui, |ui| {
-            progress_stat(ui, "Completed", detail.operation_counts.completed);
-            progress_stat(ui, "Rolled back", detail.operation_counts.rolled_back);
-            ui.end_row();
-            progress_stat(ui, "Skipped", detail.operation_counts.skipped);
-            progress_stat(ui, "Failed", detail.operation_counts.failed);
-            ui.end_row();
-            progress_stat(ui, "Pending", detail.operation_counts.pending);
-            progress_stat(ui, "Total", detail.total_operations);
-            ui.end_row();
+            egui::Grid::new("transaction-detail-summary")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Activity id");
+                    ui.label(&detail.transaction_id);
+                    ui.end_row();
+                    ui.label("Plan id");
+                    ui.label(&detail.plan_id);
+                    ui.end_row();
+                    ui.label("Started");
+                    ui.label(&detail.started_at);
+                    ui.end_row();
+                    ui.label("Completed");
+                    ui.label(&detail.completed_at);
+                    ui.end_row();
+                    ui.label("Recorded changes");
+                    ui.label(detail.total_operations.to_string());
+                    ui.end_row();
+                });
         });
 
     ui.add_space(6.0);
@@ -2334,7 +2987,7 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
     let reason_width = width * 0.18;
     let error_width = width * 0.13;
 
-    ui.label(RichText::new("Recorded operations").strong());
+    ui.label(RichText::new("Recorded changes").strong());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .max_height(180.0)
@@ -2384,17 +3037,17 @@ fn render_undo_confirmation(
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label(RichText::new("Undo this transaction?").strong());
+            ui.label(RichText::new("Undo these changes?").strong());
             ui.label("smartfolder will move completed files back to their original paths.");
             ui.label("It will refuse to overwrite anything already at an original path.");
             ui.add_space(6.0);
-            truncated_label(ui, &format!("Transaction: {transaction_id}"));
+            truncated_label(ui, &format!("Activity id: {transaction_id}"));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").clicked() {
                     *dismissed = true;
                 }
-                if ui.button("Undo transaction").clicked() {
+                if ui.button("Undo Changes").clicked() {
                     *confirmed = true;
                 }
             });
@@ -2402,7 +3055,7 @@ fn render_undo_confirmation(
 }
 
 fn render_undo_result(ui: &mut egui::Ui, result: &UndoOutput) {
-    ui.label(RichText::new("Undo complete").strong());
+    ui.label(RichText::new("Changes undone").strong());
     egui::Grid::new("undo-result")
         .num_columns(2)
         .spacing([16.0, 6.0])
@@ -2411,24 +3064,27 @@ fn render_undo_result(ui: &mut egui::Ui, result: &UndoOutput) {
             summary_row(ui, "Skipped", result.skipped);
             summary_row(ui, "Failed", result.failed);
         });
-    ui.label(format!("Transaction: {}", result.transaction_id));
-    truncated_label(ui, &format!("Journal: {}", result.journal_path.display()));
+    ui.label(format!("Activity id: {}", result.transaction_id));
+    truncated_label(
+        ui,
+        &format!("Restore history: {}", result.journal_path.display()),
+    );
 }
 
 fn plan_summary_headline(result: &AnalysisOutput) -> String {
     if result.preview_counts.ready == 0 {
-        return "No safe moves are ready to apply.".to_string();
+        return "No safe moves are ready to organize.".to_string();
     }
 
     if result.preview_counts.needs_attention == 0 && result.summary.ambiguous_files == 0 {
         format!(
-            "{} safe move{} ready to apply.",
+            "{} safe file{} ready to organize.",
             result.preview_counts.ready,
             plural(result.preview_counts.ready)
         )
     } else {
         format!(
-            "{} safe move{} ready, with {} item{} needing review.",
+            "{} safe file{} ready, with {} item{} needing review.",
             result.preview_counts.ready,
             plural(result.preview_counts.ready),
             result.preview_counts.needs_attention + result.summary.ambiguous_files,
@@ -2439,7 +3095,7 @@ fn plan_summary_headline(result: &AnalysisOutput) -> String {
 
 fn plan_summary_detail(ready: usize, needs_attention: usize, left_in_place: usize) -> String {
     format!(
-        "The plan can move {ready} item{} automatically. {needs_attention} planned move{} and {left_in_place} unplanned item{} will stay put unless reviewed.",
+        "smartfolder can organize {ready} item{} automatically. {needs_attention} planned move{} and {left_in_place} unplanned item{} will stay put unless reviewed.",
         plural(ready),
         plural(needs_attention),
         plural(left_in_place)
@@ -2453,7 +3109,8 @@ fn render_preview_controls(
     offset: usize,
     action: &mut Option<PreviewAction>,
 ) {
-    ui.label(RichText::new("Preview operations").strong());
+    ui.label(RichText::new("Preview").strong().size(18.0));
+    ui.label("Click a file in the preview to inspect its original folder, exact destination, and rule details below.");
     ui.horizontal(|ui| {
         for filter in [
             PreviewFilter::All,
@@ -2540,57 +3197,71 @@ fn relative_folder_label(path: &Path, root: &Path) -> String {
     }
 }
 
-fn render_preview_rows(ui: &mut egui::Ui, result: &AnalysisOutput) {
+fn render_preview_rows(
+    ui: &mut egui::Ui,
+    result: &AnalysisOutput,
+    selected_row: &mut Option<usize>,
+) {
     if result.preview_rows.is_empty() {
+        *selected_row = None;
         ui.label("No operations match this view.");
         return;
     }
 
+    if selected_row
+        .map(|index| index >= result.preview_rows.len())
+        .unwrap_or(true)
+    {
+        *selected_row = Some(0);
+    }
+
     let width = ui.available_width().max(360.0);
-    let file_width = width * 0.24;
-    let original_width = width * 0.22;
-    let target_width = width * 0.28;
-    let reason_width = width * 0.15;
-    let status_width = width * 0.11;
+    let file_width = width * 0.30;
+    let target_width = width * 0.48;
+    let status_width = width * 0.22;
 
     egui::Grid::new("preview-rows")
-        .num_columns(5)
+        .num_columns(3)
         .striped(true)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             preview_cell(ui, "File", file_width, true);
-            preview_cell(ui, "Original folder", original_width, true);
-            preview_cell(ui, "Target folder", target_width, true);
-            preview_cell(ui, "Reason", reason_width, true);
+            preview_cell(ui, "Destination", target_width, true);
             preview_cell(ui, "Status", status_width, true);
             ui.end_row();
 
-            for row in &result.preview_rows {
-                preview_cell_with_tooltip(
+            for (index, row) in result.preview_rows.iter().enumerate() {
+                let is_selected = *selected_row == Some(index);
+                let file_response = preview_selectable_cell_with_tooltip(
                     ui,
-                    &row.file_name,
+                    if is_selected {
+                        format!("> {}", row.file_name)
+                    } else {
+                        row.file_name.clone()
+                    },
                     file_width,
-                    false,
+                    is_selected,
                     format!(
                         "From: {}\nTo: {}",
                         row.source_full_path, row.destination_full_path
                     ),
                 );
-                preview_cell_with_tooltip(
-                    ui,
-                    &row.original_folder,
-                    original_width,
-                    false,
-                    row.source_full_path.as_str(),
-                );
+                if file_response.clicked() {
+                    *selected_row = Some(index);
+                }
                 preview_cell_with_tooltip(
                     ui,
                     &row.target_folder,
                     target_width,
                     false,
-                    row.destination_full_path.as_str(),
+                    format!(
+                        "Original folder: {}\nFull source: {}\nFull destination: {}\nWhy: {}",
+                        row.original_folder,
+                        row.source_full_path,
+                        row.destination_full_path,
+                        row.reason,
+                    ),
                 );
-                preview_cell(ui, &row.reason, reason_width, false);
                 preview_cell(ui, &row.status, status_width, false);
                 ui.end_row();
             }
@@ -2619,6 +3290,20 @@ fn preview_cell_with_tooltip(
     preview_cell_response(ui, text, width, strong).on_hover_text(tooltip);
 }
 
+fn preview_selectable_cell_with_tooltip(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    width: f32,
+    selected: bool,
+    tooltip: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.add_sized(
+        [width.max(40.0), 20.0],
+        egui::SelectableLabel::new(selected, RichText::new(text.into()).strong().monospace()),
+    )
+    .on_hover_text(tooltip)
+}
+
 fn preview_cell_response(
     ui: &mut egui::Ui,
     text: &str,
@@ -2635,11 +3320,216 @@ fn preview_cell_response(
 
 fn operation_status(operation: &PlanOperation) -> &'static str {
     match operation.conflict {
-        ConflictState::None => "selected",
-        ConflictState::DestinationExists { .. } => "conflict: destination exists",
-        ConflictState::CaseOnlyRename { .. } => "conflict: case-only rename",
-        ConflictState::UnsafeDestination { .. } => "skipped: unsafe destination",
+        ConflictState::None => "Ready",
+        ConflictState::DestinationExists { .. } => "Needs Review",
+        ConflictState::CaseOnlyRename { .. } => "Needs Review",
+        ConflictState::UnsafeDestination { .. } => "Left Untouched",
     }
+}
+
+fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_row: Option<usize>) {
+    let Some(index) = selected_row else {
+        return;
+    };
+    let Some(row) = result.preview_rows.get(index) else {
+        return;
+    };
+
+    ui.label(RichText::new("Selected change").strong().size(18.0));
+    egui::Frame::group(ui.style())
+        .fill(Color32::from_rgb(250, 246, 240))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&row.file_name).strong());
+                let (stroke, fill) = preview_status_colors(&row.status);
+                render_status_chip(ui, &row.status, stroke, fill);
+            });
+            ui.add_space(8.0);
+            egui::Grid::new("preview-detail-grid")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Original folder");
+                    ui.label(&row.original_folder);
+                    ui.end_row();
+                    ui.label("Destination folder");
+                    ui.label(&row.target_folder);
+                    ui.end_row();
+                    ui.label("Why");
+                    ui.label(&row.reason);
+                    ui.end_row();
+                });
+            ui.add_space(6.0);
+            truncated_label(ui, &format!("Full source: {}", row.source_full_path));
+            truncated_label(
+                ui,
+                &format!("Full destination: {}", row.destination_full_path),
+            );
+        });
+}
+
+fn preview_status_colors(status: &str) -> (Color32, Color32) {
+    match status {
+        "Ready" => (
+            Color32::from_rgb(92, 128, 78),
+            Color32::from_rgb(231, 241, 228),
+        ),
+        "Needs Review" => (
+            Color32::from_rgb(170, 110, 35),
+            Color32::from_rgb(248, 238, 217),
+        ),
+        _ => (
+            Color32::from_rgb(116, 103, 90),
+            Color32::from_rgb(243, 238, 234),
+        ),
+    }
+}
+
+fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
+    match status {
+        TransactionStatus::Completed => (
+            Color32::from_rgb(92, 128, 78),
+            Color32::from_rgb(231, 241, 228),
+        ),
+        TransactionStatus::RolledBack | TransactionStatus::PartiallyRolledBack => (
+            Color32::from_rgb(89, 102, 145),
+            Color32::from_rgb(236, 236, 244),
+        ),
+        TransactionStatus::Failed | TransactionStatus::Interrupted => (
+            Color32::from_rgb(170, 110, 35),
+            Color32::from_rgb(248, 238, 217),
+        ),
+        TransactionStatus::InProgress => (
+            Color32::from_rgb(130, 102, 53),
+            Color32::from_rgb(246, 236, 211),
+        ),
+    }
+}
+
+fn apply_visual_style(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+    style.spacing.button_padding = egui::vec2(14.0, 8.0);
+    ctx.set_style(style);
+
+    let mut visuals = egui::Visuals::light();
+    visuals.panel_fill = Color32::from_rgb(244, 238, 230);
+    visuals.window_fill = Color32::from_rgb(252, 248, 242);
+    visuals.extreme_bg_color = Color32::from_rgb(236, 229, 220);
+    visuals.faint_bg_color = Color32::from_rgb(248, 243, 236);
+    visuals.override_text_color = Some(Color32::from_rgb(57, 48, 39));
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(244, 238, 230);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(246, 240, 232);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(236, 227, 214);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(230, 219, 206);
+    visuals.widgets.inactive.fg_stroke.color = Color32::from_rgb(57, 48, 39);
+    visuals.widgets.hovered.fg_stroke.color = Color32::from_rgb(57, 48, 39);
+    visuals.widgets.active.fg_stroke.color = Color32::from_rgb(57, 48, 39);
+    ctx.set_visuals(visuals);
+}
+
+fn render_screen_heading(ui: &mut egui::Ui, title: &str, detail: &str) {
+    ui.label(RichText::new(title).size(30.0).strong());
+    ui.label(detail);
+}
+
+fn render_status_chip(ui: &mut egui::Ui, text: &str, stroke: Color32, fill: Color32) {
+    egui::Frame::group(ui.style())
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).strong().color(stroke));
+        });
+}
+
+fn render_safety_line(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal(|ui| {
+        render_status_chip(
+            ui,
+            "Safe",
+            Color32::from_rgb(92, 128, 78),
+            Color32::from_rgb(231, 241, 228),
+        );
+        ui.label(text);
+    });
+}
+
+fn render_info_card(ui: &mut egui::Ui, title: &str, detail: &str, status: &str) {
+    egui::Frame::group(ui.style())
+        .fill(Color32::from_rgb(250, 246, 240))
+        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.set_min_width(CARD_MIN_WIDTH);
+            ui.label(RichText::new(title).strong().size(18.0));
+            ui.label(detail);
+            ui.add_space(6.0);
+            render_status_chip(
+                ui,
+                status,
+                Color32::from_rgb(116, 103, 90),
+                Color32::from_rgb(243, 238, 234),
+            );
+        });
+}
+
+fn render_style_card(
+    ui: &mut egui::Ui,
+    selected: bool,
+    title: &str,
+    example: &str,
+    detail: &str,
+) -> egui::Response {
+    ui.add_sized(
+        [CARD_MIN_WIDTH, 108.0],
+        egui::Button::new(
+            RichText::new(format!("{title}\n{example}\n{detail}"))
+                .size(14.0)
+                .color(Color32::from_rgb(57, 48, 39)),
+        )
+        .stroke(egui::Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                Color32::from_rgb(166, 94, 53)
+            } else {
+                Color32::from_rgb(212, 200, 186)
+            },
+        ))
+        .fill(if selected {
+            Color32::from_rgb(237, 226, 213)
+        } else {
+            Color32::from_rgb(250, 246, 240)
+        }),
+    )
+}
+
+fn render_summary_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    value: usize,
+    detail: &str,
+    fill: Color32,
+    stroke: Color32,
+) {
+    egui::Frame::group(ui.style())
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui, |ui| {
+            ui.set_min_width(CARD_MIN_WIDTH);
+            ui.label(RichText::new(title).strong());
+            ui.label(
+                RichText::new(value.to_string())
+                    .size(28.0)
+                    .strong()
+                    .color(stroke),
+            );
+            ui.label(detail);
+        });
 }
 
 fn activity_headline(row: &TransactionRow) -> String {
@@ -2678,6 +3568,76 @@ fn activity_headline(row: &TransactionRow) -> String {
     }
 }
 
+fn activity_event_title(row: &TransactionRow) -> String {
+    let folder = folder_name_label(&row.root);
+    match row.status {
+        TransactionStatus::Completed => format!(
+            "Organized {} file{} in {folder}",
+            row.completed,
+            plural(row.completed)
+        ),
+        TransactionStatus::RolledBack => format!(
+            "Undid organization in {folder}: {} file{} restored",
+            row.rolled_back,
+            plural(row.rolled_back)
+        ),
+        TransactionStatus::PartiallyRolledBack => format!(
+            "Partially undid organization in {folder}: {} file{} restored",
+            row.rolled_back,
+            plural(row.rolled_back)
+        ),
+        TransactionStatus::Interrupted => format!(
+            "Organization interrupted in {folder} after {} recorded change{}",
+            row.total_operations,
+            plural(row.total_operations)
+        ),
+        TransactionStatus::InProgress => format!(
+            "Organization running in {folder}: {} recorded change{}",
+            row.total_operations,
+            plural(row.total_operations)
+        ),
+        TransactionStatus::Failed => format!(
+            "Organization needs review in {folder}: {} failed, {} organized",
+            row.failed, row.completed
+        ),
+    }
+}
+
+fn activity_detail_headline(detail: &TransactionDetail) -> String {
+    match detail.status {
+        TransactionStatus::Completed => format!(
+            "Organized {} file{} on {}.",
+            detail.operation_counts.completed,
+            plural(detail.operation_counts.completed),
+            detail.started_at
+        ),
+        TransactionStatus::RolledBack => format!(
+            "Restored {} file{} from this activity.",
+            detail.operation_counts.rolled_back,
+            plural(detail.operation_counts.rolled_back)
+        ),
+        TransactionStatus::PartiallyRolledBack => format!(
+            "Restored {} file{} with some changes still needing review.",
+            detail.operation_counts.rolled_back,
+            plural(detail.operation_counts.rolled_back)
+        ),
+        TransactionStatus::Interrupted => format!(
+            "Organization was interrupted after {} recorded change{}.",
+            detail.total_operations,
+            plural(detail.total_operations)
+        ),
+        TransactionStatus::InProgress => format!(
+            "Organization is still in progress with {} recorded change{}.",
+            detail.total_operations,
+            plural(detail.total_operations)
+        ),
+        TransactionStatus::Failed => format!(
+            "Organization needs review: {} failed, {} completed.",
+            detail.operation_counts.failed, detail.operation_counts.completed
+        ),
+    }
+}
+
 fn activity_detail(row: &TransactionRow) -> String {
     match row.status {
         TransactionStatus::Completed => format!(
@@ -2706,12 +3666,7 @@ fn activity_detail(row: &TransactionRow) -> String {
 }
 
 fn activity_short_label(row: &TransactionRow) -> String {
-    format!(
-        "{} - {} - {}",
-        row.started_at,
-        status_label(row.status),
-        activity_count_summary(row)
-    )
+    format!("{} - {}", row.started_at, activity_count_summary(row))
 }
 
 fn activity_count_summary(row: &TransactionRow) -> String {
@@ -2732,6 +3687,20 @@ fn normalized_path_key(path: &Path) -> String {
         .replace('\\', "/")
         .trim_end_matches('/')
         .to_ascii_lowercase()
+}
+
+fn folder_name_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn plural_y(value: usize) -> &'static str {
+    if value == 1 {
+        "y"
+    } else {
+        "ies"
+    }
 }
 
 fn summary_row(ui: &mut egui::Ui, label: &str, value: usize) {

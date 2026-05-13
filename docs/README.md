@@ -9,11 +9,14 @@ This folder captures the project-level design and implementation planning histor
   - `implementation-plan.md` - the milestone plan used to deliver the MVP
 - `v2-roadmap\`
   - `detailed-design.md` - the current 2.0+ product design direction and roadmap topics
-  - `implementation-plan.md` - the proposed milestone plan for the 2.0 release track
+  - `implementation-plan.md` - the finalized milestone record for the 2.0 UX release-candidate track
   - `ux-enhancement-design.md` - the UX redesign direction for simplifying and polishing the 2.0 GUI
   - `ux-product-vision.md` - the refined UX product vision and implementation priorities after product-direction review
+- `release\`
+  - `portable-windows.md` - portable Windows package usage and Explorer launcher instructions
+  - `v2-ux-release-notes.md` - release notes for the 2.0 UX rewrite
 
 ## Status
 
 - v1 MVP: implemented and published
-- v2 roadmap: implementation in progress
+- v2 roadmap: UX plan finalized; release-candidate manual GUI smoke review remains

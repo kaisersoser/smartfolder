@@ -2,11 +2,11 @@
 
 ## Status
 
-Implementation is in progress.
+This plan is finalized for v2.0 release-candidate review.
 
-The original v2 technical foundation is largely implemented: GUI launch, folder selection, bounded-memory analysis, paged preview, safe apply, undo, profile import/editing, Explorer launcher script, and portable packaging script exist.
+The original v2 technical foundation is implemented: GUI launch, folder selection, bounded-memory analysis, paged preview, safe apply, undo, profile import/editing, Explorer launcher script, and portable packaging script exist.
 
-The remaining v2 priority has changed from capability expansion to a major UX rewrite. The current GUI is functionally capable but too dense and technical. The updated plan implements the product direction defined in `ux-enhancement-design.md` and refined in `ux-product-vision.md`.
+The v2 priority changed from capability expansion to a major UX rewrite. UX-1 through UX-9 are now implemented as the release-candidate track. Automated validation is complete; the remaining release gate is manual GUI smoke review from the Windows desktop workflow.
 
 ## Product direction
 
@@ -91,11 +91,11 @@ These shipped pieces become the implementation substrate for the UX rewrite:
 - Explorer launch already provides the selected folder as startup context and must remain supported in the rewrite.
 - Portable packaging script and portable package documentation exist.
 
-## Updated milestone plan
+## Finalized milestone record
 
 ### Milestone UX-0 - Baseline stabilization before rewrite
 
-**Status:** planned
+**Status:** implemented - baseline and release-candidate validation complete for the required UX test stack
 
 Purpose:
 
@@ -122,11 +122,11 @@ Acceptance criteria:
 Implementation notes:
 
 - Do not change core behavior in this milestone unless required to keep tests green.
-- Do not start visual redesign until this baseline is clear.
+- The visual redesign was implemented after the baseline was established and validated.
 
 ### Milestone UX-1 - New Organize screen shell
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -162,12 +162,12 @@ Acceptance criteria:
 Manual proof:
 
 ```text
-Right-click folder in Explorer -> Open with smartfolder -> folder is already selected -> choose style -> Analyze Folder
+Right-click folder in Explorer -> Organize with smartfolder -> folder is already selected -> choose style -> Analyze Folder
 ```
 
 ### Milestone UX-2 - Guided folder and style selection
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -206,7 +206,7 @@ User can understand the first two actions within 30 seconds: confirm the presele
 
 ### Milestone UX-3 - Analysis progress and summary cards
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -240,7 +240,7 @@ After analysis, user can answer: how many files are safe to organize, how many n
 
 ### Milestone UX-4 - Simplified preview with progressive details
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -279,7 +279,7 @@ User can understand where files will go without reading full absolute paths or r
 
 ### Milestone UX-5 - Organize Files apply flow and immediate undo
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -317,7 +317,7 @@ Analyze -> preview -> Organize Files -> Undo Changes restores the original layou
 
 ### Milestone UX-6 - Activity screen and restore history language
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -349,7 +349,7 @@ User can find a prior organization action and understand whether it can be undon
 
 ### Milestone UX-7 - Rules screen cleanup
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -385,7 +385,7 @@ Create simple PDF profile -> Analyze Folder with Custom Rules -> preview expecte
 
 ### Milestone UX-8 - Settings, advanced controls, and desktop integration polish
 
-**Status:** planned
+**Status:** implemented - release-candidate scope complete
 
 Purpose:
 
@@ -419,7 +419,7 @@ Explorer context menu opens smartfolder with the selected folder preloaded and n
 
 ### Milestone UX-9 - Hardening, accessibility, and release readiness
 
-**Status:** planned
+**Status:** implemented - automated validation complete; manual GUI smoke review remains recommended before tagging release
 
 Purpose:
 
@@ -457,6 +457,22 @@ Explorer or app launch
   -> Undo Changes
   -> original layout restored
 ```
+
+Automated validation completed 2026-05-13:
+
+- `cargo fmt --check`
+- `cargo test -p smartfolder-core`
+- `cargo test -p smartfolder-cli`
+- `cargo test -p smartfolder-gui`
+- `cargo build -p smartfolder-gui --release`
+- PowerShell parser checks for `scripts/register-explorer-launcher.ps1` and `scripts/package-portable.ps1`
+- portable package smoke test with `scripts/package-portable.ps1 -SkipBuild -OutputRoot .\target\tmp\ux9-portable-smoke`
+
+Manual release review still recommended:
+
+- launch the release GUI from Explorer and confirm the clicked folder is preselected
+- run the disposable-folder GUI proof: Analyze Folder -> Preview -> Organize Files -> Undo Changes -> original layout restored
+- visually review the Organize, Activity, Rules, and Settings screens for text clipping at the target window size
 
 ## Testing strategy
 
@@ -510,8 +526,15 @@ Required manual checks:
 - installer and auto-update
 - enterprise/admin features
 
-## Approval checkpoint
+## Final release gate
 
-Implementation of the UX rewrite should not begin until this updated plan is reviewed and approved.
+The UX rewrite plan is approved and implemented through UX-9. Do not expand v2.0 scope before release-candidate review; keep AI recommendations, automatic organization, duplicate detection, content extraction, regex-heavy workflows, and a full multi-rule designer out of this release.
 
-After approval, start with Milestone UX-0 and UX-1 only. Do not begin Activity, Rules, Settings, or visual polish work until the redesigned Organize screen proves the core flow.
+Release-candidate signoff should focus on the manual desktop proof that automated tests cannot cover:
+
+- Explorer context menu opens `Organize with smartfolder` with the clicked folder preselected.
+- A disposable folder completes Analyze Folder -> Preview -> Organize Files -> Undo Changes.
+- Undo restores the original layout.
+- Organize, Activity, Rules, and Settings remain readable at the target window size.
+
+If those checks pass, the v2.0 UX rewrite is ready to tag as a release candidate.

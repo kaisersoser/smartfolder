@@ -58,6 +58,11 @@ pub(crate) fn primary_text() -> Color32 {
     Color32::from_rgb(45, 45, 45)
 }
 
+/// Higher-emphasis text for page titles and key headings.
+pub(crate) fn heading_text() -> Color32 {
+    Color32::from_rgb(34, 34, 34)
+}
+
 /// Secondary explanatory text color.
 pub(crate) fn secondary_text() -> Color32 {
     Color32::from_rgb(90, 90, 90)

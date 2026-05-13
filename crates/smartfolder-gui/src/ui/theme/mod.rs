@@ -12,6 +12,9 @@ pub(crate) mod widgets;
 
 use eframe::egui::{self, Style, Visuals};
 
+const INTER_FONT_NAME: &str = "smartfolder-inter";
+const INTER_VARIABLE_FONT: &[u8] = include_bytes!("../../../assets/fonts/InterVariable.ttf");
+
 /// Resolved visual theme used after applying the user's theme preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VisualTheme {
@@ -19,6 +22,24 @@ pub(crate) enum VisualTheme {
     Light,
     /// Dark theme using the same semantic token roles.
     Dark,
+}
+
+/// Register bundled product fonts and icon fonts with egui.
+pub(crate) fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        INTER_FONT_NAME.to_owned(),
+        egui::FontData::from_static(INTER_VARIABLE_FONT).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, INTER_FONT_NAME.to_owned());
+
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+
+    ctx.set_fonts(fonts);
 }
 
 /// Apply the design-system theme to the egui context.
@@ -48,8 +69,11 @@ fn light_visuals() -> Visuals {
     visuals.widgets.inactive.fg_stroke.color = colors::primary_text();
     visuals.widgets.hovered.bg_fill = colors::hover_control();
     visuals.widgets.hovered.fg_stroke.color = colors::primary_text();
+    visuals.widgets.hovered.weak_bg_fill = colors::hover_control();
     visuals.widgets.active.bg_fill = colors::primary_blue();
     visuals.widgets.active.fg_stroke.color = colors::on_primary();
+    visuals.widgets.active.weak_bg_fill = colors::primary_blue_hover();
+    visuals.override_text_color = Some(colors::primary_text());
     visuals.selection.bg_fill = colors::primary_blue();
     visuals.selection.stroke.color = colors::primary_blue();
     visuals.hyperlink_color = colors::primary_blue();

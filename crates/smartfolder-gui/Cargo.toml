@@ -11,6 +11,7 @@ version.workspace = true
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 eframe = "0.28"
+egui-phosphor = { version = "0.6", default-features = false, features = ["regular"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

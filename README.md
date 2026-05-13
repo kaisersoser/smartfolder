@@ -42,6 +42,23 @@ An experimental Windows-first GUI crate also exists and can be started with:
 cargo run -p smartfolder-gui -- <root>
 ```
 
+The GUI can analyze with built-in modes, import TOML rule profiles, and create a simple saved rule profile visually from the Profile editor.
+
+To add a per-user Windows Explorer launcher after building the release GUI:
+
+```powershell
+cargo build -p smartfolder-gui --release
+.\scripts\register-explorer-launcher.ps1
+```
+
+This adds an "Open with smartfolder" folder context-menu entry that only launches the GUI with the selected folder preloaded. Remove it with `.\scripts\register-explorer-launcher.ps1 -Unregister`.
+
+To create a portable Windows package under `dist`:
+
+```powershell
+.\scripts\package-portable.ps1
+```
+
 ```powershell
 smartfolder analyze <root> --output plan.json
 smartfolder analyze <root> --include-subfolders --output plan.json

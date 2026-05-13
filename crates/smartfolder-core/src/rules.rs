@@ -62,6 +62,12 @@ impl RuleProfile {
         Ok(profile)
     }
 
+    /// Serialize this profile as pretty TOML after validating it.
+    pub fn to_toml_string(&self) -> Result<String> {
+        self.validate()?;
+        Ok(toml::to_string_pretty(self)?)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.profile_id.trim().is_empty() {
             return Err(SmartfolderError::InvalidRuleProfile {
@@ -422,6 +428,27 @@ extensions = ["pdf"]
             ])
         );
         assert_eq!(matched.reason, "Rule: Invoices");
+    }
+
+    #[test]
+    fn rule_profile_round_trips_to_toml() {
+        let profile = RuleProfile::from_toml(
+            r#"
+profile_id = "downloads"
+
+[[rules]]
+name = "PDFs"
+priority = 20
+destination = "Documents/PDFs"
+extensions = ["pdf"]
+"#,
+        )
+        .expect("valid profile");
+
+        let serialized = profile.to_toml_string().expect("profile serializes");
+        let restored = RuleProfile::from_toml(&serialized).expect("serialized profile parses");
+
+        assert_eq!(restored, profile);
     }
 
     #[test]

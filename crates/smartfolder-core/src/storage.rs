@@ -43,6 +43,11 @@ pub fn plans_dir() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("plans"))
 }
 
+/// Get the directory containing saved rule profiles.
+pub fn profiles_dir() -> Result<PathBuf> {
+    Ok(app_data_dir()?.join("profiles"))
+}
+
 /// Get the path to the SQLite working-session database.
 ///
 /// The database stores large scan and plan working sets so GUI workflows can
@@ -54,6 +59,14 @@ pub fn session_db_path() -> Result<PathBuf> {
 /// Ensure journals directory exists, creating it if necessary.
 pub fn ensure_journals_dir() -> Result<PathBuf> {
     let directory = journals_dir()?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|source| SmartfolderError::io(&directory, source))?;
+    Ok(directory)
+}
+
+/// Ensure rule profile directory exists, creating it if necessary.
+pub fn ensure_profiles_dir() -> Result<PathBuf> {
+    let directory = profiles_dir()?;
     std::fs::create_dir_all(&directory)
         .map_err(|source| SmartfolderError::io(&directory, source))?;
     Ok(directory)
@@ -84,7 +97,9 @@ pub fn journal_path(transaction_id: &str) -> Result<PathBuf> {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::storage::{app_data_dir, journal_path, journals_dir, plans_dir, session_db_path};
+    use crate::storage::{
+        app_data_dir, journal_path, journals_dir, plans_dir, profiles_dir, session_db_path,
+    };
 
     #[test]
     fn storage_dirs_are_under_app_data_dir() {
@@ -95,6 +110,9 @@ mod tests {
             .starts_with(&app_data));
         assert!(plans_dir()
             .expect("plans dir should resolve")
+            .starts_with(&app_data));
+        assert!(profiles_dir()
+            .expect("profiles dir should resolve")
             .starts_with(&app_data));
         assert!(session_db_path()
             .expect("session db path should resolve")

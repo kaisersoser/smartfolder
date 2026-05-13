@@ -57,6 +57,9 @@ pub enum SmartfolderError {
     #[error("TOML rule profile error: {0}")]
     TomlDeserialize(#[from] toml::de::Error),
 
+    #[error("TOML rule profile serialization error: {0}")]
+    TomlSerialize(#[from] toml::ser::Error),
+
     #[error("invalid rule profile: {message}")]
     InvalidRuleProfile { message: String },
 }

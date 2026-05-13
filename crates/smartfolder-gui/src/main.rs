@@ -1,6 +1,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
@@ -20,11 +21,13 @@ use smartfolder_core::planner::{
 use smartfolder_core::recovery::{
     inspect_transaction, list_transactions, undo_transaction, TransactionSummary, UndoSummary,
 };
+use smartfolder_core::rules::{CustomRule, RuleProfile};
 use smartfolder_core::scanner::{
     scan_folder_to_sink_with_progress, CancellationToken, ScanOptions, StreamingScanProgress,
     StreamingScanResult,
 };
 use smartfolder_core::session_store::{PlanOperationFilter, SessionScanSink, SqliteSessionStore};
+use smartfolder_core::storage::ensure_profiles_dir;
 
 type AnalysisMessage = std::result::Result<AnalysisOutput, String>;
 type ApplyMessage = std::result::Result<ApplyOutput, String>;
@@ -67,6 +70,9 @@ fn main() -> eframe::Result<()> {
 struct SmartfolderApp {
     root_input: String,
     mode: BuiltInMode,
+    planning_source: PlanningSource,
+    loaded_profile: Option<LoadedRuleProfile>,
+    profile_editor: ProfileEditorState,
     include_subfolders: bool,
     preview_filter: PreviewFilter,
     preview_offset: usize,
@@ -102,6 +108,9 @@ impl SmartfolderApp {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             mode: BuiltInMode::TypeYear,
+            planning_source: PlanningSource::BuiltIn,
+            loaded_profile: None,
+            profile_editor: ProfileEditorState::default(),
             include_subfolders: false,
             preview_filter: PreviewFilter::All,
             preview_offset: 0,
@@ -146,7 +155,13 @@ impl SmartfolderApp {
         }
 
         let root = PathBuf::from(root_text);
-        let mode = self.mode;
+        let plan_source = match self.analysis_plan_source() {
+            Ok(plan_source) => plan_source,
+            Err(message) => {
+                self.error_message = Some(message);
+                return;
+            }
+        };
         let include_subfolders = self.include_subfolders;
         let cancellation = CancellationToken::default();
         let worker_cancellation = cancellation.clone();
@@ -166,7 +181,7 @@ impl SmartfolderApp {
         std::thread::spawn(move || {
             let result = analyze_root(
                 &root,
-                mode,
+                plan_source,
                 include_subfolders,
                 &worker_cancellation,
                 &sender,
@@ -195,6 +210,90 @@ impl SmartfolderApp {
                 self.maintenance_message = None;
                 self.error_message = Some(message);
             }
+        }
+    }
+
+    fn import_rule_profile(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("TOML rule profile", &["toml"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        match load_rule_profile_from_path(&path) {
+            Ok(profile) => {
+                let profile_id = profile.profile_id.clone();
+                self.profile_editor = ProfileEditorState::from_profile(&profile);
+                self.loaded_profile = Some(LoadedRuleProfile { path, profile });
+                self.planning_source = PlanningSource::RuleProfile;
+                self.maintenance_message = Some(format!("Imported rule profile '{profile_id}'."));
+                self.error_message = None;
+            }
+            Err(message) => {
+                self.error_message = Some(message);
+                self.maintenance_message = None;
+            }
+        }
+    }
+
+    fn save_profile_from_editor(&mut self) {
+        match save_profile_from_editor(&self.profile_editor) {
+            Ok(loaded_profile) => {
+                let profile_id = loaded_profile.profile.profile_id.clone();
+                let path = loaded_profile.path.display().to_string();
+                self.loaded_profile = Some(loaded_profile);
+                self.planning_source = PlanningSource::RuleProfile;
+                self.maintenance_message =
+                    Some(format!("Saved rule profile '{profile_id}' to {path}."));
+                self.error_message = None;
+            }
+            Err(message) => {
+                self.error_message = Some(message);
+                self.maintenance_message = None;
+            }
+        }
+    }
+
+    fn export_profile_from_editor(&mut self) {
+        match export_profile_from_editor(&self.profile_editor) {
+            Ok(Some(path)) => {
+                self.maintenance_message =
+                    Some(format!("Exported rule profile to {}.", path.display()));
+                self.error_message = None;
+            }
+            Ok(None) => {}
+            Err(message) => {
+                self.error_message = Some(message);
+                self.maintenance_message = None;
+            }
+        }
+    }
+
+    fn validate_profile_editor(&mut self) {
+        match self.profile_editor.to_profile() {
+            Ok(profile) => {
+                self.maintenance_message =
+                    Some(format!("Rule profile '{}' is valid.", profile.profile_id));
+                self.error_message = None;
+            }
+            Err(message) => {
+                self.error_message = Some(message);
+                self.maintenance_message = None;
+            }
+        }
+    }
+
+    fn analysis_plan_source(&self) -> std::result::Result<AnalysisPlanSource, String> {
+        match self.planning_source {
+            PlanningSource::BuiltIn => Ok(AnalysisPlanSource::BuiltIn(self.mode)),
+            PlanningSource::RuleProfile => self
+                .loaded_profile
+                .as_ref()
+                .map(|loaded| AnalysisPlanSource::RuleProfile(loaded.profile.clone()))
+                .ok_or_else(|| {
+                    "Import a rule profile before analyzing with profile rules.".to_string()
+                }),
         }
     }
 
@@ -409,6 +508,90 @@ impl SmartfolderApp {
         }
     }
 
+    fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Profile editor")
+            .default_open(self.loaded_profile.is_none())
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Profile id");
+                    ui.add_sized(
+                        [160.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
+                    );
+                    ui.label("Rule name");
+                    ui.add_sized(
+                        [180.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.rule_name),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Destination");
+                    ui.add_sized(
+                        [360.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.destination),
+                    );
+                    ui.label("Priority");
+                    ui.add_sized(
+                        [80.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.priority),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Extensions");
+                    ui.add_sized(
+                        [180.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.extensions),
+                    );
+                    ui.label("Filename contains");
+                    ui.add_sized(
+                        [220.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.filename_contains),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Path contains");
+                    ui.add_sized(
+                        [220.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.path_contains),
+                    );
+                    ui.label("Min bytes");
+                    ui.add_sized(
+                        [90.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.min_size_bytes),
+                    );
+                    ui.label("Max bytes");
+                    ui.add_sized(
+                        [90.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.max_size_bytes),
+                    );
+                    ui.label("Year");
+                    ui.add_sized(
+                        [70.0, 22.0],
+                        egui::TextEdit::singleline(&mut self.profile_editor.year),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.button("Validate profile").clicked() {
+                        self.validate_profile_editor();
+                    }
+                    if ui.button("Save profile").clicked() {
+                        self.save_profile_from_editor();
+                    }
+                    if ui.button("Export profile...").clicked() {
+                        self.export_profile_from_editor();
+                    }
+                    if ui.button("New profile").clicked() {
+                        self.profile_editor = ProfileEditorState::default();
+                        self.loaded_profile = None;
+                    }
+                });
+            });
+    }
+
     fn apply_preview_action(&mut self, action: PreviewAction) {
         let Some(result) = &self.analysis_result else {
             return;
@@ -491,19 +674,48 @@ impl eframe::App for SmartfolderApp {
             });
 
             ui.horizontal(|ui| {
-                ui.label("Built-in mode");
-                egui::ComboBox::from_id_source("built-in-mode")
-                    .selected_text(Self::mode_label(self.mode))
-                    .show_ui(ui, |ui| {
-                        for mode in [
-                            BuiltInMode::Type,
-                            BuiltInMode::Date,
-                            BuiltInMode::Extension,
-                            BuiltInMode::TypeYear,
-                        ] {
-                            ui.selectable_value(&mut self.mode, mode, Self::mode_label(mode));
-                        }
-                    });
+                ui.label("Rules");
+                ui.radio_value(&mut self.planning_source, PlanningSource::BuiltIn, "Built-in");
+                ui.radio_value(
+                    &mut self.planning_source,
+                    PlanningSource::RuleProfile,
+                    "Profile",
+                );
+
+                match self.planning_source {
+                    PlanningSource::BuiltIn => {
+                        egui::ComboBox::from_id_source("built-in-mode")
+                            .selected_text(Self::mode_label(self.mode))
+                            .show_ui(ui, |ui| {
+                                for mode in [
+                                    BuiltInMode::Type,
+                                    BuiltInMode::Date,
+                                    BuiltInMode::Extension,
+                                    BuiltInMode::TypeYear,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut self.mode,
+                                        mode,
+                                        Self::mode_label(mode),
+                                    );
+                                }
+                            });
+                    }
+                    PlanningSource::RuleProfile => {
+                        let profile_label = self.loaded_profile.as_ref().map_or_else(
+                            || "No profile imported".to_string(),
+                            LoadedRuleProfile::display_label,
+                        );
+                        ui.add_sized(
+                            [220.0, 20.0],
+                            egui::Label::new(profile_label).truncate(),
+                        );
+                    }
+                }
+
+                if ui.button("Import profile...").clicked() {
+                    self.import_rule_profile();
+                }
 
                 ui.checkbox(&mut self.include_subfolders, "Include subfolders");
 
@@ -534,6 +746,10 @@ impl eframe::App for SmartfolderApp {
                     self.cleanup_old_sessions();
                 }
             });
+
+            if self.planning_source == PlanningSource::RuleProfile {
+                self.render_profile_editor(ui);
+            }
 
             if self.is_analyzing() {
                 ui.add_space(8.0);
@@ -582,7 +798,12 @@ impl eframe::App for SmartfolderApp {
 
                 if let Some(apply_result) = &self.apply_result {
                     ui.add_space(8.0);
-                    render_apply_result(ui, apply_result);
+                    render_apply_result(
+                        ui,
+                        apply_result,
+                        self.is_analyzing() || self.is_applying() || self.is_undoing(),
+                        &mut history_action,
+                    );
                 }
 
                 if !result.warning_messages.is_empty() {
@@ -720,6 +941,225 @@ enum PreviewAction {
     Filter(PreviewFilter),
     Previous,
     Next,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanningSource {
+    BuiltIn,
+    RuleProfile,
+}
+
+#[derive(Debug, Clone)]
+enum AnalysisPlanSource {
+    BuiltIn(BuiltInMode),
+    RuleProfile(RuleProfile),
+}
+
+impl AnalysisPlanSource {
+    fn plan_mode(&self) -> PlanMode {
+        match self {
+            Self::BuiltIn(mode) => PlanMode::BuiltIn(*mode),
+            Self::RuleProfile(profile) => PlanMode::RuleProfile {
+                profile_id: profile.profile_id.clone(),
+            },
+        }
+    }
+
+    fn plan_options(
+        self,
+        plan_id: impl Into<String>,
+        created_at: chrono::DateTime<Utc>,
+    ) -> PlanOptions {
+        match self {
+            Self::BuiltIn(mode) => PlanOptions::built_in(mode, plan_id, created_at),
+            Self::RuleProfile(profile) => PlanOptions::rule_profile(profile, plan_id, created_at),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LoadedRuleProfile {
+    path: PathBuf,
+    profile: RuleProfile,
+}
+
+impl LoadedRuleProfile {
+    fn display_label(&self) -> String {
+        format!("{} ({})", self.profile.profile_id, self.path.display())
+    }
+}
+
+fn load_rule_profile_from_path(path: &Path) -> std::result::Result<RuleProfile, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read rule profile {}: {error}", path.display()))?;
+    RuleProfile::from_toml(&content)
+        .map_err(|error| format!("Invalid rule profile {}: {error}", path.display()))
+}
+
+fn save_profile_from_editor(
+    editor: &ProfileEditorState,
+) -> std::result::Result<LoadedRuleProfile, String> {
+    let profile = editor.to_profile()?;
+    let path = app_local_profile_path(&profile.profile_id)?;
+    write_rule_profile(&path, &profile)?;
+    Ok(LoadedRuleProfile { path, profile })
+}
+
+fn export_profile_from_editor(
+    editor: &ProfileEditorState,
+) -> std::result::Result<Option<PathBuf>, String> {
+    let profile = editor.to_profile()?;
+    let file_name = format!("{}.toml", profile_file_stem(&profile.profile_id));
+    let Some(path) = rfd::FileDialog::new()
+        .set_file_name(&file_name)
+        .add_filter("TOML rule profile", &["toml"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+
+    write_rule_profile(&path, &profile)?;
+    Ok(Some(path))
+}
+
+fn write_rule_profile(path: &Path, profile: &RuleProfile) -> std::result::Result<(), String> {
+    let content = profile
+        .to_toml_string()
+        .map_err(|error| format!("Failed to serialize rule profile: {error}"))?;
+    fs::write(path, content)
+        .map_err(|error| format!("Failed to write rule profile {}: {error}", path.display()))
+}
+
+fn app_local_profile_path(profile_id: &str) -> std::result::Result<PathBuf, String> {
+    let directory = ensure_profiles_dir()
+        .map_err(|error| format!("Failed to create profile directory: {error}"))?;
+    Ok(directory.join(format!("{}.toml", profile_file_stem(profile_id))))
+}
+
+fn profile_file_stem(profile_id: &str) -> String {
+    let stem = profile_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+
+    if stem.is_empty() {
+        "profile".to_string()
+    } else {
+        stem
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProfileEditorState {
+    profile_id: String,
+    rule_name: String,
+    destination: String,
+    priority: String,
+    extensions: String,
+    filename_contains: String,
+    path_contains: String,
+    min_size_bytes: String,
+    max_size_bytes: String,
+    year: String,
+}
+
+impl Default for ProfileEditorState {
+    fn default() -> Self {
+        Self {
+            profile_id: "my-profile".to_string(),
+            rule_name: "PDFs".to_string(),
+            destination: "Documents/PDFs".to_string(),
+            priority: "10".to_string(),
+            extensions: "pdf".to_string(),
+            filename_contains: String::new(),
+            path_contains: String::new(),
+            min_size_bytes: String::new(),
+            max_size_bytes: String::new(),
+            year: String::new(),
+        }
+    }
+}
+
+impl ProfileEditorState {
+    fn from_profile(profile: &RuleProfile) -> Self {
+        let Some(rule) = profile.rules.first() else {
+            return Self {
+                profile_id: profile.profile_id.clone(),
+                ..Self::default()
+            };
+        };
+
+        Self {
+            profile_id: profile.profile_id.clone(),
+            rule_name: rule.name.clone(),
+            destination: rule.destination.clone(),
+            priority: rule
+                .priority
+                .map_or_else(String::new, |value| value.to_string()),
+            extensions: rule.extensions.join(", "),
+            filename_contains: rule.filename_contains.join(", "),
+            path_contains: rule.path_contains.join(", "),
+            min_size_bytes: rule
+                .min_size_bytes
+                .map_or_else(String::new, |value| value.to_string()),
+            max_size_bytes: rule
+                .max_size_bytes
+                .map_or_else(String::new, |value| value.to_string()),
+            year: rule
+                .year
+                .map_or_else(String::new, |value| value.to_string()),
+        }
+    }
+
+    fn to_profile(&self) -> std::result::Result<RuleProfile, String> {
+        let profile = RuleProfile {
+            profile_id: self.profile_id.trim().to_string(),
+            rules: vec![CustomRule {
+                name: self.rule_name.trim().to_string(),
+                destination: self.destination.trim().to_string(),
+                priority: parse_optional_number(&self.priority, "priority")?,
+                extensions: comma_separated_values(&self.extensions),
+                filename_contains: comma_separated_values(&self.filename_contains),
+                path_contains: comma_separated_values(&self.path_contains),
+                min_size_bytes: parse_optional_number(&self.min_size_bytes, "min_size_bytes")?,
+                max_size_bytes: parse_optional_number(&self.max_size_bytes, "max_size_bytes")?,
+                year: parse_optional_number(&self.year, "year")?,
+            }],
+        };
+        profile.validate().map_err(|error| error.to_string())?;
+        Ok(profile)
+    }
+}
+
+fn parse_optional_number<T>(value: &str, label: &str) -> std::result::Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+{
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<T>()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a valid number"))
+}
+
+fn comma_separated_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -1011,14 +1451,14 @@ struct UndoOutput {
 
 fn analyze_root(
     root: &Path,
-    mode: BuiltInMode,
+    plan_source: AnalysisPlanSource,
     include_subfolders: bool,
     cancellation: &CancellationToken,
     sender: &Sender<AnalysisEvent>,
 ) -> AnalysisMessage {
     let now = Utc::now();
     let plan_id = format!("plan_{}", now.format("%Y%m%d%H%M%S"));
-    let plan_mode = PlanMode::BuiltIn(mode);
+    let plan_mode = plan_source.plan_mode();
     let mut store = SqliteSessionStore::open_default()
         .map_err(|error| format!("Failed to open session store: {error}"))?;
     let session_id = store
@@ -1038,7 +1478,7 @@ fn analyze_root(
         return Err("Analysis cancelled.".to_string());
     }
 
-    let plan_options = PlanOptions::built_in(mode, plan_id, now);
+    let plan_options = plan_source.plan_options(plan_id, now);
     let plan = generate_plan_to_store_with_progress_and_cancellation(
         root,
         &mut store,
@@ -1568,7 +2008,12 @@ fn render_apply_confirmation(
         });
 }
 
-fn render_apply_result(ui: &mut egui::Ui, result: &ApplyOutput) {
+fn render_apply_result(
+    ui: &mut egui::Ui,
+    result: &ApplyOutput,
+    busy: bool,
+    action: &mut Option<HistoryAction>,
+) {
     ui.label(RichText::new("Apply complete").strong());
     egui::Grid::new("apply-result")
         .num_columns(2)
@@ -1580,6 +2025,20 @@ fn render_apply_result(ui: &mut egui::Ui, result: &ApplyOutput) {
         });
     ui.label(format!("Transaction: {}", result.transaction_id));
     truncated_label(ui, &format!("Journal: {}", result.journal_path.display()));
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Undo transaction"))
+            .clicked()
+        {
+            *action = Some(HistoryAction::ConfirmUndo(result.transaction_id.clone()));
+        }
+        if ui
+            .add_enabled(!busy, egui::Button::new("View transaction details"))
+            .clicked()
+        {
+            *action = Some(HistoryAction::ViewDetails(result.transaction_id.clone()));
+        }
+    });
 }
 
 fn render_undo_progress(ui: &mut egui::Ui) {
@@ -2344,11 +2803,13 @@ mod tests {
         BuiltInMode, Certainty, ConflictState, OperationStatus, OperationType, PlanOperation,
         SourceSnapshot, TransactionStatus,
     };
+    use smartfolder_core::rules::{CustomRule, RuleProfile};
 
     use super::{
         activity_count_summary, activity_headline, can_undo_status, is_cloud_synced_path,
-        operation_status_label, preloaded_root_from_args, preview_rows, same_folder, status_label,
-        transaction_operation_counts, SmartfolderApp, TransactionRow,
+        operation_status_label, preloaded_root_from_args, preview_rows, profile_file_stem,
+        same_folder, status_label, transaction_operation_counts, AnalysisPlanSource,
+        LoadedRuleProfile, PlanningSource, ProfileEditorState, SmartfolderApp, TransactionRow,
     };
 
     #[test]
@@ -2470,6 +2931,77 @@ mod tests {
         assert!(rows[0].source_full_path.ends_with("loose.jpg"));
     }
 
+    #[test]
+    fn gui_planning_source_requires_imported_profile() {
+        let mut app = SmartfolderApp::new(None);
+        app.planning_source = PlanningSource::RuleProfile;
+
+        let message = app
+            .analysis_plan_source()
+            .expect_err("missing profile should block profile analysis");
+        assert_eq!(
+            message,
+            "Import a rule profile before analyzing with profile rules."
+        );
+
+        app.loaded_profile = Some(LoadedRuleProfile {
+            path: PathBuf::from("rules.toml"),
+            profile: test_rule_profile(),
+        });
+        let source = app
+            .analysis_plan_source()
+            .expect("loaded profile should be accepted");
+        assert!(matches!(source, AnalysisPlanSource::RuleProfile(_)));
+    }
+
+    #[test]
+    fn profile_editor_builds_valid_core_profile() {
+        let editor = ProfileEditorState {
+            profile_id: "downloads".to_string(),
+            rule_name: "Invoices".to_string(),
+            destination: "Documents/Invoices/{year}".to_string(),
+            priority: "5".to_string(),
+            extensions: "pdf, docx".to_string(),
+            filename_contains: "invoice".to_string(),
+            path_contains: "downloads".to_string(),
+            min_size_bytes: "100".to_string(),
+            max_size_bytes: "200000".to_string(),
+            year: "2026".to_string(),
+        };
+
+        let profile = editor.to_profile().expect("editor profile is valid");
+
+        assert_eq!(profile.profile_id, "downloads");
+        assert_eq!(profile.rules[0].name, "Invoices");
+        assert_eq!(profile.rules[0].extensions, vec!["pdf", "docx"]);
+        assert_eq!(profile.rules[0].priority, Some(5));
+        assert_eq!(profile.rules[0].min_size_bytes, Some(100));
+        assert_eq!(profile.rules[0].year, Some(2026));
+
+        let restored = ProfileEditorState::from_profile(&profile);
+        assert_eq!(restored.profile_id, "downloads");
+        assert_eq!(restored.extensions, "pdf, docx");
+    }
+
+    #[test]
+    fn profile_editor_rejects_invalid_numbers_and_sanitizes_file_names() {
+        let editor = ProfileEditorState {
+            priority: "soon".to_string(),
+            ..ProfileEditorState::default()
+        };
+
+        let message = editor
+            .to_profile()
+            .expect_err("invalid priority should fail");
+
+        assert_eq!(message, "priority must be a valid number");
+        assert_eq!(
+            profile_file_stem("Family Photos 2026!"),
+            "Family_Photos_2026"
+        );
+        assert_eq!(profile_file_stem("***"), "profile");
+    }
+
     fn test_transaction_operation(
         operation_id: &str,
         status: OperationStatus,
@@ -2500,6 +3032,23 @@ mod tests {
             rolled_back: 0,
             pending: 0,
             total_operations: 4,
+        }
+    }
+
+    fn test_rule_profile() -> RuleProfile {
+        RuleProfile {
+            profile_id: "documents".to_string(),
+            rules: vec![CustomRule {
+                name: "PDFs".to_string(),
+                destination: "Documents/PDFs".to_string(),
+                priority: Some(10),
+                extensions: vec!["pdf".to_string()],
+                filename_contains: Vec::new(),
+                path_contains: Vec::new(),
+                min_size_bytes: None,
+                max_size_bytes: None,
+                year: None,
+            }],
         }
     }
 }

@@ -2,342 +2,516 @@
 
 ## Status
 
-Implementation started. Milestone 0 is complete, and Milestone 2 is currently in progress.
+Implementation is in progress.
 
-## Problem and approach
+The original v2 technical foundation is largely implemented: GUI launch, folder selection, bounded-memory analysis, paged preview, safe apply, undo, profile import/editing, Explorer launcher script, and portable packaging script exist.
 
-Build `smartfolder` 2.0 as a Windows-first portable desktop application that makes the current safe organization engine available through a GUI-first workflow, while retaining the CLI for advanced and scripted use.
+The remaining v2 priority has changed from capability expansion to a major UX rewrite. The current GUI is functionally capable but too dense and technical. The updated plan implements the product direction defined in `ux-enhancement-design.md` and refined in `ux-product-vision.md`.
 
-The implementation plan intentionally keeps 2.0 focused:
+## Product direction
 
-- keep the engine metadata-only
-- do not add AI, duplicate detection, or content extraction
-- do not require installer or auto-update infrastructure
-- do add GUI-first scan/preview/apply/undo workflows
-- do add a GUI rule editor
-- do add Explorer right-click launching that preloads a folder into the app
-- do allow schema evolution, but only with explicit migration strategy
+smartfolder 2.0 should become a Windows-first desktop product that helps users organize files safely without requiring them to understand sessions, journals, transactions, SQLite storage, or recovery internals.
 
-## Delivery principles
+The primary workflow is:
 
-| Principle | Meaning |
+```text
+Right-click folder in Explorer -> smartfolder opens with that folder preselected -> choose style -> analyze -> preview -> organize -> undo if needed
+```
+
+The product should feel:
+
+- calm
+- safe
+- modern
+- understandable
+- reversible
+- powerful without intimidation
+
+## Settled UX decisions
+
+These decisions are approved for the v2 UX rewrite:
+
+| Area | Decision |
 |---|---|
-| Shared core first | GUI and CLI must reuse the same Rust logic |
-| Safety preserved | GUI cannot weaken preview, confirmation, no-overwrite, or undo guarantees |
-| Windows-first | Optimize the first release for Windows packaging, shell launch, and UX |
-| Bounded memory | Large scan, plan, and transaction data must be page-oriented instead of retained wholesale in memory |
-| Incremental migration | Evolve schemas deliberately and version them clearly |
-| Product over experimentation | Defer AI and deeper engine expansion until after a successful GUI release |
+| Rewrite shape | Full GUI rewrite, while keeping the main build green throughout |
+| First implementation slice | Organize screen only |
+| Default user model | Balanced: beginner-friendly default, power-user depth available |
+| Advanced disclosure | Per-section advanced panels, not one global advanced mode |
+| Default preview | `File`, `Destination`, `Status` only |
+| Rule editor scope | Current/simple profile editor is enough for 2.0 |
+| Visual tone | Bold modern product |
+| Copy tone | Warm, reassuring, plain language |
+| Launch model | Explorer/folder-context launch remains a primary entry path; clicked folder must prefill the Organize screen |
+| First UX gate | Manual flow passes without documentation: right-click folder -> open smartfolder -> analyze -> preview -> organize -> undo |
 
-## Proposed milestone plan
+## Non-negotiables
 
-### Milestone 0 - Architecture spike and GUI technology decision
+- Keep the engine metadata-only.
+- Do not add AI, duplicate detection, content extraction, autonomous organization, or regex-heavy workflows in 2.0.
+- Do not weaken preview, explicit confirmation, no-overwrite behavior, journaling, or undo.
+- Do not hide safety failures to make the UI look cleaner.
+- Do not expose internal storage concepts as primary workflow language.
+- Keep CLI compatibility and shared-core behavior intact.
+- Keep the project compiling after each implementation slice.
 
-**Status:** done
+## Terminology direction
 
-Scope:
+Primary UI terminology should move away from implementation language:
 
-- compare viable GUI approaches
-- evaluate Windows packaging constraints
-- verify shared-core integration strategy
-- verify Explorer-launch feasibility
-- choose GUI framework and project structure
+| Current/internal term | Primary UX term |
+|---|---|
+| Apply ready moves | Organize Files |
+| Transaction | Activity |
+| Journal | History |
+| Undo transaction | Undo Changes |
+| Ambiguous | Needs Review |
+| Selected | Ready |
+| Recovery log | Restore History |
+| Session | Hidden from primary UI |
 
-Acceptance criteria:
+Technical terms may still appear in advanced panels, exported data, logs, and diagnostics.
 
-- a single GUI stack is chosen
-- the repo layout for GUI work is agreed
-- the shell-launch approach is technically validated
+## Current foundation already implemented
 
-Implementation outcome:
+These shipped pieces become the implementation substrate for the UX rewrite:
 
-- selected `eframe` / `egui` as the Windows-first GUI stack
-- added `crates\smartfolder-gui`
-- validated argument-based folder preloading as the basis for later Explorer launching
+- `eframe` / `egui` GUI crate exists.
+- GUI can be launched standalone or with a preloaded folder argument.
+- Folder picker exists.
+- Built-in organization modes exist.
+- Current-folder-only scanning is the default, with explicit subfolder opt-in.
+- SQLite-backed session storage exists for bounded-memory scan and preview workflows.
+- GUI analysis runs through the shared core.
+- Planning and preview are paged from SQLite.
+- Safe apply runs through the shared core and writes transaction journals.
+- Undo runs through shared recovery logic.
+- Current-folder activity and technical recovery details exist.
+- Rule profile import and a simple one-rule visual profile editor exist.
+- Explorer launcher registration script exists.
+- Explorer launch already provides the selected folder as startup context and must remain supported in the rewrite.
+- Portable packaging script and portable package documentation exist.
 
-### Milestone 1 - Shared core boundary and schema migration foundation
+## Updated milestone plan
 
-**Status:** planned
-
-Scope:
-
-- identify any CLI-only assumptions that must move out of UI code
-- define a stable interface from GUI to core orchestration
-- add schema migration/versioning strategy for plans and journals
-- preserve CLI compatibility through shared model changes
-
-Acceptance criteria:
-
-- core logic remains UI-agnostic
-- GUI and CLI can use the same plan/journal model layer
-- migration behavior is documented and testable
-
-### Milestone 1A - Bounded-memory session storage
-
-**Status:** in_progress
-
-Scope:
-
-- introduce an embedded SQLite session store for large working sets
-- stream scan records into durable storage instead of retaining every record in memory
-- generate plans from stored scan rows in bounded pages
-- store plan operations for paged GUI retrieval
-- batch database writes so large scans do not stall on per-row commits
-- expose progress, cancellation, and current-work detail during scan and planning
-- provide cleanup/compaction paths for stale working-session data
-- preserve existing CLI JSON workflows during migration
-
-Acceptance criteria:
-
-- large GUI scans do not retain all scan records in process memory
-- plan previews can be queried page-by-page from storage
-- duplicate destination detection uses indexed storage instead of a process-wide destination set
-- scan and plan work can be cancelled from the GUI
-- stale session data can be deleted and the database can be compacted
-- existing in-memory CLI APIs remain compatible until CLI migration is intentional
-
-Progress so far:
-
-- added SQLite-backed session database under app-local data
-- added streaming scan sink API
-- added paged plan generation into session storage
-- moved GUI analysis to session-backed scan and preview storage
-- added live scan/planning progress and cancellation controls
-- changed analysis to scan only the selected folder by default, with explicit CLI and GUI opt-in for subfolders
-- added stale-session cleanup and database compaction APIs
-
-### Milestone 2 - Desktop app shell and portable packaging baseline
-
-**Status:** in_progress
-
-Scope:
-
-- add the desktop app crate and window shell
-- create basic navigation and app state management
-- implement folder picker / preload handling
-- produce a portable Windows build artifact
-
-Acceptance criteria:
-
-- app launches as a standalone Windows desktop program
-- a root folder can be selected or preloaded
-- a portable release build can be produced locally
-
-Progress so far:
-
-- GUI crate scaffolded in the workspace
-- initial window shell implemented
-- folder preloading by startup argument implemented
-- folder picker and built-in mode selection implemented
-- shared-core analyze flow and preview rendering implemented in the GUI
-
-### Milestone 3 - Analyze experience and plan summary UI
-
-**Status:** in_progress
-
-Scope:
-
-- run metadata-only scans from the GUI
-- show progress and cancellation state
-- expose built-in rule mode selection
-- render high-level plan summaries
-- surface warnings, ambiguous files, and conflicts
-
-Acceptance criteria:
-
-- a user can select a folder and generate a plan from the GUI
-- long-running scans keep the UI responsive
-- warnings and exclusions are visible
-
-Progress so far:
-
-- added GUI analysis through the shared core
-- added bounded-memory progress reporting for scan and planning
-- added a high-level plan summary with ready, attention, ambiguous, and warning counts
-- added paged preview controls for all operations, ready operations, and operations needing attention
-- kept preview rows truncated and loaded from SQLite by page
-
-### Milestone 4 - Preview details and safe apply flow
-
-**Status:** in_progress
-
-Scope:
-
-- render detailed operation previews
-- show selected vs conflicted items clearly
-- add explicit confirmation UX before apply
-- surface cloud-folder confirmation requirement
-- run apply with progress updates and final result summary
-
-Acceptance criteria:
-
-- a user can inspect planned operations before applying
-- apply uses the shared safety model
-- apply progress and failures are visible in the GUI
-
-Progress so far:
-
-- added a core stored-plan apply path that pages ready operations from SQLite
-- reused the existing journaled move executor and no-overwrite safety checks
-- added explicit GUI confirmation before applying file moves
-- added cloud-synced folder caution in the confirmation step
-- added apply progress and final transaction summary in the GUI
-
-### Milestone 5 - Undo, transaction history, and recovery UX
-
-**Status:** in_progress
-
-Scope:
-
-- expose recent transactions in the GUI
-- inspect transaction details
-- trigger undo from the GUI
-- show interrupted/failed transaction states
-
-Acceptance criteria:
-
-- a GUI user can undo a prior completed transaction
-- journal-backed recovery states are visible
-- rollback results are clearly reported
-
-Progress so far:
-
-- added recent transaction history to the GUI from journal storage
-- changed the default history view into a current-folder activity overview
-- hid unrelated transaction journals from the default overview while keeping a technical recovery log available
-- added a bounded transaction detail inspector for journal metadata and recorded operations
-- added deterministic non-AI why summaries by preserving plan rule reasons in new transaction journals
-- added transaction status visibility and refresh controls
-- added explicit undo confirmation before rollback
-- wired GUI undo through the shared recovery model
-- added undo result summaries with rolled back, skipped, failed, and journal path details
-
-### Milestone 6 - GUI rule editor and profile management
+### Milestone UX-0 - Baseline stabilization before rewrite
 
 **Status:** planned
 
+Purpose:
+
+Freeze the current functional GUI baseline before the major UX rewrite starts.
+
 Scope:
 
-- create and edit profiles visually
-- validate supported rule conditions in the UI
-- preserve the current rule model
-- import/export or persist profiles predictably
+- update documentation so the v2 roadmap points to the UX rewrite track
+- run and record baseline validation commands
+- identify reusable GUI functions and state that must survive the rewrite
+- mark the current single-page GUI as the functional baseline, not the final product design
+- preserve Explorer/context-launch folder preselection behavior as a first-class workflow requirement
 
 Acceptance criteria:
 
-- a user can create a valid rule profile without editing raw TOML
-- invalid rule inputs are blocked with clear validation
-- profile behavior matches CLI/core rule semantics
+- `cargo fmt --check` passes
+- `cargo test -p smartfolder-core` passes
+- `cargo test -p smartfolder-cli` passes
+- `cargo test -p smartfolder-gui` passes
+- `cargo build -p smartfolder-gui --release` passes
+- current GUI can still complete analyze -> preview -> organize -> undo
+- launching from Explorer or equivalent preloaded-folder path still opens the app with the folder already selected
 
-### Milestone 7 - Explorer launcher integration
+Implementation notes:
+
+- Do not change core behavior in this milestone unless required to keep tests green.
+- Do not start visual redesign until this baseline is clear.
+
+### Milestone UX-1 - New Organize screen shell
 
 **Status:** planned
 
+Purpose:
+
+Replace the current dense single-page utility layout with the first slice of the new product shell, focused only on the Organize screen.
+
 Scope:
 
-- add a Windows Explorer right-click entry point
-- pass selected folder context into the GUI
-- launch the app with the folder preloaded
+- introduce the new Organize screen layout
+- keep the main build green throughout
+- keep existing app state and shared-core operations reusable
+- create a bold modern visual direction using egui styling available in the current stack
+- preserve existing analyze/apply/undo behavior behind the new layout
+- make preloaded-folder launch feel native to the Organize screen, not like a secondary path
+
+Out of scope:
+
+- full Activity screen redesign
+- full Rules screen redesign
+- Settings screen implementation
+- multi-rule editor expansion
 
 Acceptance criteria:
 
-- right-clicking a folder can launch smartfolder
-- the GUI opens with that folder already selected
-- no shell verb applies filesystem changes directly
+- app opens directly to Organize
+- if launched from Explorer, the clicked folder is already populated and ready for Analyze Folder
+- folder selection is visually prominent
+- organization style selection is visible as cards, not radio buttons
+- Analyze Folder is the dominant call to action
+- existing analysis still works through the shared core
+- existing apply and undo flows still work
+- no internal terms like session, transaction, or journal dominate the primary screen
 
-### Milestone 8 - Performance, hardening, and accessibility pass
+Manual proof:
+
+```text
+Right-click folder in Explorer -> Open with smartfolder -> folder is already selected -> choose style -> Analyze Folder
+```
+
+### Milestone UX-2 - Guided folder and style selection
 
 **Status:** planned
 
+Purpose:
+
+Make the starting point and organization choice obvious to a first-time user.
+
 Scope:
 
-- validate large-folder responsiveness against current expectations
+- redesign folder input as `Choose a folder to organize`
+- keep Browse support
+- preserve Explorer preload support
+- treat Explorer-preloaded folder as the default entry path to optimize for, not just a compatibility feature
+- add recent-folder presentation if storage support is straightforward; otherwise stub the UI for later
+- replace built-in mode combo/radio UI with style cards
+- map style cards to existing built-in modes:
+  - By Type -> `BuiltInMode::Type`
+  - By Date -> `BuiltInMode::Date`
+  - Type + Date -> `BuiltInMode::TypeYear`
+  - Custom Rules -> loaded/simple profile flow
+- move Include subfolders into an Organize advanced/details area
+
+Acceptance criteria:
+
+- folder selection is the first obvious step
+- a preloaded Explorer folder is clearly shown as the active folder without requiring extra clicks
+- style cards include short examples of resulting folders
+- selected style is visually clear
+- Analyze Folder is disabled until a folder is provided
+- current-folder-only remains the default
+- include-subfolders remains available but no longer clutters the primary workflow
+
+Manual proof:
+
+```text
+User can understand the first two actions within 30 seconds: confirm the preselected folder, choose style.
+```
+
+### Milestone UX-3 - Analysis progress and summary cards
+
+**Status:** planned
+
+Purpose:
+
+Replace dense technical analysis feedback with clear progress and outcome framing.
+
+Scope:
+
+- redesign scan/planning progress into plain-language progress feedback
+- show current work without exposing implementation terms
+- keep cancellation visible
+- replace summary text with summary cards:
+  - Ready to organize
+  - Needs review
+  - Left untouched
+- add confidence framing that explains cautious behavior as protection
+- keep warnings available through a details area
+
+Acceptance criteria:
+
+- long-running analysis visibly progresses
+- cancellation remains available
+- summary is scannable at a glance
+- ambiguous/unplanned files are framed as Needs Review or Left untouched
+- users can still inspect warnings/details when needed
+
+Manual proof:
+
+```text
+After analysis, user can answer: how many files are safe to organize, how many need review, and why smartfolder held some files back.
+```
+
+### Milestone UX-4 - Simplified preview with progressive details
+
+**Status:** planned
+
+Purpose:
+
+Make planned changes understandable without overwhelming users.
+
+Scope:
+
+- default preview columns:
+  - File
+  - Destination
+  - Status
+- hide reason, original path, exact destination path, and metadata by default
+- provide row expansion or a side/detail panel for advanced details
+- keep paging or incremental loading internally, but avoid exposing paging terminology prominently
+- preserve filters:
+  - All
+  - Ready
+  - Needs Review
+  - Conflicts, if distinguishable from needs-review state
+- add search/filtering if feasible in the existing SQLite-backed preview model
+
+Acceptance criteria:
+
+- default preview is visually simple
+- power users can inspect exact move details quickly
+- full source/destination paths remain accessible
+- rule reasons remain accessible
+- preview remains paged/bounded for large folders
+- current safety semantics are unchanged
+
+Manual proof:
+
+```text
+User can understand where files will go without reading full absolute paths or rule internals.
+```
+
+### Milestone UX-5 - Organize Files apply flow and immediate undo
+
+**Status:** planned
+
+Purpose:
+
+Turn apply/undo into the central trust-building moment of the product.
+
+Scope:
+
+- replace Apply ready moves copy with Organize Files
+- redesign confirmation dialog around safety guarantees:
+  - files will be moved into organized folders
+  - existing files will never be overwritten
+  - undo will be available after completion
+- keep explicit confirmation required
+- show apply progress in plain language
+- completion state must prominently show:
+  - Organization complete
+  - count of files organized
+  - Undo Changes button
+  - View Details button
+- keep journal-backed undo behavior unchanged
+
+Acceptance criteria:
+
+- user sees Undo Changes immediately after organization completes
+- user does not need to find transaction/activity history to undo the just-applied action
+- confirmation explains safety and reversibility
+- failures/skips are reported clearly and honestly
+- no overwrite and journal-before-move behavior remain intact
+
+Manual proof:
+
+```text
+Analyze -> preview -> Organize Files -> Undo Changes restores the original layout for a disposable folder.
+```
+
+### Milestone UX-6 - Activity screen and restore history language
+
+**Status:** planned
+
+Purpose:
+
+Reframe transaction history as user-readable activity and restore history.
+
+Scope:
+
+- introduce or redesign Activity navigation section
+- default activity list uses human-readable entries:
+  - Organized 122 files in Documents
+  - Undone organization in Downloads
+- keep activity scoped to the selected/current folder where helpful
+- keep advanced transaction/journal details available in an expandable panel
+- rename technical recovery log to Restore History in the user-facing UI
+- preserve transaction ids and journal paths in advanced details
+
+Acceptance criteria:
+
+- a user can find recent organization actions without understanding transactions
+- undo availability is obvious for completed activities
+- failed/interrupted activities are clearly explained
+- advanced details retain all recovery/debug information
+
+Manual proof:
+
+```text
+User can find a prior organization action and understand whether it can be undone.
+```
+
+### Milestone UX-7 - Rules screen cleanup
+
+**Status:** planned
+
+Purpose:
+
+Make rule/profile management approachable without blocking the UX rewrite on a full advanced designer.
+
+Scope:
+
+- introduce or refine Rules section
+- present built-in styles visually
+- list saved profiles clearly
+- keep the simple one-rule profile editor
+- keep TOML import/export available as advanced actions
+- preserve shared-core `RuleProfile` validation
+
+Out of scope for 2.0:
+
+- full multi-rule drag/drop editor
+- reusable rule templates beyond simple examples
+- regex or advanced rule language
+
+Acceptance criteria:
+
+- user can create a simple valid profile without raw TOML
+- imported profiles can still be used
+- invalid profiles are blocked with clear validation
+- profile behavior matches CLI/core semantics
+
+Manual proof:
+
+```text
+Create simple PDF profile -> Analyze Folder with Custom Rules -> preview expected destination.
+```
+
+### Milestone UX-8 - Settings, advanced controls, and desktop integration polish
+
+**Status:** planned
+
+Purpose:
+
+Move less-common controls out of the primary workflow while keeping them accessible.
+
+Scope:
+
+- define sparse Settings sections:
+  - Appearance
+  - Safety
+  - History
+  - Advanced
+- decide which settings are actually persisted in 2.0
+- keep Clean old session data out of the primary Organize path
+- keep subfolder/exclusion behavior discoverable through contextual advanced panels
+- rename Explorer context action to `Organize with smartfolder`
+- ensure Explorer registration remains launch-only and never applies changes directly
+
+Acceptance criteria:
+
+- primary Organize path is uncluttered
+- advanced controls remain discoverable
+- Explorer action uses human product language
+- no shell integration mutates files directly
+
+Manual proof:
+
+```text
+Explorer context menu opens smartfolder with the selected folder preloaded and no file changes are made.
+```
+
+### Milestone UX-9 - Hardening, accessibility, and release readiness
+
+**Status:** planned
+
+Purpose:
+
+Turn the redesigned GUI into a release candidate.
+
+Scope:
+
+- validate responsiveness on large folders
 - harden cancellation and error presentation
-- handle edge cases around cloud folders and path conflicts in the GUI
-- improve keyboard usability and accessibility basics
+- test cloud-folder warnings and confirmation language
+- test conflict/no-overwrite messaging
+- improve keyboard navigation
+- improve visible focus states
+- improve contrast and scalable text behavior where egui allows
+- run disposable-folder end-to-end apply/undo tests
+- finalize portable package docs and release notes
 
 Acceptance criteria:
 
 - large scans remain responsive
-- GUI error states remain actionable
-- core safety warnings are surfaced consistently
+- GUI errors are actionable and safety-oriented
+- keyboard users can complete the core flow
+- warning language is consistent with the new terminology
+- portable package can be built locally
+- release notes explain the v2 GUI workflow and compatibility with the CLI
 
-### Milestone 9 - Portable 2.0 release documentation and publication
-
-**Status:** planned
-
-Scope:
-
-- document portable app usage
-- document CLI/GUI coexistence
-- document migration behavior
-- publish the Windows portable 2.0 release
-
-Acceptance criteria:
-
-- release notes explain what changed from v1
-- users can install or run the portable build without CLI knowledge
-- compatibility and migration behavior are documented
-
-## Testing strategy
-
-2.0 should expand the existing test stack rather than replace it.
-
-### Core requirements
-
-- keep existing core unit and integration tests green
-- add migration tests for any schema changes
-- add GUI integration tests for analyze/preview/apply/undo flows
-- add Explorer-launch tests where practical
-- add regression coverage for GUI rule editing
-- preserve CLI regression coverage as a compatibility signal
-
-### Required end-to-end proof for 2.0
+Required end-to-end proof:
 
 ```text
 Explorer or app launch
-  -> root folder preloaded or selected
-  -> analyze
-  -> preview
-  -> apply
-  -> undo
-  -> assert original layout restored
+  -> folder preloaded or selected
+  -> Analyze Folder
+  -> Preview
+  -> Organize Files
+  -> Undo Changes
+  -> original layout restored
 ```
+
+## Testing strategy
+
+The UX rewrite must preserve the existing test stack while adding product-flow validation.
+
+Required automated checks:
+
+- `cargo fmt --check`
+- `cargo test -p smartfolder-core`
+- `cargo test -p smartfolder-cli`
+- `cargo test -p smartfolder-gui`
+- `cargo build -p smartfolder-gui --release`
+- PowerShell parser checks for release and Explorer scripts
+
+Required manual checks:
+
+- fresh launch with no folder selected
+- Explorer/preloaded folder launch
+- Explorer/preloaded folder launch with immediate Analyze eligibility and no forced re-selection
+- current-folder-only analysis
+- include-subfolders analysis from advanced controls
+- style card selection for all built-in modes
+- custom profile analysis
+- preview detail expansion
+- organize files confirmation
+- immediate Undo Changes
+- Activity restore for an older action
+- portable package smoke test
 
 ## Risks and mitigations
 
 | Risk | Mitigation |
 |---|---|
-| GUI duplicates or diverges from core logic | Keep all filesystem behavior in shared Rust core |
-| Schema changes strand CLI users | Explicit schema versions and migration path |
-| GUI becomes sluggish on large folders | Background work, progress reporting, performance gates |
-| Explorer integration increases risk | Limit shell integration to launching the app with context |
-| 2.0 scope expands uncontrollably | Keep AI, duplicates, content extraction, and installer work out of 2.0 |
-| Windows-first choices make later cross-platform support harder | Keep framework choice open until architecture spike is complete |
+| Rewrite breaks existing safe behavior | Keep shared core unchanged and run core/CLI/GUI tests after each slice |
+| UI hides important safety details | Move technical data into details panels, not out of the product |
+| Visual redesign expands scope | Implement Organize screen first and defer full Activity/Rules/Settings polish |
+| egui limits styling ambition | Use spacing, color, cards, hierarchy, and layout before considering framework changes |
+| Users cannot find advanced controls | Use contextual advanced panels with clear labels |
+| Undo becomes hidden again | Treat immediate Undo Changes as a required completion-state control |
+| Large previews become sluggish | Preserve SQLite paging/incremental loading internally |
+| Technical terminology leaks into primary UX | Enforce the terminology table in UI copy reviews |
 
-## Explicitly out of scope for 2.0
+## Explicitly out of scope for v2.0 UX rewrite
 
 - AI recommendations
-- automatic organization without user preview
+- automatic organization without preview
 - duplicate detection
-- content extraction
-- deep shell verbs that apply actions from Explorer
+- content extraction or semantic classification
+- regex-heavy workflows
+- full multi-rule designer
 - installer and auto-update
-- enterprise administration features
+- enterprise/admin features
 
-## Follow-on roadmap after 2.0
+## Approval checkpoint
 
-### Candidate 2.1+ work
+Implementation of the UX rewrite should not begin until this updated plan is reviewed and approved.
 
-- installer
-- updater
-- deeper transaction history UX
-- reusable templates and presets
-
-### Candidate later 2.x work
-
-- AI/Ollama suggestions
-- duplicate detection
-- content extraction/classification
-- advanced rule language or regex
-- cross-platform desktop expansion
+After approval, start with Milestone UX-0 and UX-1 only. Do not begin Activity, Rules, Settings, or visual polish work until the redesigned Organize screen proves the core flow.

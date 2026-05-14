@@ -70,3 +70,51 @@ pub(crate) fn panel_frame() -> egui::Frame {
         .rounding(egui::Rounding::same(8.0))
         .inner_margin(egui::Margin::same(theme::spacing::LG))
 }
+
+pub(crate) fn constrained_page(
+    ui: &mut egui::Ui,
+    max_width: f32,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    let available_width = ui.available_width();
+    let content_width = available_width.min(max_width).max(320.0);
+    let side_margin = ((available_width - content_width) / 2.0).max(0.0);
+
+    ui.add_space(theme::spacing::PAGE);
+    ui.horizontal(|ui| {
+        ui.add_space(side_margin);
+        ui.allocate_ui_with_layout(
+            egui::vec2(content_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            contents,
+        );
+    });
+}
+
+pub(crate) fn section_panel(
+    ui: &mut egui::Ui,
+    min_width: f32,
+    title: &str,
+    detail: &str,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    panel_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width().max(min_width));
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .size(theme::typography::CARD_TITLE)
+                .color(theme::colors::heading_text()),
+        );
+        ui.add(
+            egui::Label::new(
+                RichText::new(detail)
+                    .size(theme::typography::CAPTION)
+                    .color(theme::colors::metadata_text()),
+            )
+            .wrap(),
+        );
+        ui.add_space(theme::spacing::MD);
+        contents(ui);
+    });
+}

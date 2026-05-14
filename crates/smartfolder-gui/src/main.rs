@@ -69,8 +69,10 @@ use smartfolder_core::storage::ensure_profiles_dir;
 
 use preferences::{GuiPreferences, MotionPreference, StylePreference, ThemePreference};
 use ui::components::{
-    note_frame as settings_note_frame, panel_frame as settings_panel_frame,
-    screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
+    constrained_page as render_constrained_page, note_frame as settings_note_frame,
+    panel_frame as settings_panel_frame, screen_heading as render_screen_heading,
+    section_panel as render_component_section_panel, status_chip as render_status_chip,
+    truncated_label,
 };
 
 type AnalysisMessage = std::result::Result<AnalysisOutput, String>;
@@ -6989,26 +6991,6 @@ fn section_max_width(section: AppSection) -> f32 {
     }
 }
 
-fn render_constrained_page(
-    ui: &mut egui::Ui,
-    max_width: f32,
-    contents: impl FnOnce(&mut egui::Ui),
-) {
-    let available_width = ui.available_width();
-    let content_width = available_width.min(max_width).max(320.0);
-    let side_margin = ((available_width - content_width) / 2.0).max(0.0);
-
-    ui.add_space(ui::theme::spacing::PAGE);
-    ui.horizontal(|ui| {
-        ui.add_space(side_margin);
-        ui.allocate_ui_with_layout(
-            egui::vec2(content_width, 0.0),
-            egui::Layout::top_down(egui::Align::Min),
-            contents,
-        );
-    });
-}
-
 fn render_instruction_picker(
     ui: &mut egui::Ui,
     selected_instruction: InstructionPreset,
@@ -7396,25 +7378,7 @@ fn render_settings_section_panel(
     detail: &str,
     contents: impl FnOnce(&mut egui::Ui),
 ) {
-    settings_panel_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width().max(CARD_MIN_WIDTH));
-        ui.label(
-            RichText::new(title)
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.add(
-            egui::Label::new(
-                RichText::new(detail)
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::metadata_text()),
-            )
-            .wrap(),
-        );
-        ui.add_space(ui::theme::spacing::MD);
-        contents(ui);
-    });
+    render_component_section_panel(ui, CARD_MIN_WIDTH, title, detail, contents);
 }
 
 fn render_appearance_preferences(ui: &mut egui::Ui, preferences: &mut GuiPreferences) -> bool {

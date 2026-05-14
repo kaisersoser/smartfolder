@@ -2612,7 +2612,6 @@ impl SmartfolderApp {
                 ui.add_space(ui::theme::spacing::MD);
                 let mut ai_preferences_changed = false;
                 let mut test_ai_connection = false;
-                let mut export_ai_diagnostics = false;
                 let checking_ai_status = self.is_checking_ai_status();
                 render_settings_section_panel(
                     ui,
@@ -2627,7 +2626,6 @@ impl SmartfolderApp {
                         );
                         ai_preferences_changed |= action.changed;
                         test_ai_connection |= action.test_connection;
-                        export_ai_diagnostics |= action.export_diagnostics;
                     },
                 );
 
@@ -2639,8 +2637,20 @@ impl SmartfolderApp {
                 if test_ai_connection {
                     self.start_ai_status_check();
                 }
-                if export_ai_diagnostics {
-                    self.export_ai_diagnostics();
+
+                ui.add_space(ui::theme::spacing::MD);
+                let mut privacy_changed = false;
+                render_settings_section_panel(
+                    ui,
+                    "Privacy",
+                    "Control whether optional AI features can inspect sampled text contents.",
+                    |ui| {
+                        privacy_changed |= render_privacy_preferences(ui, &mut self.preferences);
+                    },
+                );
+
+                if privacy_changed {
+                    self.save_preferences_with_message();
                 }
 
                 ui.add_space(ui::theme::spacing::MD);
@@ -2652,43 +2662,36 @@ impl SmartfolderApp {
                 );
 
                 ui.add_space(ui::theme::spacing::MD);
+                let mut advanced_changed = false;
+                let mut export_ai_diagnostics = false;
+                let mut cleanup_requested = false;
                 render_settings_section_panel(
                     ui,
-                    "Storage maintenance",
-                    "Remove generated cache data without touching restore history.",
+                    "Advanced and maintenance",
+                    "Provider details and cache cleanup. Restore history is kept separate.",
                     |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(
-                                    "Cleanup removes old cached analysis sessions and preview pages. It does not remove restore history for organized files.",
-                                )
-                                .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
+                        let action = render_advanced_ai_preferences(ui, &mut self.preferences);
+                        advanced_changed |= action.changed;
+                        export_ai_diagnostics |= action.export_diagnostics;
+
+                        ui.add_space(ui::theme::spacing::MD);
+                        cleanup_requested |= render_storage_maintenance(
+                            ui,
+                            !self.is_analyzing() && !self.is_applying() && !self.is_undoing(),
                         );
-                        ui.add_space(ui::theme::spacing::SM);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .add_enabled(
-                                    !self.is_analyzing()
-                                        && !self.is_applying()
-                                        && !self.is_undoing(),
-                                    ui::theme::widgets::secondary_button(
-                                        "Clean old session data",
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                self.cleanup_old_sessions();
-                            }
-                            ui.label(
-                                RichText::new("Available when no analysis, organize, or restore task is running.")
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::metadata_text()),
-                            );
-                        });
                     },
                 );
+
+                if advanced_changed {
+                    self.ai_status = None;
+                    self.save_preferences_with_message();
+                }
+                if export_ai_diagnostics {
+                    self.export_ai_diagnostics();
+                }
+                if cleanup_requested {
+                    self.cleanup_old_sessions();
+                }
             });
     }
 
@@ -7585,21 +7588,6 @@ fn render_ai_preferences(
             ui.end_row();
 
             ui.label(
-                RichText::new("Endpoint")
-                    .strong()
-                    .color(ui::theme::colors::primary_text()),
-            );
-            action.changed |= ui
-                .add_enabled(
-                    preferences.ai.enabled,
-                    egui::TextEdit::singleline(&mut preferences.ai.endpoint)
-                        .desired_width(260.0)
-                        .hint_text("http://localhost:11434"),
-                )
-                .changed();
-            ui.end_row();
-
-            ui.label(
                 RichText::new("Model")
                     .strong()
                     .color(ui::theme::colors::primary_text()),
@@ -7651,12 +7639,106 @@ fn render_ai_preferences(
                 }
             }
             ui.end_row();
+        });
 
-            ui.label(
-                RichText::new("Timeout")
-                    .strong()
-                    .color(ui::theme::colors::primary_text()),
+    ui.add_space(ui::theme::spacing::SM);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                preferences.ai.enabled && !checking,
+                ui::theme::widgets::secondary_button(if checking {
+                    "Testing..."
+                } else {
+                    "Test connection"
+                }),
+            )
+            .clicked()
+        {
+            action.test_connection = true;
+        }
+
+        if let Some(status) = status {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&status.message)
+                        .size(ui::theme::typography::CAPTION)
+                        .color(if status.available {
+                            ui::theme::colors::success()
+                        } else {
+                            ui::theme::colors::metadata_text()
+                        }),
+                )
+                .wrap(),
             );
+        }
+    });
+
+    action
+}
+
+fn render_privacy_preferences(ui: &mut egui::Ui, preferences: &mut GuiPreferences) -> bool {
+    let mut changed = false;
+    settings_note_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        changed |= ui
+            .add_enabled(
+                preferences.ai.enabled,
+                egui::Checkbox::new(
+                    &mut preferences.ai.content_inspection_enabled,
+                    "Allow AI to inspect sampled text file contents",
+                ),
+            )
+            .changed();
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Off by default. When enabled, only sampled text-like file contents are sent to the local Ollama model. OCR, media, and broad binary extraction are not used.",
+                )
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+            )
+            .wrap(),
+        );
+    });
+
+    if !preferences.ai.enabled {
+        ui.label(
+            RichText::new("Enable AI assistance before changing content inspection.")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+    }
+
+    changed
+}
+
+fn render_advanced_ai_preferences(
+    ui: &mut egui::Ui,
+    preferences: &mut GuiPreferences,
+) -> AiPreferencesAction {
+    let mut action = AiPreferencesAction::default();
+
+    ui.label(
+        RichText::new("AI provider details")
+            .strong()
+            .color(ui::theme::colors::heading_text()),
+    );
+    egui::Grid::new("advanced-ai-preferences-grid")
+        .num_columns(2)
+        .spacing([ui::theme::spacing::LG, ui::theme::spacing::SM])
+        .show(ui, |ui| {
+            ui.label("Endpoint");
+            action.changed |= ui
+                .add_enabled(
+                    preferences.ai.enabled,
+                    egui::TextEdit::singleline(&mut preferences.ai.endpoint)
+                        .desired_width(260.0)
+                        .hint_text("http://localhost:11434"),
+                )
+                .changed();
+            ui.end_row();
+
+            ui.label("Timeout");
             ui.horizontal(|ui| {
                 action.changed |= ui
                     .add_enabled(
@@ -7676,70 +7758,52 @@ fn render_ai_preferences(
         });
 
     ui.add_space(ui::theme::spacing::SM);
+    if ui
+        .add(ui::theme::widgets::secondary_button(
+            "Export AI diagnostics",
+        ))
+        .clicked()
+    {
+        action.export_diagnostics = true;
+    }
+
+    action
+}
+
+fn render_storage_maintenance(ui: &mut egui::Ui, can_cleanup: bool) -> bool {
+    let mut cleanup_requested = false;
+    ui.label(
+        RichText::new("Storage maintenance")
+            .strong()
+            .color(ui::theme::colors::heading_text()),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Cleanup removes old cached analysis sessions and preview pages. It does not remove restore history for organized files.",
+            )
+            .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
     ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
-                preferences.ai.enabled && !checking,
-                ui::theme::widgets::secondary_button(if checking {
-                    "Testing..."
-                } else {
-                    "Test connection"
-                }),
+                can_cleanup,
+                ui::theme::widgets::secondary_button("Clean old session data"),
             )
             .clicked()
         {
-            action.test_connection = true;
+            cleanup_requested = true;
         }
-
-        if ui
-            .add(ui::theme::widgets::secondary_button("Export diagnostics"))
-            .clicked()
-        {
-            action.export_diagnostics = true;
-        }
-
-        if let Some(status) = status {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&status.message)
-                        .size(ui::theme::typography::CAPTION)
-                        .color(if status.available {
-                            ui::theme::colors::success()
-                        } else {
-                            ui::theme::colors::metadata_text()
-                        }),
-                )
-                .wrap(),
-            );
-        }
-    });
-
-    ui.add_space(ui::theme::spacing::SM);
-    settings_note_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        let changed = ui
-            .add_enabled(
-                preferences.ai.enabled,
-                egui::Checkbox::new(
-                    &mut preferences.ai.content_inspection_enabled,
-                    "Allow AI to inspect sampled text file contents",
-                ),
-            )
-            .changed();
-        action.changed |= changed;
-        ui.add(
-            egui::Label::new(
-                RichText::new(
-                    "Off by default. When enabled, only sampled text-like file contents are used; OCR, media, and broad binary extraction are out of scope for v2.2.",
-                )
+        ui.label(
+            RichText::new("Available when no analysis, organize, or restore task is running.")
                 .size(ui::theme::typography::CAPTION)
                 .color(ui::theme::colors::metadata_text()),
-            )
-            .wrap(),
         );
     });
-
-    action
+    cleanup_requested
 }
 
 fn render_ai_status_chip(

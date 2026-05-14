@@ -8,13 +8,41 @@ $ErrorActionPreference = "Stop"
 
 $resolvedAppPath = [System.IO.Path]::GetFullPath($AppPath)
 $folderShellKey = "Registry::HKEY_CURRENT_USER\Software\Classes\Directory\shell\smartfolder"
+$folderBackgroundShellKey = "Registry::HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\smartfolder"
 $folderCommandKey = Join-Path $folderShellKey "command"
+$folderBackgroundCommandKey = Join-Path $folderBackgroundShellKey "command"
 $menuLabel = "Organize with smartfolder"
 
+function Register-SmartfolderExplorerLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ShellKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CommandKey,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CommandArgument,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RegistrationLabel
+    )
+
+    if ($PSCmdlet.ShouldProcess($ShellKey, $RegistrationLabel)) {
+        New-Item -Path $CommandKey -Force | Out-Null
+        New-ItemProperty -Path $ShellKey -Name "MUIVerb" -Value $menuLabel -PropertyType String -Force | Out-Null
+        New-ItemProperty -Path $ShellKey -Name "Icon" -Value $resolvedAppPath -PropertyType String -Force | Out-Null
+        $commandValue = '"{0}" "{1}"' -f $resolvedAppPath, $CommandArgument
+        Set-Item -Path $CommandKey -Value $commandValue
+    }
+}
+
 function Remove-SmartfolderExplorerLauncher {
-    if (Test-Path $folderShellKey) {
-        if ($PSCmdlet.ShouldProcess($folderShellKey, "Remove Explorer context menu entry")) {
-            Remove-Item -Path $folderShellKey -Recurse -Force
+    foreach ($shellKey in @($folderShellKey, $folderBackgroundShellKey)) {
+        if (Test-Path $shellKey) {
+            if ($PSCmdlet.ShouldProcess($shellKey, "Remove Explorer context menu entry")) {
+                Remove-Item -Path $shellKey -Recurse -Force
+            }
         }
     }
 }
@@ -29,11 +57,16 @@ if (-not (Test-Path $resolvedAppPath -PathType Leaf)) {
     throw "smartfolder GUI executable not found: $resolvedAppPath. Build it first with: cargo build -p smartfolder-gui --release"
 }
 
-if ($PSCmdlet.ShouldProcess($folderShellKey, "Register Explorer context menu entry")) {
-    New-Item -Path $folderCommandKey -Force | Out-Null
-    New-ItemProperty -Path $folderShellKey -Name "MUIVerb" -Value $menuLabel -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path $folderShellKey -Name "Icon" -Value $resolvedAppPath -PropertyType String -Force | Out-Null
-    Set-Item -Path $folderCommandKey -Value "`"$resolvedAppPath`" `"%1`""
-}
+Register-SmartfolderExplorerLauncher `
+    -ShellKey $folderShellKey `
+    -CommandKey $folderCommandKey `
+    -CommandArgument '%1' `
+    -RegistrationLabel "Register folder context menu entry"
 
-Write-Host "Registered smartfolder Explorer launcher for folders."
+Register-SmartfolderExplorerLauncher `
+    -ShellKey $folderBackgroundShellKey `
+    -CommandKey $folderBackgroundCommandKey `
+    -CommandArgument '%V' `
+    -RegistrationLabel "Register folder background context menu entry"
+
+Write-Host "Registered smartfolder Explorer launcher for folders and folder backgrounds."

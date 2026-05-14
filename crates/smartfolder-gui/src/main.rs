@@ -80,12 +80,10 @@ const TRANSACTION_DETAIL_ROW_LIMIT: usize = 100;
 const WINDOW_WIDTH: f32 = 1160.0;
 const WINDOW_HEIGHT: f32 = 780.0;
 const SHELL_NAV_WIDTH: f32 = ui::theme::spacing::SIDEBAR_WIDTH;
-const SHELL_NAV_COLLAPSED_WIDTH: f32 = 56.0;
+const SHELL_NAV_COLLAPSED_WIDTH: f32 = ui::theme::spacing::SIDEBAR_COLLAPSED_WIDTH;
 const CARD_MIN_WIDTH: f32 = 188.0;
 const PREVIEW_EXAMPLE_LIMIT: usize = 3;
 const INSTRUCTION_PANEL_HEIGHT: f32 = 216.0;
-const ORGANIZE_STEP_BUTTON_WIDTH: f32 = 150.0;
-const ORGANIZE_STEP_FRAME_MARGIN: f32 = 12.0;
 const PROFILE_WORKSPACE_FIELD_HEIGHT: f32 = 32.0;
 const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
 const MAX_AI_OPERATION_RECORDS: usize = 32;
@@ -1731,16 +1729,7 @@ impl SmartfolderApp {
             (ui::icons::EXPAND, "Expand sidebar")
         };
         if ui
-            .add_sized(
-                [36.0, 36.0],
-                egui::Button::new(
-                    RichText::new(icon)
-                        .size(18.0)
-                        .color(ui::theme::colors::primary_text()),
-                )
-                .fill(ui::theme::colors::soft_control())
-                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border())),
-            )
+            .add(ui::theme::widgets::icon_button(icon))
             .on_hover_text(tooltip)
             .clicked()
         {
@@ -1758,7 +1747,7 @@ impl SmartfolderApp {
                 let selected = self.active_section == section;
                 let response = ui
                     .add_sized(
-                        [40.0, 40.0],
+                        [40.0, 36.0],
                         egui::Button::new(RichText::new(section.icon()).size(18.0).color(
                             if selected {
                                 ui::theme::colors::primary_blue()
@@ -1769,14 +1758,14 @@ impl SmartfolderApp {
                         .fill(if selected {
                             ui::theme::colors::hover_control()
                         } else {
-                            ui::theme::colors::soft_control()
+                            Color32::TRANSPARENT
                         })
                         .stroke(egui::Stroke::new(
-                            if selected { 2.0 } else { 1.0 },
+                            1.0,
                             if selected {
-                                ui::theme::colors::primary_blue()
-                            } else {
                                 ui::theme::colors::border()
+                            } else {
+                                Color32::TRANSPARENT
                             },
                         )),
                     )
@@ -1794,7 +1783,7 @@ impl SmartfolderApp {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("smartfolder")
-                    .size(24.0)
+                    .size(ui::theme::typography::SECTION_TITLE)
                     .strong()
                     .color(ui::theme::colors::heading_text()),
             );
@@ -1816,25 +1805,28 @@ impl SmartfolderApp {
         for section in AppSection::ALL {
             let selected = self.active_section == section;
             let nav_width = SHELL_NAV_WIDTH - (ui::theme::spacing::LG * 2.0);
-            let response = egui::Frame::group(ui.style())
+            let response = egui::Frame::none()
                 .fill(if selected {
                     ui::theme::colors::hover_control()
                 } else {
-                    ui::theme::colors::soft_control()
+                    Color32::TRANSPARENT
                 })
                 .stroke(egui::Stroke::new(
-                    if selected { 2.0 } else { 1.0 },
+                    1.0,
                     if selected {
-                        ui::theme::colors::primary_blue()
-                    } else {
                         ui::theme::colors::border()
+                    } else {
+                        Color32::TRANSPARENT
                     },
                 ))
-                .rounding(egui::Rounding::same(8.0))
-                .inner_margin(egui::Margin::same(10.0))
+                .rounding(egui::Rounding::same(ui::theme::spacing::RADIUS_MD))
+                .inner_margin(egui::Margin::symmetric(
+                    ui::theme::spacing::MD,
+                    ui::theme::spacing::SM,
+                ))
                 .show(ui, |ui| {
                     let inner = ui.allocate_ui_with_layout(
-                        egui::vec2(nav_width, 84.0),
+                        egui::vec2(nav_width, 56.0),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.horizontal(|ui| {
@@ -3057,24 +3049,27 @@ impl eframe::App for SmartfolderApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| match self.active_section {
-                    AppSection::Organize => {
-                        self.render_organize_screen(
-                            ui,
-                            ctx,
-                            &mut preview_action,
-                            &mut history_action,
-                        );
-                    }
-                    AppSection::Activity => {
-                        self.render_activity_screen(ui, &mut history_action);
-                    }
-                    AppSection::Rules => {
-                        self.render_rules_screen(ui);
-                    }
-                    AppSection::Settings => {
-                        self.render_settings_screen(ui);
-                    }
+                .show(ui, |ui| {
+                    let section = self.active_section;
+                    render_constrained_page(ui, section_max_width(section), |ui| match section {
+                        AppSection::Organize => {
+                            self.render_organize_screen(
+                                ui,
+                                ctx,
+                                &mut preview_action,
+                                &mut history_action,
+                            );
+                        }
+                        AppSection::Activity => {
+                            self.render_activity_screen(ui, &mut history_action);
+                        }
+                        AppSection::Rules => {
+                            self.render_rules_screen(ui);
+                        }
+                        AppSection::Settings => {
+                            self.render_settings_screen(ui);
+                        }
+                    });
                 });
         });
 
@@ -5190,10 +5185,7 @@ fn render_preview_metric_card(
 }
 
 fn preview_aligned_content_width(ui: &egui::Ui) -> f32 {
-    let stepper_width = (ORGANIZE_STEP_BUTTON_WIDTH * OrganizeStep::ALL.len() as f32)
-        + (ui.spacing().item_spacing.x * (OrganizeStep::ALL.len().saturating_sub(1) as f32))
-        + (ORGANIZE_STEP_FRAME_MARGIN * 2.0);
-    ui.available_width().min(stepper_width)
+    ui.available_width().min(ui::theme::spacing::FLOW_MAX_WIDTH)
 }
 
 fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
@@ -6712,21 +6704,56 @@ fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
     }
 }
 
+fn section_max_width(section: AppSection) -> f32 {
+    match section {
+        AppSection::Organize | AppSection::Settings => ui::theme::spacing::FLOW_MAX_WIDTH,
+        AppSection::Activity | AppSection::Rules => ui::theme::spacing::CONTENT_MAX_WIDTH,
+    }
+}
+
+fn render_constrained_page(
+    ui: &mut egui::Ui,
+    max_width: f32,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    let available_width = ui.available_width();
+    let content_width = available_width.min(max_width).max(320.0);
+    let side_margin = ((available_width - content_width) / 2.0).max(0.0);
+
+    ui.add_space(ui::theme::spacing::PAGE);
+    ui.horizontal(|ui| {
+        ui.add_space(side_margin);
+        ui.allocate_ui_with_layout(
+            egui::vec2(content_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            contents,
+        );
+    });
+}
+
 fn render_screen_heading(ui: &mut egui::Ui, icon: &str, title: &str, detail: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new(icon)
-                .size(22.0)
+                .size(18.0)
                 .color(ui::theme::colors::primary_blue()),
         );
         ui.label(
             RichText::new(title)
-                .size(30.0)
+                .size(ui::theme::typography::PAGE_TITLE)
                 .strong()
                 .color(ui::theme::colors::heading_text()),
         );
     });
-    ui.label(RichText::new(detail).color(ui::theme::colors::secondary_text()));
+    ui.add_space(ui::theme::spacing::XS);
+    ui.add(
+        egui::Label::new(
+            RichText::new(detail)
+                .size(ui::theme::typography::BODY)
+                .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
 }
 
 fn render_instruction_picker(
@@ -6788,50 +6815,54 @@ fn render_organize_step_indicator(
     furthest: OrganizeStep,
     requested_step: &mut Option<OrganizeStep>,
 ) {
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .inner_margin(egui::Margin::same(12.0))
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for step in OrganizeStep::ALL {
-                    let is_current = step == current;
-                    let is_available = step <= furthest;
-                    let label = format!("{}. {}", step.number(), step.title());
-                    let button =
-                        egui::Button::new(RichText::new(label).strong().color(if is_current {
-                            ui::theme::colors::primary_blue()
-                        } else if is_available {
-                            ui::theme::colors::primary_text()
-                        } else {
-                            ui::theme::colors::metadata_text()
-                        }))
-                        .fill(if is_current {
-                            ui::theme::colors::hover_control()
-                        } else if is_available {
-                            ui::theme::colors::elevated_surface()
-                        } else {
-                            ui::theme::colors::subtle_surface()
-                        })
-                        .stroke(egui::Stroke::new(
-                            if is_current { 2.0 } else { 1.0 },
-                            if is_current {
-                                ui::theme::colors::primary_blue()
-                            } else {
-                                ui::theme::colors::border()
-                            },
-                        ))
-                        .min_size(egui::vec2(150.0, 40.0));
+    ui.horizontal_wrapped(|ui| {
+        for (index, step) in OrganizeStep::ALL.iter().copied().enumerate() {
+            if index > 0 {
+                ui.label(
+                    RichText::new("->")
+                        .size(ui::theme::typography::CONTROL)
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            }
 
-                    let response = ui
-                        .add_enabled(is_available, button)
-                        .on_hover_text(step.subtitle());
-                    if response.clicked() {
-                        *requested_step = Some(step);
-                    }
-                }
-            });
-        });
+            let is_current = step == current;
+            let is_available = step <= furthest;
+            let text_color = if is_current {
+                ui::theme::colors::primary_blue()
+            } else if is_available {
+                ui::theme::colors::primary_text()
+            } else {
+                ui::theme::colors::metadata_text()
+            };
+            let fill = if is_current {
+                ui::theme::colors::hover_control()
+            } else {
+                Color32::TRANSPARENT
+            };
+            let stroke = if is_current {
+                egui::Stroke::new(1.0, ui::theme::colors::primary_blue())
+            } else {
+                egui::Stroke::NONE
+            };
+            let label = format!("{} {}", step.number(), step.title());
+            let button = egui::Button::new(
+                RichText::new(label)
+                    .size(ui::theme::typography::CONTROL)
+                    .strong()
+                    .color(text_color),
+            )
+            .fill(fill)
+            .stroke(stroke)
+            .min_size(egui::vec2(88.0, ui::theme::spacing::COMPACT_CONTROL_HEIGHT));
+
+            let response = ui
+                .add_enabled(is_available, button)
+                .on_hover_text(step.subtitle());
+            if response.clicked() {
+                *requested_step = Some(step);
+            }
+        }
+    });
 }
 
 fn render_organize_step_controls(

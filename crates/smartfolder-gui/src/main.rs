@@ -337,6 +337,7 @@ struct SmartfolderApp {
     preview_offset: usize,
     selected_preview_row: Option<usize>,
     show_detailed_preview: bool,
+    preview_detail_mode: PreviewDetailMode,
     analysis_receiver: Option<Receiver<AnalysisEvent>>,
     analysis_cancellation: Option<CancellationToken>,
     analysis_progress: Option<AnalysisProgress>,
@@ -412,6 +413,7 @@ impl SmartfolderApp {
             preview_offset: 0,
             selected_preview_row: None,
             show_detailed_preview: false,
+            preview_detail_mode: PreviewDetailMode::List,
             analysis_receiver: None,
             analysis_cancellation: None,
             analysis_progress: None,
@@ -580,6 +582,7 @@ impl SmartfolderApp {
         self.undo_result = None;
         self.show_apply_confirmation = false;
         self.show_detailed_preview = false;
+        self.preview_detail_mode = PreviewDetailMode::List;
         self.preview_filter = PreviewFilter::All;
         self.preview_offset = 0;
         self.selected_preview_row = None;
@@ -657,6 +660,7 @@ impl SmartfolderApp {
         self.undo_result = None;
         self.show_apply_confirmation = false;
         self.show_detailed_preview = false;
+        self.preview_detail_mode = PreviewDetailMode::List;
         self.preview_filter = PreviewFilter::All;
         self.preview_offset = 0;
         self.selected_preview_row = None;
@@ -721,6 +725,7 @@ impl SmartfolderApp {
         self.preview_offset = 0;
         self.selected_preview_row = None;
         self.show_detailed_preview = false;
+        self.preview_detail_mode = PreviewDetailMode::List;
         self.organize_step = OrganizeStep::Preview;
         self.mark_organize_step_reached(OrganizeStep::Preview);
 
@@ -2317,6 +2322,24 @@ impl SmartfolderApp {
                             .wrap(),
                         );
                         ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("View")
+                                    .strong()
+                                    .color(ui::theme::colors::metadata_text()),
+                            );
+                            ui.selectable_value(
+                                &mut self.preview_detail_mode,
+                                PreviewDetailMode::List,
+                                "List",
+                            );
+                            ui.selectable_value(
+                                &mut self.preview_detail_mode,
+                                PreviewDetailMode::Tree,
+                                "Tree",
+                            );
+                        });
+                        ui.add_space(8.0);
                         render_preview_controls(
                             ui,
                             result,
@@ -2325,20 +2348,39 @@ impl SmartfolderApp {
                             preview_action,
                         );
                         ui.add_space(8.0);
-                        render_preview_table_header(ui);
-                        ui.add_space(4.0);
-                        let mut selected_preview_row = self.selected_preview_row;
-                        let list_height = (ui.available_height() - 170.0).clamp(120.0, 280.0);
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .max_height(list_height)
-                            .show(ui, |ui| {
-                                render_preview_rows(ui, result, &mut selected_preview_row);
-                            });
-                        self.selected_preview_row = selected_preview_row;
+                        match self.preview_detail_mode {
+                            PreviewDetailMode::List => {
+                                render_preview_table_header(ui);
+                                ui.add_space(4.0);
+                                let mut selected_preview_row = self.selected_preview_row;
+                                let list_height =
+                                    (ui.available_height() - 190.0).clamp(120.0, 280.0);
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .max_height(list_height)
+                                    .show(ui, |ui| {
+                                        render_preview_rows(
+                                            ui,
+                                            result,
+                                            &mut selected_preview_row,
+                                        );
+                                    });
+                                self.selected_preview_row = selected_preview_row;
 
-                        ui.add_space(8.0);
-                        render_preview_detail(ui, result, self.selected_preview_row);
+                                ui.add_space(8.0);
+                                render_preview_detail(ui, result, self.selected_preview_row);
+                            }
+                            PreviewDetailMode::Tree => {
+                                let tree_height =
+                                    (ui.available_height() - 144.0).clamp(180.0, 360.0);
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .max_height(tree_height)
+                                    .show(ui, |ui| {
+                                        render_preview_tree(ui, result);
+                                    });
+                            }
+                        }
                     });
                 if close_requested {
                     show_window = false;
@@ -3182,6 +3224,12 @@ impl eframe::App for SmartfolderApp {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewDetailMode {
+    List,
+    Tree,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6776,6 +6824,66 @@ fn render_preview_rows(
             result.preview_rows.len(),
             result.preview_total_rows
         ));
+    }
+}
+
+fn render_preview_tree(ui: &mut egui::Ui, result: &AnalysisOutput) {
+    if result.preview_rows.is_empty() {
+        ui.label("No files match this view.");
+        return;
+    }
+
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Tree view groups the current page by destination folder while preserving paged loading for large folders.",
+            )
+            .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
+
+    let mut folders: BTreeMap<&str, Vec<&PreviewRow>> = BTreeMap::new();
+    for row in &result.preview_rows {
+        folders
+            .entry(row.target_folder.as_str())
+            .or_default()
+            .push(row);
+    }
+
+    for (folder, rows) in folders {
+        let header = format!("{folder} ({})", rows.len());
+        egui::CollapsingHeader::new(header)
+            .default_open(true)
+            .show(ui, |ui| {
+                for row in rows {
+                    ui.horizontal_wrapped(|ui| {
+                        let (stroke, fill) = preview_status_colors(&row.status);
+                        render_status_chip(ui, &row.status, stroke, fill);
+                        ui.label(
+                            RichText::new(&row.file_name)
+                                .strong()
+                                .color(ui::theme::colors::heading_text()),
+                        );
+                        ui.label(
+                            RichText::new(format!("from {}", row.original_folder))
+                                .size(ui::theme::typography::CAPTION)
+                                .color(ui::theme::colors::metadata_text()),
+                        );
+                    });
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&row.reason)
+                                .size(ui::theme::typography::CAPTION)
+                                .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(ui::theme::spacing::XS);
+                }
+            });
+        ui.add_space(ui::theme::spacing::XS);
     }
 }
 

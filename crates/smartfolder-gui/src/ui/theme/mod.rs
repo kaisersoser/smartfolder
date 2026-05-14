@@ -44,6 +44,7 @@ pub(crate) fn configure_fonts(ctx: &egui::Context) {
 
 /// Apply the design-system theme to the egui context.
 pub(crate) fn apply_visual_theme(ctx: &egui::Context, theme: VisualTheme) {
+    colors::set_visual_theme(theme);
     let mut style: Style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(spacing::SM, spacing::SM);
     style.spacing.button_padding = egui::vec2(spacing::MD, spacing::XS);
@@ -51,7 +52,7 @@ pub(crate) fn apply_visual_theme(ctx: &egui::Context, theme: VisualTheme) {
     style.spacing.window_margin = egui::Margin::same(spacing::LG);
     style.visuals = match theme {
         VisualTheme::Light => light_visuals(),
-        VisualTheme::Dark => Visuals::dark(),
+        VisualTheme::Dark => dark_visuals(),
     };
     style.text_styles = typography::text_styles();
     ctx.set_style(style);
@@ -69,6 +70,29 @@ fn light_visuals() -> Visuals {
     visuals.widgets.inactive.fg_stroke.color = colors::primary_text();
     visuals.widgets.hovered.bg_fill = colors::hover_control();
     visuals.widgets.hovered.fg_stroke.color = colors::primary_text();
+    visuals.widgets.hovered.weak_bg_fill = colors::hover_control();
+    visuals.widgets.active.bg_fill = colors::primary_blue();
+    visuals.widgets.active.fg_stroke.color = colors::on_primary();
+    visuals.widgets.active.weak_bg_fill = colors::primary_blue_hover();
+    visuals.override_text_color = Some(colors::primary_text());
+    visuals.selection.bg_fill = colors::primary_blue();
+    visuals.selection.stroke.color = colors::primary_blue();
+    visuals.hyperlink_color = colors::primary_blue();
+    visuals
+}
+
+fn dark_visuals() -> Visuals {
+    let mut visuals = Visuals::dark();
+    visuals.window_fill = colors::surface();
+    visuals.panel_fill = colors::app_background();
+    visuals.faint_bg_color = colors::subtle_surface();
+    visuals.extreme_bg_color = colors::elevated_surface();
+    visuals.widgets.noninteractive.bg_fill = colors::surface();
+    visuals.widgets.noninteractive.fg_stroke.color = colors::primary_text();
+    visuals.widgets.inactive.bg_fill = colors::soft_control();
+    visuals.widgets.inactive.fg_stroke.color = colors::primary_text();
+    visuals.widgets.hovered.bg_fill = colors::hover_control();
+    visuals.widgets.hovered.fg_stroke.color = colors::heading_text();
     visuals.widgets.hovered.weak_bg_fill = colors::hover_control();
     visuals.widgets.active.bg_fill = colors::primary_blue();
     visuals.widgets.active.fg_stroke.color = colors::on_primary();

@@ -9,7 +9,10 @@
 //! - Shared-core analysis, preview, apply, and undo operations
 //! - Organize-first shell with Activity, Rules, and Settings sections
 //! - Paged preview and transaction history backed by the on-disk session store
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 #![allow(clippy::module_name_repetitions)]
 
 mod preferences;
@@ -316,6 +319,7 @@ struct SmartfolderApp {
     transaction_detail_message: Option<String>,
     show_recovery_log: bool,
     show_undo_confirmation: Option<String>,
+    show_settings_help: bool,
     error_message: Option<String>,
     maintenance_message: Option<String>,
 }
@@ -374,6 +378,7 @@ impl SmartfolderApp {
             transaction_detail_message: None,
             show_recovery_log: false,
             show_undo_confirmation: None,
+            show_settings_help: false,
             error_message: None,
             maintenance_message: preferences_message,
         }
@@ -1033,16 +1038,16 @@ impl SmartfolderApp {
                     render_status_chip(
                         ui,
                         "Profile loaded",
-                        Color32::from_rgb(92, 128, 78),
-                        Color32::from_rgb(231, 241, 228),
+                        ui::theme::colors::success(),
+                        ui::theme::colors::success_bg(),
                     );
                     ui.label(format!("Using {}.", profile.display_label()));
                 } else {
                     render_status_chip(
                         ui,
                         "Profile needed",
-                        Color32::from_rgb(170, 110, 35),
-                        Color32::from_rgb(248, 238, 217),
+                        ui::theme::colors::warning(),
+                        ui::theme::colors::warning_bg(),
                     );
                     ui.label("Import a profile before previewing with Custom Rules.");
                 }
@@ -1815,8 +1820,8 @@ impl SmartfolderApp {
                 render_status_chip(
                     ui,
                     "Profile loaded",
-                    Color32::from_rgb(92, 128, 78),
-                    Color32::from_rgb(231, 241, 228),
+                    ui::theme::colors::success(),
+                    ui::theme::colors::success_bg(),
                 );
                 ui.label(format!("Current profile: {}", profile.profile.profile_id));
                 truncated_label(ui, &format!("Saved at: {}", profile.path.display()));
@@ -1824,8 +1829,8 @@ impl SmartfolderApp {
                 render_status_chip(
                     ui,
                     "No profile selected",
-                    Color32::from_rgb(170, 110, 35),
-                    Color32::from_rgb(248, 238, 217),
+                    ui::theme::colors::warning(),
+                    ui::theme::colors::warning_bg(),
                 );
                 ui.label("Create a simple profile below or import an existing TOML profile.");
             }
@@ -1887,17 +1892,13 @@ impl SmartfolderApp {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(ui::theme::spacing::MD, 0.0))
             .show(ui, |ui| {
-                render_screen_heading(
-                    ui,
-                    ui::icons::SETTINGS,
-                    "Settings",
-                    "Keep the app clean, confirm Explorer launch behavior, and preserve the safer default of analyzing only the selected folder.",
-                );
+                render_settings_heading(ui, &mut self.show_settings_help);
                 self.render_status_messages(ui);
                 ui.add_space(ui::theme::spacing::MD);
 
-                render_settings_overview(ui);
-                ui.add_space(ui::theme::spacing::LG);
+                if self.show_settings_help {
+                    render_settings_help_window(ui.ctx(), &mut self.show_settings_help);
+                }
 
                 let mut preferences_changed = false;
                 render_settings_section_panel(
@@ -2115,13 +2116,16 @@ impl SmartfolderApp {
 }
 
 impl eframe::App for SmartfolderApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_analysis();
         self.poll_apply();
         self.poll_undo();
         self.process_keyboard_shortcuts(ctx);
         self.process_dropped_folders(ctx);
-        ui::theme::apply_visual_theme(ctx, self.preferences.visual_theme());
+        ui::theme::apply_visual_theme(
+            ctx,
+            self.preferences.visual_theme(frame.info().system_theme),
+        );
 
         if self.is_analyzing() || self.is_applying() || self.is_undoing() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -3267,8 +3271,8 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
                 "Ready",
                 ready,
                 "Safe to move",
-                Color32::from_rgb(231, 241, 228),
-                Color32::from_rgb(92, 128, 78),
+                ui::theme::colors::success_bg(),
+                ui::theme::colors::success(),
             );
             render_preview_metric_card(
                 ui,
@@ -3276,8 +3280,8 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
                 "Review",
                 needs_attention,
                 "Needs attention",
-                Color32::from_rgb(248, 238, 217),
-                Color32::from_rgb(170, 110, 35),
+                ui::theme::colors::warning_bg(),
+                ui::theme::colors::warning(),
             );
             render_preview_metric_card(
                 ui,
@@ -3285,8 +3289,8 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
                 "Untouched",
                 left_in_place,
                 "Will stay put",
-                Color32::from_rgb(243, 238, 234),
-                Color32::from_rgb(116, 103, 90),
+                ui::theme::colors::subtle_surface(),
+                ui::theme::colors::metadata_text(),
             );
         });
 
@@ -3310,12 +3314,12 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
                 && result.warning_messages.is_empty()
             {
                 ui.colored_label(
-                    Color32::from_rgb(70, 140, 90),
+                    ui::theme::colors::success(),
                     "No conflicts or warnings found.",
                 );
             } else {
                 ui.colored_label(
-                    Color32::from_rgb(170, 110, 35),
+                    ui::theme::colors::warning(),
                     "Review the attention and warnings views before organizing these files.",
                 );
             }
@@ -3392,12 +3396,24 @@ fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
 
         if result.preview_examples.is_empty() {
             egui::Frame::group(ui.style())
-                .fill(Color32::from_rgb(250, 246, 240))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+                .fill(ui::theme::colors::surface())
+                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
                 .inner_margin(egui::Margin::same(14.0))
                 .show(ui, |ui| {
-                    ui.label(RichText::new("No ready examples yet").strong());
-                    ui.label("Files with unclear destinations were left untouched. Open the detailed list to inspect them.");
+                    ui.label(
+                        RichText::new("No ready examples yet")
+                            .strong()
+                            .color(ui::theme::colors::heading_text()),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Files with unclear destinations were left untouched. Open the detailed list to inspect them.",
+                            )
+                            .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
                 });
             return;
         }
@@ -3621,8 +3637,8 @@ fn render_apply_confirmation(
                     "Ready",
                     result.preview_counts.ready,
                     "Moves now",
-                    Color32::from_rgb(231, 241, 228),
-                    Color32::from_rgb(92, 128, 78),
+                    ui::theme::colors::success_bg(),
+                    ui::theme::colors::success(),
                 );
                 render_preview_metric_card(
                     ui,
@@ -3630,8 +3646,8 @@ fn render_apply_confirmation(
                     "Review",
                     result.preview_counts.needs_attention,
                     "Stays put",
-                    Color32::from_rgb(248, 238, 217),
-                    Color32::from_rgb(170, 110, 35),
+                    ui::theme::colors::warning_bg(),
+                    ui::theme::colors::warning(),
                 );
             });
 
@@ -3647,7 +3663,7 @@ fn render_apply_confirmation(
                         RichText::new(
                             "This folder appears to be cloud-synced. Let sync settle before organizing and review the completion summary afterward.",
                         )
-                        .color(Color32::from_rgb(170, 110, 35)),
+                        .color(ui::theme::colors::warning()),
                     )
                     .wrap(),
                 );
@@ -3682,7 +3698,7 @@ fn render_apply_result(
         ui.set_max_width(aligned_width);
         egui::Frame::group(ui.style())
             .fill(ui::theme::colors::elevated_surface())
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(92, 128, 78)))
+            .stroke(egui::Stroke::new(1.0, ui::theme::colors::success()))
             .inner_margin(egui::Margin::same(14.0))
             .show(ui, |ui| {
                 ui.label(
@@ -3713,8 +3729,8 @@ fn render_apply_result(
                         "Organized",
                         result.completed,
                         "Moved successfully",
-                        Color32::from_rgb(231, 241, 228),
-                        Color32::from_rgb(92, 128, 78),
+                        ui::theme::colors::success_bg(),
+                        ui::theme::colors::success(),
                     );
                     render_preview_metric_card(
                         ui,
@@ -3722,8 +3738,8 @@ fn render_apply_result(
                         "Skipped",
                         result.skipped,
                         "Left untouched",
-                        Color32::from_rgb(243, 238, 234),
-                        Color32::from_rgb(116, 103, 90),
+                        ui::theme::colors::subtle_surface(),
+                        ui::theme::colors::metadata_text(),
                     );
                     render_preview_metric_card(
                         ui,
@@ -3731,8 +3747,8 @@ fn render_apply_result(
                         "Failed",
                         result.failed,
                         "Need attention",
-                        Color32::from_rgb(248, 238, 217),
-                        Color32::from_rgb(170, 110, 35),
+                        ui::theme::colors::warning_bg(),
+                        ui::theme::colors::warning(),
                     );
                 });
 
@@ -3811,7 +3827,7 @@ fn render_transaction_history(
     }
 
     if let Some(message) = message {
-        ui.colored_label(Color32::from_rgb(190, 40, 40), message);
+        ui.colored_label(ui::theme::colors::error(), message);
         return;
     }
 
@@ -3835,7 +3851,7 @@ fn render_transaction_history(
 
     if let Some(message) = detail_message {
         ui.add_space(8.0);
-        ui.colored_label(Color32::from_rgb(190, 40, 40), message);
+        ui.colored_label(ui::theme::colors::error(), message);
     }
 
     if let Some(detail) = detail {
@@ -3881,24 +3897,24 @@ fn render_current_folder_activity(
             "Organized",
             latest.completed,
             "Files moved into organized folders.",
-            Color32::from_rgb(231, 241, 228),
-            Color32::from_rgb(92, 128, 78),
+            ui::theme::colors::success_bg(),
+            ui::theme::colors::success(),
         );
         render_summary_card(
             ui,
             "Restored",
             latest.rolled_back,
             "Files moved back during undo.",
-            Color32::from_rgb(236, 236, 244),
-            Color32::from_rgb(89, 102, 145),
+            ui::theme::colors::info_bg(),
+            ui::theme::colors::info(),
         );
         render_summary_card(
             ui,
             "Needs review",
             latest.skipped + latest.failed + latest.pending,
             "Items skipped, failed, or still pending.",
-            Color32::from_rgb(248, 238, 217),
-            Color32::from_rgb(170, 110, 35),
+            ui::theme::colors::warning_bg(),
+            ui::theme::colors::warning(),
         );
     });
 
@@ -3927,8 +3943,8 @@ fn render_current_folder_activity(
         ui.label(RichText::new("Earlier activity").strong());
         for row in rows.iter().skip(1).take(3) {
             egui::Frame::group(ui.style())
-                .fill(Color32::from_rgb(250, 246, 240))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+                .fill(ui::theme::colors::surface())
+                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
                 .inner_margin(egui::Margin::same(10.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -4063,16 +4079,16 @@ fn render_transaction_detail(
             "Organized",
             detail.operation_counts.completed,
             "Completed file moves.",
-            Color32::from_rgb(231, 241, 228),
-            Color32::from_rgb(92, 128, 78),
+            ui::theme::colors::success_bg(),
+            ui::theme::colors::success(),
         );
         render_summary_card(
             ui,
             "Restored",
             detail.operation_counts.rolled_back,
             "Files restored by undo.",
-            Color32::from_rgb(236, 236, 244),
-            Color32::from_rgb(89, 102, 145),
+            ui::theme::colors::info_bg(),
+            ui::theme::colors::info(),
         );
         render_summary_card(
             ui,
@@ -4081,8 +4097,8 @@ fn render_transaction_detail(
                 + detail.operation_counts.failed
                 + detail.operation_counts.pending,
             "Skipped, failed, or pending changes.",
-            Color32::from_rgb(248, 238, 217),
-            Color32::from_rgb(170, 110, 35),
+            ui::theme::colors::warning_bg(),
+            ui::theme::colors::warning(),
         );
     });
 
@@ -4562,8 +4578,8 @@ fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_ro
             .color(ui::theme::colors::heading_text()),
     );
     egui::Frame::group(ui.style())
-        .fill(Color32::from_rgb(250, 246, 240))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+        .fill(ui::theme::colors::surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
         .inner_margin(egui::Margin::same(14.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -4609,16 +4625,16 @@ fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_ro
 fn preview_status_colors(status: &str) -> (Color32, Color32) {
     match status {
         "Ready" => (
-            Color32::from_rgb(92, 128, 78),
-            Color32::from_rgb(231, 241, 228),
+            ui::theme::colors::success(),
+            ui::theme::colors::success_bg(),
         ),
         "Needs Review" => (
-            Color32::from_rgb(170, 110, 35),
-            Color32::from_rgb(248, 238, 217),
+            ui::theme::colors::warning(),
+            ui::theme::colors::warning_bg(),
         ),
         _ => (
-            Color32::from_rgb(116, 103, 90),
-            Color32::from_rgb(243, 238, 234),
+            ui::theme::colors::metadata_text(),
+            ui::theme::colors::subtle_surface(),
         ),
     }
 }
@@ -4626,20 +4642,19 @@ fn preview_status_colors(status: &str) -> (Color32, Color32) {
 fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
     match status {
         TransactionStatus::Completed => (
-            Color32::from_rgb(92, 128, 78),
-            Color32::from_rgb(231, 241, 228),
+            ui::theme::colors::success(),
+            ui::theme::colors::success_bg(),
         ),
-        TransactionStatus::RolledBack | TransactionStatus::PartiallyRolledBack => (
-            Color32::from_rgb(89, 102, 145),
-            Color32::from_rgb(236, 236, 244),
-        ),
+        TransactionStatus::RolledBack | TransactionStatus::PartiallyRolledBack => {
+            (ui::theme::colors::info(), ui::theme::colors::info_bg())
+        }
         TransactionStatus::Failed | TransactionStatus::Interrupted => (
-            Color32::from_rgb(170, 110, 35),
-            Color32::from_rgb(248, 238, 217),
+            ui::theme::colors::warning(),
+            ui::theme::colors::warning_bg(),
         ),
         TransactionStatus::InProgress => (
-            Color32::from_rgb(130, 102, 53),
-            Color32::from_rgb(246, 236, 211),
+            ui::theme::colors::warning(),
+            ui::theme::colors::warning_bg(),
         ),
     }
 }
@@ -4696,7 +4711,7 @@ fn render_instruction_list_row(ui: &mut egui::Ui, label: &str, selected: bool) -
             ui::theme::colors::surface()
         };
         let text_color = if selected {
-            Color32::WHITE
+            ui::theme::colors::on_primary()
         } else {
             ui::theme::colors::primary_text()
         };
@@ -4721,8 +4736,8 @@ fn render_organize_step_indicator(
     requested_step: &mut Option<OrganizeStep>,
 ) {
     egui::Frame::group(ui.style())
-        .fill(Color32::from_rgb(250, 246, 240))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(220, 206, 190)))
+        .fill(ui::theme::colors::surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
         .inner_margin(egui::Margin::same(12.0))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -4732,25 +4747,25 @@ fn render_organize_step_indicator(
                     let label = format!("{}. {}", step.number(), step.title());
                     let button =
                         egui::Button::new(RichText::new(label).strong().color(if is_current {
-                            Color32::from_rgb(47, 128, 237)
+                            ui::theme::colors::primary_blue()
                         } else if is_available {
-                            Color32::from_rgb(45, 45, 45)
+                            ui::theme::colors::primary_text()
                         } else {
-                            Color32::from_rgb(123, 123, 123)
+                            ui::theme::colors::metadata_text()
                         }))
                         .fill(if is_current {
-                            Color32::from_rgb(239, 244, 252)
+                            ui::theme::colors::hover_control()
                         } else if is_available {
-                            Color32::from_rgb(255, 255, 255)
+                            ui::theme::colors::elevated_surface()
                         } else {
-                            Color32::from_rgb(243, 238, 234)
+                            ui::theme::colors::subtle_surface()
                         })
                         .stroke(egui::Stroke::new(
                             if is_current { 2.0 } else { 1.0 },
                             if is_current {
-                                Color32::from_rgb(47, 128, 237)
+                                ui::theme::colors::primary_blue()
                             } else {
-                                Color32::from_rgb(216, 210, 200)
+                                ui::theme::colors::border()
                             },
                         ))
                         .min_size(egui::vec2(150.0, 40.0));
@@ -4917,106 +4932,137 @@ fn render_safety_line(ui: &mut egui::Ui, text: &str) {
         render_status_chip(
             ui,
             "Safe",
-            Color32::from_rgb(92, 128, 78),
-            Color32::from_rgb(231, 241, 228),
+            ui::theme::colors::success(),
+            ui::theme::colors::success_bg(),
         );
         ui.add(egui::Label::new(text).wrap());
     });
 }
 
-fn render_settings_overview(ui: &mut egui::Ui) {
-    let rows = [
-        (
-            "Safety defaults",
-            "Previews first, never overwrites files, and keeps subfolders opt-in.",
-            "No automatic organizing",
-        ),
-        (
-            "History",
-            "Restore history is recorded before files move so Undo Changes can restore completed moves.",
-            "Undo-ready workflow",
-        ),
-        (
-            "Appearance",
-            "Theme and motion preferences are saved locally for the RC2 design system.",
-            "Preferences saved",
-        ),
-        (
-            "Keyboard navigation",
-            "Use Alt+1 through Alt+4 to move between sections without reaching for the sidebar.",
-            "Section shortcuts",
-        ),
-    ];
+const SETTINGS_HELP_ROWS: [(&str, &str, &str); 4] = [
+    (
+        "Safety defaults",
+        "Previews first, never overwrites files, and keeps subfolders opt-in.",
+        "No automatic organizing",
+    ),
+    (
+        "History",
+        "Restore history is recorded before files move so Undo Changes can restore completed moves.",
+        "Undo-ready workflow",
+    ),
+    (
+        "Appearance",
+        "Theme and motion preferences are saved locally for the RC2 design system.",
+        "Preferences saved",
+    ),
+    (
+        "Keyboard navigation",
+        "Use Alt+1 through Alt+4 to move between sections without reaching for the sidebar.",
+        "Section shortcuts",
+    ),
+];
 
-    settings_note_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
+fn render_settings_heading(ui: &mut egui::Ui, show_help: &mut bool) {
+    ui.horizontal_wrapped(|ui| {
         ui.label(
-            RichText::new("Read-only defaults")
+            RichText::new(ui::icons::SETTINGS)
+                .size(22.0)
+                .color(ui::theme::colors::primary_blue()),
+        );
+        ui.label(
+            RichText::new("Settings")
+                .size(30.0)
                 .strong()
-                .size(ui::theme::typography::CARD_TITLE)
                 .color(ui::theme::colors::heading_text()),
         );
         ui.add_space(ui::theme::spacing::SM);
-        for (index, (title, detail, status)) in rows.iter().enumerate() {
-            render_settings_overview_row(ui, title, detail, status);
-            if index + 1 < rows.len() {
-                ui.add_space(ui::theme::spacing::SM);
-            }
+        let help_response = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(ui::icons::label(ui::icons::HELP, "Defaults"))
+                        .color(ui::theme::colors::primary_text()),
+                )
+                .fill(ui::theme::colors::soft_control())
+                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+                .min_size(egui::vec2(116.0, 32.0)),
+            )
+            .on_hover_text("Show safety defaults and keyboard shortcuts.");
+        if help_response.clicked() {
+            *show_help = true;
         }
     });
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Keep the app clean, confirm Explorer launch behavior, and preserve the safer default of analyzing only the selected folder.",
+            )
+            .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
 }
 
-fn render_settings_overview_row(ui: &mut egui::Ui, title: &str, detail: &str, status: &str) {
-    let available_width = ui.available_width();
-    if available_width >= 660.0 {
-        let title_width = 156.0;
-        let status_width = 180.0;
-        let detail_width =
-            (available_width - title_width - status_width - (ui::theme::spacing::MD * 2.0))
-                .max(220.0);
-
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [title_width, 22.0],
+fn render_settings_help_window(ctx: &egui::Context, show_help: &mut bool) {
+    let mut close_requested = false;
+    egui::Window::new(ui::icons::label(ui::icons::HELP, "Settings help"))
+        .open(show_help)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(460.0)
+        .show(ctx, |ui| {
+            ui.add(
                 egui::Label::new(
-                    RichText::new(title)
-                        .strong()
-                        .color(ui::theme::colors::primary_text()),
-                ),
+                    RichText::new("Reference details for the safer defaults used by smartfolder.")
+                        .color(ui::theme::colors::secondary_text()),
+                )
+                .wrap(),
             );
-            ui.add_sized(
-                [detail_width, 22.0],
-                egui::Label::new(RichText::new(detail).color(ui::theme::colors::secondary_text()))
-                    .wrap(),
-            );
+            ui.add_space(ui::theme::spacing::MD);
+
+            for (index, (title, detail, status)) in SETTINGS_HELP_ROWS.iter().enumerate() {
+                render_settings_help_row(ui, title, detail, status);
+                if index + 1 < SETTINGS_HELP_ROWS.len() {
+                    ui.add_space(ui::theme::spacing::SM);
+                }
+            }
+
+            ui.add_space(ui::theme::spacing::MD);
+            ui.separator();
             ui.add_space(ui::theme::spacing::SM);
-            render_status_chip(
-                ui,
-                status,
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::surface(),
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Close"))
+                    .clicked()
+                {
+                    close_requested = true;
+                }
+            });
         });
-    } else {
-        ui.vertical(|ui| {
+    if close_requested {
+        *show_help = false;
+    }
+}
+
+fn render_settings_help_row(ui: &mut egui::Ui, title: &str, detail: &str, status: &str) {
+    ui.vertical(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(title)
                     .strong()
                     .color(ui::theme::colors::primary_text()),
             );
-            ui.add(
-                egui::Label::new(RichText::new(detail).color(ui::theme::colors::secondary_text()))
-                    .wrap(),
-            );
-            ui.add_space(ui::theme::spacing::XS);
             render_status_chip(
                 ui,
                 status,
                 ui::theme::colors::secondary_text(),
-                ui::theme::colors::surface(),
+                ui::theme::colors::subtle_surface(),
             );
         });
-    }
+        ui.add(
+            egui::Label::new(RichText::new(detail).color(ui::theme::colors::secondary_text()))
+                .wrap(),
+        );
+    });
 }
 
 fn settings_note_frame() -> egui::Frame {
@@ -5465,7 +5511,7 @@ fn build_example_tree_entries(
 
 fn render_instruction_example_tree(ui: &mut egui::Ui, entries: &[ExampleTreeEntry]) {
     let text_color = ui::theme::colors::primary_text();
-    let branch_color = Color32::from_rgb(117, 117, 117);
+    let branch_color = ui::theme::colors::metadata_text();
     let tree_text_size = ui::theme::typography::CAPTION;
 
     ui.scope(|ui| {

@@ -80,9 +80,13 @@ impl GuiPreferences {
     }
 
     /// Resolve the current theme to a concrete visual theme.
-    pub(crate) fn visual_theme(&self) -> VisualTheme {
+    pub(crate) fn visual_theme(&self, system_theme: Option<eframe::Theme>) -> VisualTheme {
         match self.theme {
-            ThemePreference::System | ThemePreference::Light => VisualTheme::Light,
+            ThemePreference::System => match system_theme {
+                Some(eframe::Theme::Dark) => VisualTheme::Dark,
+                Some(eframe::Theme::Light) | None => VisualTheme::Light,
+            },
+            ThemePreference::Light => VisualTheme::Light,
             ThemePreference::Dark => VisualTheme::Dark,
         }
     }

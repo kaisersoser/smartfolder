@@ -37,13 +37,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
 use eframe::egui::{self, Color32, RichText};
 use smartfolder_core::ai::{
-    validate_ai_profile_draft, AiFolderAnalysis, AiFolderContext, AiProfileValidation,
-    AiProviderState, AiProviderStatus, AiRuleExplanation, AiRuleProfileDraft, OllamaClient,
+    validate_ai_profile_draft, AiFinding, AiFolderAnalysis, AiFolderContext, AiProfileValidation,
+    AiPromptRefinement, AiProviderState, AiProviderStatus, AiRuleExplanation, AiRuleProfileDraft,
+    OllamaClient,
 };
 use smartfolder_core::apply::{
     apply_stored_plan_with_progress, ApplyOptions, ApplySummary, StoredApplyProgress,
@@ -87,6 +88,7 @@ const ORGANIZE_STEP_BUTTON_WIDTH: f32 = 150.0;
 const ORGANIZE_STEP_FRAME_MARGIN: f32 = 12.0;
 const PROFILE_WORKSPACE_FIELD_HEIGHT: f32 = 32.0;
 const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
+const MAX_AI_OPERATION_RECORDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppSection {
@@ -340,11 +342,16 @@ struct SmartfolderApp {
     ai_status: Option<AiProviderStatus>,
     ai_task_receiver: Option<Receiver<AiTaskMessage>>,
     ai_task: Option<AiTaskKind>,
+    ai_task_started_at: Option<Instant>,
+    ai_task_model: Option<String>,
     ai_analysis: Option<AiFolderAnalysis>,
+    show_ai_notes: bool,
     ai_draft_prompt: String,
     show_ai_draft_prompt: bool,
     ai_draft_result: Option<AiDraftProfileResult>,
+    show_ai_draft_review: bool,
     ai_rule_explanation: Option<AiRuleExplanation>,
+    ai_operation_records: Vec<AiOperationRecord>,
     undo_result: Option<UndoOutput>,
     transaction_rows: Vec<TransactionRow>,
     transaction_message: Option<String>,
@@ -410,11 +417,16 @@ impl SmartfolderApp {
             ai_status: None,
             ai_task_receiver: None,
             ai_task: None,
+            ai_task_started_at: None,
+            ai_task_model: None,
             ai_analysis: None,
+            show_ai_notes: false,
             ai_draft_prompt: String::new(),
             show_ai_draft_prompt: false,
             ai_draft_result: None,
+            show_ai_draft_review: false,
             ai_rule_explanation: None,
+            ai_operation_records: Vec::new(),
             undo_result: None,
             transaction_rows,
             transaction_message,
@@ -841,6 +853,71 @@ impl SmartfolderApp {
             .ok_or_else(|| "Select an Ollama model in Settings first.".to_string())
     }
 
+    fn begin_ai_task(&mut self, receiver: Receiver<AiTaskMessage>, kind: AiTaskKind, model: &str) {
+        self.ai_task_receiver = Some(receiver);
+        self.ai_task = Some(kind);
+        self.ai_task_started_at = Some(Instant::now());
+        self.ai_task_model = Some(model.to_string());
+        self.error_message = None;
+    }
+
+    fn cancel_ai_task(&mut self) {
+        if self.ai_task_receiver.is_some() {
+            if let Some(kind) = self.ai_task {
+                let outcome = Err("cancelled_by_user".to_string());
+                let model = self.ai_task_model.take();
+                let started_at = self.ai_task_started_at.take();
+                self.record_ai_operation(kind, model, started_at, &outcome);
+            }
+            self.ai_task_receiver = None;
+            self.ai_task = None;
+            self.ai_task_started_at = None;
+            self.ai_task_model = None;
+            self.maintenance_message =
+                Some("AI task cancelled. A late provider response will be ignored.".to_string());
+            self.error_message = None;
+        }
+    }
+
+    fn record_ai_operation(
+        &mut self,
+        kind: AiTaskKind,
+        model: Option<String>,
+        started_at: Option<Instant>,
+        outcome: &AiTaskMessage,
+    ) {
+        let duration_ms = started_at.map(|started| started.elapsed().as_millis() as u64);
+        let (success, failure_class, validation_warnings, validation_errors) = match outcome {
+            Ok(AiTaskOutput::DraftProfile(result)) => (
+                result.validation.errors.is_empty(),
+                if result.validation.errors.is_empty() {
+                    None
+                } else {
+                    Some("validation".to_string())
+                },
+                result.validation.warnings.len(),
+                result.validation.errors.len(),
+            ),
+            Ok(_) => (true, None, 0, 0),
+            Err(message) => (false, Some(ai_failure_class(message)), 0, 0),
+        };
+        self.ai_operation_records.push(AiOperationRecord {
+            completed_at: Utc::now().to_rfc3339(),
+            request_type: kind.label().to_string(),
+            provider: "ollama".to_string(),
+            model: model.unwrap_or_else(|| "unknown".to_string()),
+            duration_ms,
+            success,
+            failure_class,
+            validation_warnings,
+            validation_errors,
+        });
+        if self.ai_operation_records.len() > MAX_AI_OPERATION_RECORDS {
+            let overflow = self.ai_operation_records.len() - MAX_AI_OPERATION_RECORDS;
+            self.ai_operation_records.drain(0..overflow);
+        }
+    }
+
     fn start_ai_folder_analysis(&mut self) {
         let Some(result) = &self.analysis_result else {
             self.error_message = Some("Run Analyze Folder before using AI Assist.".to_string());
@@ -859,10 +936,8 @@ impl SmartfolderApp {
         let session_id = result.session_id.clone();
         let root = result.root.clone();
         let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
-        self.ai_task_receiver = Some(receiver);
-        self.ai_task = Some(AiTaskKind::FolderAnalysis);
+        self.begin_ai_task(receiver, AiTaskKind::FolderAnalysis, &model);
         self.ai_analysis = None;
-        self.error_message = None;
 
         std::thread::spawn(move || {
             let message = run_ai_folder_analysis(
@@ -903,10 +978,8 @@ impl SmartfolderApp {
         let root = result.root.clone();
         let existing_profile = self.profile_editor.to_profile().ok();
         let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
-        self.ai_task_receiver = Some(receiver);
-        self.ai_task = Some(AiTaskKind::DraftProfile);
+        self.begin_ai_task(receiver, AiTaskKind::DraftProfile, &model);
         self.ai_draft_result = None;
-        self.error_message = None;
 
         std::thread::spawn(move || {
             let message = run_ai_profile_draft(
@@ -918,6 +991,46 @@ impl SmartfolderApp {
                 content_inspection_enabled,
                 &prompt,
                 existing_profile.as_ref(),
+            );
+            let _ = sender.send(message);
+        });
+    }
+
+    fn start_ai_prompt_refinement(&mut self) {
+        let prompt = self.ai_draft_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.error_message = Some("Write a prompt before asking AI to refine it.".to_string());
+            return;
+        }
+        let Some(result) = &self.analysis_result else {
+            self.error_message =
+                Some("Run Analyze Folder before refining the AI prompt.".to_string());
+            return;
+        };
+        let model = match self.ai_model_for_task() {
+            Ok(model) => model,
+            Err(message) => {
+                self.error_message = Some(message);
+                return;
+            }
+        };
+        let endpoint = self.preferences.ai.endpoint.clone();
+        let timeout = self.preferences.ai.timeout();
+        let content_inspection_enabled = self.preferences.ai.content_inspection_enabled;
+        let session_id = result.session_id.clone();
+        let root = result.root.clone();
+        let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
+        self.begin_ai_task(receiver, AiTaskKind::PromptRefinement, &model);
+
+        std::thread::spawn(move || {
+            let message = run_ai_prompt_refinement(
+                &endpoint,
+                timeout,
+                &model,
+                &session_id,
+                &root,
+                content_inspection_enabled,
+                &prompt,
             );
             let _ = sender.send(message);
         });
@@ -951,9 +1064,7 @@ impl SmartfolderApp {
         let session_id = result.session_id.clone();
         let root = result.root.clone();
         let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
-        self.ai_task_receiver = Some(receiver);
-        self.ai_task = Some(AiTaskKind::RuleExplanation);
-        self.error_message = None;
+        self.begin_ai_task(receiver, AiTaskKind::RuleExplanation, &model);
 
         std::thread::spawn(move || {
             let message = run_ai_rule_explanation(
@@ -976,6 +1087,12 @@ impl SmartfolderApp {
 
         match receiver.try_recv() {
             Ok(message) => {
+                let completed_kind = self.ai_task;
+                let completed_model = self.ai_task_model.take();
+                let started_at = self.ai_task_started_at.take();
+                if let Some(kind) = completed_kind {
+                    self.record_ai_operation(kind, completed_model, started_at, &message);
+                }
                 self.ai_task_receiver = None;
                 self.ai_task = None;
                 match message {
@@ -992,7 +1109,20 @@ impl SmartfolderApp {
                         }
                         let message = ai_draft_summary_message(&result.validation);
                         self.ai_draft_result = Some(result);
+                        self.show_ai_draft_prompt = false;
+                        self.show_ai_draft_review = true;
                         self.maintenance_message = Some(message);
+                        self.error_message = None;
+                    }
+                    Ok(AiTaskOutput::PromptRefinement(refinement)) => {
+                        let notes = if refinement.notes.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", refinement.notes.join(" "))
+                        };
+                        self.ai_draft_prompt = refinement.refined_prompt;
+                        self.maintenance_message =
+                            Some(format!("AI refined the draft prompt.{notes}"));
                         self.error_message = None;
                     }
                     Ok(AiTaskOutput::RuleExplanation(explanation)) => {
@@ -1009,8 +1139,16 @@ impl SmartfolderApp {
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
+                if let Some(kind) = self.ai_task {
+                    let message = Err("worker_disconnected".to_string());
+                    let model = self.ai_task_model.take();
+                    let started_at = self.ai_task_started_at.take();
+                    self.record_ai_operation(kind, model, started_at, &message);
+                }
                 self.ai_task_receiver = None;
                 self.ai_task = None;
+                self.ai_task_started_at = None;
+                self.ai_task_model = None;
                 self.error_message = Some("The AI worker stopped unexpectedly.".to_string());
             }
         }
@@ -1089,6 +1227,56 @@ impl SmartfolderApp {
             Err(message) => {
                 self.error_message = Some(message);
                 self.maintenance_message = None;
+            }
+        }
+    }
+
+    fn export_ai_diagnostics(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("smartfolder-ai-diagnostics.json")
+            .add_filter("JSON", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "exported_at": Utc::now().to_rfc3339(),
+            "ai": {
+                "enabled": self.preferences.ai.enabled,
+                "provider": "ollama",
+                "endpoint": sanitize_ai_endpoint(&self.preferences.ai.endpoint),
+                "selected_model": self.preferences.ai.selected_model.clone(),
+                "timeout_seconds": self.preferences.ai.timeout_seconds,
+                "content_inspection_enabled": self.preferences.ai.content_inspection_enabled,
+            },
+            "status": self.ai_status.as_ref().map(|status| serde_json::json!({
+                "available": status.available,
+                "state": format!("{:?}", status.state),
+                "selected_model": status.selected_model.clone(),
+                "model_count": status.models.len(),
+                "message": status.message,
+            })),
+            "operations": &self.ai_operation_records,
+            "notes": [
+                "No prompts, raw provider responses, file contents, or full file paths are included."
+            ],
+        });
+
+        match serde_json::to_string_pretty(&payload)
+            .map_err(|error| format!("Failed to serialize AI diagnostics: {error}"))
+            .and_then(|json| {
+                fs::write(&path, json)
+                    .map_err(|error| format!("Failed to write {}: {error}", path.display()))
+            }) {
+            Ok(()) => {
+                self.maintenance_message =
+                    Some(format!("Exported AI diagnostics to {}.", path.display()));
+                self.error_message = None;
+            }
+            Err(message) => {
+                self.maintenance_message = None;
+                self.error_message = Some(message);
             }
         }
     }
@@ -1732,6 +1920,8 @@ impl SmartfolderApp {
         self.render_status_messages(ui);
         ui.add_space(10.0);
         let mut start_ai_folder_analysis_requested = false;
+        let mut open_ai_draft_requested = false;
+        let mut cancel_ai_task_requested = false;
 
         let mut requested_step = None;
         render_organize_step_indicator(
@@ -2009,14 +2199,26 @@ impl SmartfolderApp {
             if self.organize_step == OrganizeStep::Preview {
                 ui.add_space(10.0);
                 if self.ai_is_available() {
-                    if render_ai_assist_panel(
+                    match render_ai_assist_strip(
                         ui,
                         self.ai_analysis.as_ref(),
                         self.ai_task,
                         self.is_running_ai_task(),
                         self.preferences.ai.content_inspection_enabled,
                     ) {
-                        start_ai_folder_analysis_requested = true;
+                        Some(AiPreviewAction::Analyze) => {
+                            start_ai_folder_analysis_requested = true;
+                        }
+                        Some(AiPreviewAction::ViewNotes) => {
+                            self.show_ai_notes = true;
+                        }
+                        Some(AiPreviewAction::DraftRules) => {
+                            open_ai_draft_requested = true;
+                        }
+                        Some(AiPreviewAction::Cancel) => {
+                            cancel_ai_task_requested = true;
+                        }
+                        None => {}
                     }
                     ui.add_space(10.0);
                 }
@@ -2123,9 +2325,67 @@ impl SmartfolderApp {
                 }
                 self.show_detailed_preview = show_window;
             }
+
+            if self.organize_step == OrganizeStep::Preview {
+                self.render_ai_notes_window(ctx);
+            }
+        }
+        if open_ai_draft_requested {
+            self.open_ai_draft_from_analysis();
+        }
+        if cancel_ai_task_requested {
+            self.cancel_ai_task();
         }
         if start_ai_folder_analysis_requested {
             self.start_ai_folder_analysis();
+        }
+    }
+
+    fn open_ai_draft_from_analysis(&mut self) {
+        if let Some(analysis) = &self.ai_analysis {
+            self.ai_draft_prompt = format!(
+                "Create a custom rule profile for this folder using this AI strategy: {}",
+                analysis.recommended_strategy
+            );
+        }
+        self.active_section = AppSection::Rules;
+        self.show_rules_workspace = true;
+        self.show_ai_draft_prompt = true;
+        self.show_ai_notes = false;
+        self.maintenance_message =
+            Some("Review the AI prompt, then generate a draft profile when ready.".to_string());
+        self.error_message = None;
+    }
+
+    fn render_ai_notes_window(&mut self, ctx: &egui::Context) {
+        if !self.show_ai_notes {
+            return;
+        }
+
+        let Some(analysis) = self.ai_analysis.clone() else {
+            self.show_ai_notes = false;
+            return;
+        };
+
+        let mut open = true;
+        let mut draft_rules_requested = false;
+        egui::Window::new("AI notes")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(720.0)
+            .default_height(560.0)
+            .min_width(560.0)
+            .min_height(420.0)
+            .show(ctx, |ui| {
+                render_ai_notes_content(ui, &analysis, &mut draft_rules_requested);
+            });
+
+        if draft_rules_requested {
+            self.open_ai_draft_from_analysis();
+        }
+        if !open {
+            self.show_ai_notes = false;
         }
     }
 
@@ -2336,6 +2596,7 @@ impl SmartfolderApp {
                 ui.add_space(ui::theme::spacing::MD);
                 let mut ai_preferences_changed = false;
                 let mut test_ai_connection = false;
+                let mut export_ai_diagnostics = false;
                 let checking_ai_status = self.is_checking_ai_status();
                 render_settings_section_panel(
                     ui,
@@ -2350,6 +2611,7 @@ impl SmartfolderApp {
                         );
                         ai_preferences_changed |= action.changed;
                         test_ai_connection |= action.test_connection;
+                        export_ai_diagnostics |= action.export_diagnostics;
                     },
                 );
 
@@ -2360,6 +2622,9 @@ impl SmartfolderApp {
 
                 if test_ai_connection {
                     self.start_ai_status_check();
+                }
+                if export_ai_diagnostics {
+                    self.export_ai_diagnostics();
                 }
 
                 ui.add_space(ui::theme::spacing::MD);
@@ -2455,6 +2720,15 @@ impl SmartfolderApp {
                     ui.add_space(ui::theme::spacing::SM);
                     self.render_ai_rule_builder_panel(ui);
                 }
+                if let Some(result) = self.ai_draft_result.clone() {
+                    ui.add_space(ui::theme::spacing::SM);
+                    render_ai_draft_summary_strip(
+                        ui,
+                        &result,
+                        &mut self.show_ai_draft_review,
+                        &mut self.show_ai_draft_prompt,
+                    );
+                }
 
                 ui.add_space(ui::theme::spacing::SM);
                 egui::ScrollArea::vertical()
@@ -2467,6 +2741,7 @@ impl SmartfolderApp {
         if !open {
             self.show_rules_workspace = false;
         }
+        self.render_ai_draft_review_window(ctx);
     }
 
     fn render_profile_workspace_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -2582,11 +2857,35 @@ impl SmartfolderApp {
                 .wrap(),
             );
             ui.add_space(ui::theme::spacing::SM);
-            ui.add_sized(
-                [ui.available_width(), 72.0],
-                egui::TextEdit::multiline(&mut self.ai_draft_prompt)
-                    .hint_text("e.g. Sort invoices into Documents/Invoices by year, and keep screenshots by month."),
-            );
+            ui.horizontal(|ui| {
+                let refine_button_size = egui::vec2(42.0, 72.0);
+                let prompt_width = (ui.available_width()
+                    - refine_button_size.x
+                    - ui.spacing().item_spacing.x)
+                    .max(260.0);
+                ui.add_sized(
+                    [prompt_width, 72.0],
+                    egui::TextEdit::multiline(&mut self.ai_draft_prompt)
+                        .hint_text("e.g. Sort invoices into Documents/Invoices by year, and keep screenshots by month."),
+                );
+                let response = ui.add_enabled(
+                    !self.is_running_ai_task() && !self.ai_draft_prompt.trim().is_empty(),
+                    egui::Button::new(
+                        RichText::new(ui::icons::AI_REFINE)
+                            .size(20.0)
+                            .color(ui::theme::colors::primary_text()),
+                    )
+                    .fill(ui::theme::colors::soft_control())
+                    .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+                    .min_size(refine_button_size),
+                );
+                if response
+                    .on_hover_text("Refine this prompt with AI")
+                    .clicked()
+                {
+                    self.start_ai_prompt_refinement();
+                }
+            });
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
@@ -2603,24 +2902,66 @@ impl SmartfolderApp {
                 {
                     self.show_ai_draft_prompt = false;
                 }
+                if self.is_running_ai_task()
+                    && ui
+                        .add(ui::theme::widgets::secondary_button("Cancel AI"))
+                        .clicked()
+                {
+                    self.cancel_ai_task();
+                }
                 if self.ai_task == Some(AiTaskKind::DraftProfile) && self.is_running_ai_task() {
                     ui.label(
                         RichText::new("AI is drafting and validating rules.")
                             .color(ui::theme::colors::secondary_text()),
                     );
                 }
+                if self.ai_task == Some(AiTaskKind::PromptRefinement) && self.is_running_ai_task()
+                {
+                    ui.label(
+                        RichText::new("AI is refining the prompt.")
+                            .color(ui::theme::colors::secondary_text()),
+                    );
+                }
             });
-
-            if let Some(result) = &self.ai_draft_result {
-                ui.add_space(ui::theme::spacing::SM);
-                render_ai_draft_result(ui, result);
-            }
 
             if let Some(explanation) = &self.ai_rule_explanation {
                 ui.add_space(ui::theme::spacing::SM);
                 render_ai_rule_explanation(ui, explanation);
             }
         });
+    }
+
+    fn render_ai_draft_review_window(&mut self, ctx: &egui::Context) {
+        if !self.show_ai_draft_review {
+            return;
+        }
+
+        let Some(result) = self.ai_draft_result.clone() else {
+            self.show_ai_draft_review = false;
+            return;
+        };
+
+        let mut open = true;
+        let mut edit_prompt_requested = false;
+        egui::Window::new("AI draft review")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(720.0)
+            .default_height(520.0)
+            .min_width(560.0)
+            .min_height(380.0)
+            .show(ctx, |ui| {
+                render_ai_draft_review(ui, &result, &mut edit_prompt_requested);
+            });
+
+        if edit_prompt_requested {
+            self.show_ai_draft_prompt = true;
+            open = false;
+        }
+        if !open {
+            self.show_ai_draft_review = false;
+        }
     }
 
     fn apply_preview_action(&mut self, action: PreviewAction) {
@@ -3378,14 +3719,35 @@ struct AnalysisOutput {
 enum AiTaskKind {
     FolderAnalysis,
     DraftProfile,
+    PromptRefinement,
     RuleExplanation,
+}
+
+impl AiTaskKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::FolderAnalysis => "folder_analysis",
+            Self::DraftProfile => "draft_profile",
+            Self::PromptRefinement => "prompt_refinement",
+            Self::RuleExplanation => "rule_explanation",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 enum AiTaskOutput {
     FolderAnalysis(AiFolderAnalysis),
     DraftProfile(AiDraftProfileResult),
+    PromptRefinement(AiPromptRefinement),
     RuleExplanation(AiRuleExplanation),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiPreviewAction {
+    Analyze,
+    ViewNotes,
+    DraftRules,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -3393,6 +3755,19 @@ struct AiDraftProfileResult {
     draft: AiRuleProfileDraft,
     validation: AiProfileValidation,
     raw_json: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AiOperationRecord {
+    completed_at: String,
+    request_type: String,
+    provider: String,
+    model: String,
+    duration_ms: Option<u64>,
+    success: bool,
+    failure_class: Option<String>,
+    validation_warnings: usize,
+    validation_errors: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -3637,6 +4012,23 @@ fn run_ai_profile_draft(
     }))
 }
 
+fn run_ai_prompt_refinement(
+    endpoint: &str,
+    timeout: Duration,
+    model: &str,
+    session_id: &str,
+    root: &Path,
+    content_inspection_enabled: bool,
+    prompt: &str,
+) -> AiTaskMessage {
+    let context = load_ai_folder_context(session_id, root, content_inspection_enabled)?;
+    let client = OllamaClient::new(endpoint, timeout);
+    client
+        .refine_prompt(model, prompt, &context)
+        .map(AiTaskOutput::PromptRefinement)
+        .map_err(|error| format!("AI prompt refinement failed: {error}"))
+}
+
 fn run_ai_rule_explanation(
     endpoint: &str,
     timeout: Duration,
@@ -3694,6 +4086,39 @@ fn ai_draft_summary_message(validation: &AiProfileValidation) -> String {
             validation.errors.len(),
             plural(validation.errors.len())
         )
+    }
+}
+
+fn ai_failure_class(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        "timeout".to_string()
+    } else if lower.contains("cancel") {
+        "cancelled".to_string()
+    } else if lower.contains("validation") || lower.contains("schema") {
+        "validation".to_string()
+    } else if lower.contains("parse") || lower.contains("json") {
+        "invalid_json".to_string()
+    } else if lower.contains("connect") || lower.contains("reach") || lower.contains("endpoint") {
+        "provider_unavailable".to_string()
+    } else {
+        "provider_error".to_string()
+    }
+}
+
+fn sanitize_ai_endpoint(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .unwrap_or(trimmed);
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if trimmed.starts_with("https://") {
+        format!("https://{host_port}")
+    } else if trimmed.starts_with("http://") {
+        format!("http://{host_port}")
+    } else {
+        host_port.to_string()
     }
 }
 
@@ -4181,15 +4606,24 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
                 .wrap(),
             );
 
-            if needs_attention == 0
-                && result.summary.ambiguous_files == 0
-                && result.warning_messages.is_empty()
-            {
+            if needs_attention == 0 && result.warning_messages.is_empty() {
                 ui.colored_label(
                     ui::theme::colors::success(),
                     "No conflicts or warnings found.",
                 );
-            } else {
+                if left_in_place > 0 {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "{left_in_place} untouched item{} will stay put unless reviewed in the detailed file list.",
+                                plural(left_in_place)
+                            ))
+                            .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
+                }
+            } else if needs_attention > 0 || !result.warning_messages.is_empty() {
                 ui.colored_label(
                     ui::theme::colors::warning(),
                     "Review the attention and warnings views before organizing these files.",
@@ -4199,77 +4633,47 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
     });
 }
 
-fn render_ai_assist_panel(
+fn render_ai_assist_strip(
     ui: &mut egui::Ui,
     analysis: Option<&AiFolderAnalysis>,
     active_task: Option<AiTaskKind>,
     busy: bool,
     content_inspection_enabled: bool,
-) -> bool {
-    let mut start_requested = false;
+) -> Option<AiPreviewAction> {
+    let mut action = None;
     let aligned_width = preview_aligned_content_width(ui);
     ui.scope(|ui| {
         ui.set_max_width(aligned_width);
         settings_note_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("AI Assist")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                render_status_chip(
-                    ui,
-                    if content_inspection_enabled {
-                        "Content inspection on"
-                    } else {
-                        "Metadata only"
-                    },
-                    if content_inspection_enabled {
-                        ui::theme::colors::warning()
-                    } else {
-                        ui::theme::colors::info()
-                    },
-                    if content_inspection_enabled {
-                        ui::theme::colors::warning_bg()
-                    } else {
-                        ui::theme::colors::info_bg()
-                    },
-                );
-                if ui
-                    .add_enabled(
-                        !busy,
-                        ui::theme::widgets::secondary_button("Analyze with AI"),
-                    )
-                    .clicked()
-                {
-                    start_requested = true;
-                }
-            });
             if active_task == Some(AiTaskKind::FolderAnalysis) && busy {
-                ui.label(
-                    RichText::new("AI is reviewing the scanned folder context.")
-                        .color(ui::theme::colors::secondary_text()),
-                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("AI Assist")
+                            .strong()
+                            .color(ui::theme::colors::heading_text()),
+                    );
+                    ui.label(
+                        RichText::new("Reviewing scanned folder context...")
+                            .color(ui::theme::colors::secondary_text()),
+                    );
+                    if ui
+                        .add(ui::theme::widgets::compact_secondary_button("Cancel"))
+                        .clicked()
+                    {
+                        action = Some(AiPreviewAction::Cancel);
+                    }
+                });
                 return;
             }
-            if let Some(analysis) = analysis {
-                ui.add_space(ui::theme::spacing::SM);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(&analysis.summary)
-                            .color(ui::theme::colors::primary_text()),
-                    )
-                    .wrap(),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(&analysis.recommended_strategy)
-                            .color(ui::theme::colors::secondary_text()),
-                    )
-                    .wrap(),
-                );
-                ui.horizontal_wrapped(|ui| {
+
+            ui.horizontal_wrapped(|ui| {
+                if let Some(analysis) = analysis {
+                    ui.label(
+                        RichText::new("AI reviewed this folder")
+                            .strong()
+                            .color(ui::theme::colors::heading_text()),
+                    );
                     render_status_chip(
                         ui,
                         ai_confidence_label(analysis.confidence),
@@ -4278,99 +4682,434 @@ fn render_ai_assist_panel(
                     );
                     render_status_chip(
                         ui,
-                        &format!("{} pattern{}", analysis.patterns.len(), plural(analysis.patterns.len())),
+                        &format!(
+                            "{} pattern{}",
+                            analysis.patterns.len(),
+                            plural(analysis.patterns.len())
+                        ),
                         ui::theme::colors::success(),
                         ui::theme::colors::success_bg(),
                     );
                     render_status_chip(
                         ui,
-                        &format!("{} risk{}", analysis.risks.len(), plural(analysis.risks.len())),
+                        &format!(
+                            "{} risk{}",
+                            analysis.risks.len(),
+                            plural(analysis.risks.len())
+                        ),
                         ui::theme::colors::warning(),
                         ui::theme::colors::warning_bg(),
                     );
-                });
-                if !analysis.patterns.is_empty() || !analysis.risks.is_empty() {
-                    ui.add_space(ui::theme::spacing::XS);
-                    egui::CollapsingHeader::new("AI findings")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            for finding in analysis.patterns.iter().chain(analysis.risks.iter()) {
-                                ui.label(
-                                    RichText::new(&finding.title)
-                                        .strong()
-                                        .color(ui::theme::colors::heading_text()),
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&finding.detail)
-                                            .color(ui::theme::colors::secondary_text()),
-                                    )
-                                    .wrap(),
-                                );
-                                ui.add_space(ui::theme::spacing::XS);
-                            }
-                        });
-                }
-            } else {
-                ui.add(
-                    egui::Label::new(
+                    if ui
+                        .add(ui::theme::widgets::compact_secondary_button(
+                            "View AI notes",
+                        ))
+                        .clicked()
+                    {
+                        action = Some(AiPreviewAction::ViewNotes);
+                    }
+                    if ui
+                        .add(ui::theme::widgets::compact_secondary_button(
+                            "Create draft rules",
+                        ))
+                        .clicked()
+                    {
+                        action = Some(AiPreviewAction::DraftRules);
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("AI Assist")
+                            .strong()
+                            .color(ui::theme::colors::heading_text()),
+                    );
+                    render_ai_mode_chip(ui, content_inspection_enabled);
+                    ui.label(
                         RichText::new(
-                            "Optional. AI uses the completed deterministic scan and never moves files directly.",
+                            "Optional context review. Rules preview remains authoritative.",
                         )
                         .color(ui::theme::colors::secondary_text()),
-                    )
-                    .wrap(),
+                    );
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            ui::theme::widgets::compact_secondary_button("Analyze with AI"),
+                        )
+                        .clicked()
+                    {
+                        action = Some(AiPreviewAction::Analyze);
+                    }
+                }
+            });
+        });
+    });
+    action
+}
+
+fn render_ai_mode_chip(ui: &mut egui::Ui, content_inspection_enabled: bool) {
+    render_status_chip(
+        ui,
+        if content_inspection_enabled {
+            "Content inspection on"
+        } else {
+            "Metadata only"
+        },
+        if content_inspection_enabled {
+            ui::theme::colors::warning()
+        } else {
+            ui::theme::colors::info()
+        },
+        if content_inspection_enabled {
+            ui::theme::colors::warning_bg()
+        } else {
+            ui::theme::colors::info_bg()
+        },
+    );
+}
+
+fn render_ai_notes_content(
+    ui: &mut egui::Ui,
+    analysis: &AiFolderAnalysis,
+    draft_rules_requested: &mut bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("AI notes")
+                .strong()
+                .size(ui::theme::typography::SECTION_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_ai_mode_chip(ui, analysis.content_inspection_used);
+        render_status_chip(
+            ui,
+            ai_confidence_label(analysis.confidence),
+            ui::theme::colors::info(),
+            ui::theme::colors::info_bg(),
+        );
+        if analysis.content_inspection_used {
+            render_status_chip(
+                ui,
+                &format!(
+                    "{} content sample{}",
+                    analysis.content_samples_included,
+                    plural(analysis.content_samples_included)
+                ),
+                ui::theme::colors::secondary_text(),
+                ui::theme::colors::elevated_surface(),
+            );
+        }
+    });
+    ui.add_space(ui::theme::spacing::SM);
+    ui.add(
+        egui::Label::new(RichText::new(&analysis.summary).color(ui::theme::colors::primary_text()))
+            .wrap(),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(&analysis.recommended_strategy)
+                .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
+    if ui
+        .add(ui::theme::widgets::primary_button("Create draft rules"))
+        .clicked()
+    {
+        *draft_rules_requested = true;
+    }
+    ui.add_space(ui::theme::spacing::MD);
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if !analysis.content_sample_warnings.is_empty() {
+                ui.label(
+                    RichText::new("Content sampling notes")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for warning in analysis.content_sample_warnings.iter().take(6) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("- {warning}"))
+                                .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
+                }
+                if analysis.content_sample_warnings.len() > 6 {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} more sampling note{} omitted.",
+                            analysis.content_sample_warnings.len() - 6,
+                            plural(analysis.content_sample_warnings.len() - 6)
+                        ))
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::metadata_text()),
+                    );
+                }
+                ui.add_space(ui::theme::spacing::SM);
+            }
+            if !analysis.patterns.is_empty() {
+                ui.label(
+                    RichText::new("Patterns")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for finding in &analysis.patterns {
+                    render_ai_finding(ui, finding);
+                }
+            }
+            if !analysis.risks.is_empty() {
+                ui.add_space(ui::theme::spacing::SM);
+                ui.label(
+                    RichText::new("Risks")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for finding in &analysis.risks {
+                    render_ai_finding(ui, finding);
+                }
+            }
+        });
+}
+
+fn render_ai_finding(ui: &mut egui::Ui, finding: &AiFinding) {
+    ui.add_space(ui::theme::spacing::XS);
+    ui.label(
+        RichText::new(&finding.title)
+            .strong()
+            .color(ui::theme::colors::primary_text()),
+    );
+    ui.add(
+        egui::Label::new(RichText::new(&finding.detail).color(ui::theme::colors::secondary_text()))
+            .wrap(),
+    );
+    if !finding.examples.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Examples")
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            );
+            for item in finding.examples.iter().take(4) {
+                render_status_chip(
+                    ui,
+                    item,
+                    ui::theme::colors::metadata_text(),
+                    ui::theme::colors::subtle_surface(),
                 );
             }
         });
-    });
-    start_requested
+    }
 }
 
-fn render_ai_draft_result(ui: &mut egui::Ui, result: &AiDraftProfileResult) {
-    ui.horizontal_wrapped(|ui| {
-        if result.validation.is_usable() {
+fn render_ai_draft_summary_strip(
+    ui: &mut egui::Ui,
+    result: &AiDraftProfileResult,
+    show_review: &mut bool,
+    show_prompt: &mut bool,
+) {
+    settings_note_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            if result.validation.is_usable() {
+                render_status_chip(
+                    ui,
+                    "Draft loaded",
+                    ui::theme::colors::success(),
+                    ui::theme::colors::success_bg(),
+                );
+            } else {
+                render_status_chip(
+                    ui,
+                    "Validation failed",
+                    ui::theme::colors::error(),
+                    ui::theme::colors::error_bg(),
+                );
+            }
             render_status_chip(
                 ui,
-                "Draft loaded",
-                ui::theme::colors::success(),
-                ui::theme::colors::success_bg(),
+                &format!(
+                    "{} rule{}",
+                    result.draft.rules.len(),
+                    plural(result.draft.rules.len())
+                ),
+                ui::theme::colors::secondary_text(),
+                ui::theme::colors::elevated_surface(),
             );
-        } else {
-            render_status_chip(
-                ui,
-                "Validation failed",
-                ui::theme::colors::error(),
-                ui::theme::colors::error_bg(),
-            );
-        }
+            if !result.validation.warnings.is_empty() {
+                render_status_chip(
+                    ui,
+                    &format!(
+                        "{} warning{}",
+                        result.validation.warnings.len(),
+                        plural(result.validation.warnings.len())
+                    ),
+                    ui::theme::colors::warning(),
+                    ui::theme::colors::warning_bg(),
+                );
+            }
+            if !result.validation.errors.is_empty() {
+                render_status_chip(
+                    ui,
+                    &format!(
+                        "{} error{}",
+                        result.validation.errors.len(),
+                        plural(result.validation.errors.len())
+                    ),
+                    ui::theme::colors::error(),
+                    ui::theme::colors::error_bg(),
+                );
+            }
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("Review draft"))
+                .clicked()
+            {
+                *show_review = true;
+            }
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("Edit prompt"))
+                .clicked()
+            {
+                *show_prompt = true;
+            }
+        });
         if let Some(rationale) = &result.draft.rationale {
+            ui.add_space(ui::theme::spacing::XS);
             ui.add(
                 egui::Label::new(
-                    RichText::new(rationale).color(ui::theme::colors::secondary_text()),
+                    RichText::new(elide_text(rationale, 150))
+                        .color(ui::theme::colors::secondary_text()),
                 )
-                .wrap(),
-            );
+                .truncate(),
+            )
+            .on_hover_text(rationale);
         }
     });
+}
 
-    for warning in &result.validation.warnings {
-        ui.label(RichText::new(format!("Warning: {warning}")).color(ui::theme::colors::warning()));
-    }
-    for error in &result.validation.errors {
-        ui.label(RichText::new(format!("Error: {error}")).color(ui::theme::colors::error()));
-    }
-    egui::CollapsingHeader::new("Raw AI draft JSON")
-        .default_open(false)
-        .show(ui, |ui| {
-            let mut raw = result.raw_json.clone();
-            ui.add_sized(
-                [ui.available_width(), 140.0],
-                egui::TextEdit::multiline(&mut raw)
-                    .font(egui::TextStyle::Monospace)
-                    .interactive(false),
+fn render_ai_draft_review(
+    ui: &mut egui::Ui,
+    result: &AiDraftProfileResult,
+    edit_prompt_requested: &mut bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("AI draft review")
+                .strong()
+                .size(ui::theme::typography::SECTION_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_status_chip(
+            ui,
+            &format!(
+                "{} rule{}",
+                result.draft.rules.len(),
+                plural(result.draft.rules.len())
+            ),
+            ui::theme::colors::secondary_text(),
+            ui::theme::colors::elevated_surface(),
+        );
+        if !result.validation.warnings.is_empty() {
+            render_status_chip(
+                ui,
+                &format!(
+                    "{} warning{}",
+                    result.validation.warnings.len(),
+                    plural(result.validation.warnings.len())
+                ),
+                ui::theme::colors::warning(),
+                ui::theme::colors::warning_bg(),
             );
+        }
+        if ui
+            .add(ui::theme::widgets::compact_secondary_button("Edit prompt"))
+            .clicked()
+        {
+            *edit_prompt_requested = true;
+        }
+    });
+    ui.add_space(ui::theme::spacing::SM);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height((ui.available_height() - 8.0).max(260.0))
+        .show(ui, |ui| {
+            if let Some(rationale) = &result.draft.rationale {
+                ui.label(
+                    RichText::new("Rationale")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(rationale).color(ui::theme::colors::secondary_text()),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(ui::theme::spacing::SM);
+            }
+
+            if !result.validation.warnings.is_empty() {
+                ui.label(
+                    RichText::new("Warnings")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for warning in &result.validation.warnings {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("- {warning}"))
+                                .color(ui::theme::colors::warning()),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(ui::theme::spacing::SM);
+            }
+
+            if !result.validation.errors.is_empty() {
+                ui.label(
+                    RichText::new("Errors")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for error in &result.validation.errors {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("- {error}")).color(ui::theme::colors::error()),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.add_space(ui::theme::spacing::SM);
+            }
+
+            egui::CollapsingHeader::new("Raw AI draft JSON")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let mut raw = result.raw_json.clone();
+                    ui.add_sized(
+                        [ui.available_width(), 180.0],
+                        egui::TextEdit::multiline(&mut raw)
+                            .font(egui::TextStyle::Monospace)
+                            .interactive(false),
+                    );
+                });
         });
+}
+
+fn elide_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut shortened = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    shortened.push_str("...");
+    shortened
 }
 
 fn render_ai_rule_explanation(ui: &mut egui::Ui, explanation: &AiRuleExplanation) {
@@ -4463,14 +5202,14 @@ fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
     ui.scope(|ui| {
         ui.set_max_width(aligned_width);
         ui.label(
-            RichText::new("Example changes")
+            RichText::new("Example change")
                 .strong()
                 .size(ui::theme::typography::CARD_TITLE)
                 .color(ui::theme::colors::heading_text()),
         );
         ui.add(
             egui::Label::new(
-                RichText::new("Representative moves from this preview.")
+                RichText::new("One representative move from this preview.")
                     .color(ui::theme::colors::secondary_text()),
             )
             .wrap(),
@@ -4501,9 +5240,20 @@ fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
             return;
         }
 
-        for row in &result.preview_examples {
+        if let Some(row) = result.preview_examples.first() {
             render_preview_example_row(ui, row);
-            ui.add_space(3.0);
+            if result.preview_examples.len() > 1 {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} more example{} available in the detailed file list.",
+                        result.preview_examples.len() - 1,
+                        plural(result.preview_examples.len() - 1)
+                    ))
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+                );
+            }
         }
     });
 }
@@ -6485,6 +7235,7 @@ fn render_appearance_preferences(ui: &mut egui::Ui, preferences: &mut GuiPrefere
 struct AiPreferencesAction {
     changed: bool,
     test_connection: bool,
+    export_diagnostics: bool,
 }
 
 fn render_ai_preferences(
@@ -6631,6 +7382,13 @@ fn render_ai_preferences(
             .clicked()
         {
             action.test_connection = true;
+        }
+
+        if ui
+            .add(ui::theme::widgets::secondary_button("Export diagnostics"))
+            .clicked()
+        {
+            action.export_diagnostics = true;
         }
 
         if let Some(status) = status {

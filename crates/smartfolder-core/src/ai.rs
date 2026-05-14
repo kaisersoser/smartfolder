@@ -4,6 +4,8 @@
 //! into existing deterministic rule profiles before it can affect planning.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -19,8 +21,16 @@ const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434";
 const DEFAULT_AI_TIMEOUT_SECS: u64 = 60;
 const AI_CONTEXT_RECORD_LIMIT: usize = 500;
 const AI_CONTEXT_EVIDENCE_LIMIT: usize = 24;
+const AI_CONTEXT_CONTENT_FILE_LIMIT: usize = 12;
+const AI_CONTEXT_CONTENT_BYTES_PER_FILE: u64 = 4096;
+const AI_CONTEXT_CONTENT_CHARS_PER_FILE: usize = 2000;
 const PREFERRED_OLLAMA_MODELS: &[&str] = &[
     "llama3.1", "llama3", "mistral", "qwen2.5", "qwen2", "gemma2", "gemma",
+];
+const TEXT_LIKE_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "toml", "yaml", "yml", "xml", "html",
+    "htm", "css", "scss", "js", "jsx", "ts", "tsx", "rs", "py", "ps1", "sh", "bat", "cmd", "sql",
+    "log", "ini", "cfg", "conf", "rtf",
 ];
 const ALLOWED_DESTINATION_TOKENS: &[&str] = &[
     "{type}",
@@ -33,6 +43,7 @@ const ALLOWED_DESTINATION_TOKENS: &[&str] = &[
 const AI_ANALYSIS_SYSTEM_PROMPT: &str = "You are smartfolder's advisory folder analyst. Use only the provided folder context. Do not invent files. Do not suggest direct moves. Explain useful organization patterns, risks, and a recommended deterministic sorting strategy.";
 const AI_PROFILE_SYSTEM_PROMPT: &str = "You are smartfolder's rule drafting assistant. Produce only a deterministic rule profile draft using the allowed schema and tokens. Do not invent unsupported semantic tokens. Do not use absolute paths or parent traversal.";
 const AI_EXPLAIN_SYSTEM_PROMPT: &str = "You are smartfolder's rule explainer. Explain the provided deterministic rule profile using the selected folder context. Do not modify rules and do not claim that files will move without preview.";
+const AI_PROMPT_REFINEMENT_SYSTEM_PROMPT: &str = "You are smartfolder's prompt editor. Rewrite the user's rule-building prompt so it is clearer, more specific, and easier for a deterministic rule generator to follow. Preserve user intent. Do not generate rules. Do not invent unsupported semantic tokens.";
 const FOLDER_ANALYSIS_SCHEMA: &str = r#"{
   "summary": "short plain-language assessment",
   "patterns": [{"title": "pattern", "detail": "why it matters", "examples": ["relative/path.ext"]}],
@@ -65,6 +76,10 @@ const RULE_EXPLANATION_SCHEMA: &str = r#"{
   "likely_matches": [{"rule_name": "rule name", "relative_path": "file.ext", "destination_example": "folder/file.ext"}],
   "warnings": ["potential issue"],
   "scope_used": "folder-relative scope description"
+}"#;
+const PROMPT_REFINEMENT_SCHEMA: &str = r#"{
+  "refined_prompt": "clear user-facing prompt for drafting deterministic rules",
+  "notes": ["short note about clarification made"]
 }"#;
 
 /// Settings needed to connect to a local Ollama provider.
@@ -225,6 +240,18 @@ impl OllamaClient {
 
     /// Generate a structured JSON response using `/api/generate`.
     pub fn generate_json(&self, model: &str, prompt: &str) -> Result<serde_json::Value> {
+        let response = self.generate_raw(model, prompt)?;
+        match serde_json::from_str(&response) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let repair_prompt = json_repair_prompt(&response, &error.to_string());
+                let repaired = self.generate_raw(model, &repair_prompt)?;
+                serde_json::from_str(&repaired).map_err(SmartfolderError::from)
+            }
+        }
+    }
+
+    fn generate_raw(&self, model: &str, prompt: &str) -> Result<String> {
         let url = format!("{}/api/generate", self.endpoint);
         let response = self
             .agent()
@@ -244,7 +271,7 @@ impl OllamaClient {
                 .map_err(|error| SmartfolderError::AiProvider {
                     message: format!("Failed to parse Ollama response: {error}"),
                 })?;
-        serde_json::from_str(&body.response).map_err(SmartfolderError::from)
+        Ok(body.response)
     }
 
     /// Analyze a folder context and return advisory recommendations.
@@ -253,7 +280,14 @@ impl OllamaClient {
         model: &str,
         context: &AiFolderContext,
     ) -> Result<AiFolderAnalysis> {
-        self.generate_typed_json(model, &folder_analysis_prompt(context))
+        let mut analysis: AiFolderAnalysis =
+            self.generate_typed_json(model, &folder_analysis_prompt(context))?;
+        analysis.content_inspection_used = context.content_inspection_enabled;
+        analysis.content_samples_included = context.content_samples_included;
+        analysis
+            .content_sample_warnings
+            .clone_from(&context.content_sample_warnings);
+        Ok(analysis)
     }
 
     /// Generate a draft profile from a user prompt and selected folder context.
@@ -268,6 +302,16 @@ impl OllamaClient {
             model,
             &profile_draft_prompt(user_prompt, context, existing_profile),
         )
+    }
+
+    /// Refine a user prompt before generating a draft profile.
+    pub fn refine_prompt(
+        &self,
+        model: &str,
+        user_prompt: &str,
+        context: &AiFolderContext,
+    ) -> Result<AiPromptRefinement> {
+        self.generate_typed_json(model, &prompt_refinement_prompt(user_prompt, context))
     }
 
     /// Explain a deterministic rule profile against selected folder context.
@@ -308,6 +352,10 @@ pub struct AiFolderAnalysis {
     pub evidence: Vec<String>,
     pub scope_used: String,
     pub content_inspection_used: bool,
+    #[serde(default)]
+    pub content_samples_included: usize,
+    #[serde(default)]
+    pub content_sample_warnings: Vec<String>,
 }
 
 /// One pattern or risk discovered by AI.
@@ -360,6 +408,15 @@ pub struct AiRuleExample {
     pub destination_example: String,
 }
 
+/// Structured prompt rewrite returned by AI before profile generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiPromptRefinement {
+    pub refined_prompt: String,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
 /// Select a saved model, preferred model, or first installed model.
 #[must_use]
 pub fn select_ollama_model(models: &[String], configured_model: Option<&str>) -> Option<String> {
@@ -389,6 +446,8 @@ pub struct AiFolderContext {
     pub total_records: usize,
     pub sampled: bool,
     pub content_inspection_enabled: bool,
+    pub content_samples_included: usize,
+    pub content_sample_warnings: Vec<String>,
     pub file_type_counts: BTreeMap<String, usize>,
     pub extension_counts: BTreeMap<String, usize>,
     pub examples: Vec<AiFileContext>,
@@ -408,9 +467,21 @@ impl AiFolderContext {
         records: &[FileInventoryRecord],
         content_inspection_enabled: bool,
     ) -> Self {
+        Self::from_records_with_optional_content(scope_root, records, content_inspection_enabled)
+    }
+
+    /// Build AI context and optionally sample bounded text-like file contents from disk.
+    #[must_use]
+    pub fn from_records_with_optional_content(
+        scope_root: &Path,
+        records: &[FileInventoryRecord],
+        content_inspection_enabled: bool,
+    ) -> Self {
         let mut file_type_counts = BTreeMap::new();
         let mut extension_counts = BTreeMap::new();
         let mut examples = Vec::new();
+        let mut content_samples_included = 0;
+        let mut content_sample_warnings = Vec::new();
 
         for record in records {
             *file_type_counts
@@ -420,7 +491,24 @@ impl AiFolderContext {
                 *extension_counts.entry(extension.clone()).or_insert(0) += 1;
             }
             if examples.len() < AI_CONTEXT_EVIDENCE_LIMIT {
-                examples.push(AiFileContext::from_record(record));
+                let mut file_context = AiFileContext::from_record(record);
+                if content_inspection_enabled
+                    && content_samples_included < AI_CONTEXT_CONTENT_FILE_LIMIT
+                    && is_text_like_record(record)
+                {
+                    match sample_text_content(scope_root, record) {
+                        Ok(sample) => {
+                            file_context.content_sample = Some(sample.text);
+                            file_context.content_sample_truncated = sample.truncated;
+                            content_samples_included += 1;
+                        }
+                        Err(message) => {
+                            content_sample_warnings
+                                .push(format!("{}: {message}", file_context.relative_path));
+                        }
+                    }
+                }
+                examples.push(file_context);
             }
         }
 
@@ -432,6 +520,8 @@ impl AiFolderContext {
             total_records: records.len(),
             sampled: records.len() > AI_CONTEXT_RECORD_LIMIT,
             content_inspection_enabled,
+            content_samples_included,
+            content_sample_warnings,
             file_type_counts,
             extension_counts,
             examples,
@@ -450,6 +540,8 @@ pub struct AiFileContext {
     pub modified_year: Option<i32>,
     pub depth: usize,
     pub kind: String,
+    pub content_sample: Option<String>,
+    pub content_sample_truncated: bool,
 }
 
 impl AiFileContext {
@@ -466,6 +558,8 @@ impl AiFileContext {
             modified_year: record.modified_at.map(|modified| modified.year()),
             depth: record.depth,
             kind: entry_kind_label(record.entry_kind).to_string(),
+            content_sample: None,
+            content_sample_truncated: false,
         }
     }
 }
@@ -590,6 +684,24 @@ pub fn profile_draft_prompt(
     )
 }
 
+/// Build the prompt-refinement prompt used by providers.
+#[must_use]
+pub fn prompt_refinement_prompt(user_prompt: &str, context: &AiFolderContext) -> String {
+    format!(
+        "{system}\n\nAllowed destination tokens if the user mentions tokens: {tokens:?}\nReturn JSON matching this schema:\n{schema}\n\nUser draft prompt:\n{user_prompt}\n\nFolder context:\n{context}",
+        system = AI_PROMPT_REFINEMENT_SYSTEM_PROMPT,
+        tokens = ALLOWED_DESTINATION_TOKENS,
+        schema = PROMPT_REFINEMENT_SCHEMA,
+        context = serde_json::to_string_pretty(context).unwrap_or_else(|_| "{}".to_string()),
+    )
+}
+
+fn json_repair_prompt(raw_response: &str, parse_error: &str) -> String {
+    format!(
+        "Repair this invalid JSON response. Return only valid JSON. Preserve all fields and values that can be recovered. Do not add Markdown.\n\nParse error:\n{parse_error}\n\nInvalid response:\n{raw_response}",
+    )
+}
+
 /// Build the rule-explanation prompt used by providers.
 #[must_use]
 pub fn rule_explanation_prompt(profile: &RuleProfile, context: &AiFolderContext) -> String {
@@ -606,7 +718,7 @@ impl AiRuleDraft {
     fn into_rule(self) -> CustomRule {
         CustomRule {
             name: self.name.trim().to_string(),
-            destination: self.destination.trim().to_string(),
+            destination: clean_ai_destination(&self.destination),
             priority: self.priority,
             match_all: self.match_all,
             extensions: self.extensions,
@@ -617,6 +729,111 @@ impl AiRuleDraft {
             year: self.year,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentSample {
+    text: String,
+    truncated: bool,
+}
+
+fn is_text_like_record(record: &FileInventoryRecord) -> bool {
+    if record.entry_kind != FileEntryKind::File {
+        return false;
+    }
+    if matches!(record.detected_type, FileTypeBucket::Code) {
+        return true;
+    }
+    record.extension.as_deref().is_some_and(|extension| {
+        let normalized = extension.trim_start_matches('.').to_ascii_lowercase();
+        TEXT_LIKE_EXTENSIONS
+            .iter()
+            .any(|candidate| *candidate == normalized)
+    })
+}
+
+fn sample_text_content(
+    scope_root: &Path,
+    record: &FileInventoryRecord,
+) -> std::result::Result<ContentSample, String> {
+    let path = scope_root.join(&record.root_relative_path);
+    let mut file = File::open(&path).map_err(|error| format!("content sample skipped: {error}"))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(AI_CONTEXT_CONTENT_BYTES_PER_FILE + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("content sample failed: {error}"))?;
+    let truncated_by_bytes = bytes.len() as u64 > AI_CONTEXT_CONTENT_BYTES_PER_FILE;
+    if truncated_by_bytes {
+        bytes.truncate(AI_CONTEXT_CONTENT_BYTES_PER_FILE as usize);
+    }
+    if looks_binary(&bytes) {
+        return Err("content sample skipped: file appears binary".to_string());
+    }
+    let decoded = String::from_utf8_lossy(&bytes);
+    let sanitized = sanitize_content_sample(&decoded);
+    if sanitized.trim().is_empty() {
+        return Err("content sample skipped: no readable text".to_string());
+    }
+    let char_count = sanitized.chars().count();
+    let truncated_by_chars = char_count > AI_CONTEXT_CONTENT_CHARS_PER_FILE;
+    let text = if truncated_by_chars {
+        sanitized
+            .chars()
+            .take(AI_CONTEXT_CONTENT_CHARS_PER_FILE)
+            .collect()
+    } else {
+        sanitized
+    };
+    Ok(ContentSample {
+        text,
+        truncated: truncated_by_bytes || truncated_by_chars,
+    })
+}
+
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return true;
+    }
+    if bytes.is_empty() {
+        return false;
+    }
+    let control_count = bytes
+        .iter()
+        .filter(|byte| matches!(**byte, 0x01..=0x08 | 0x0B | 0x0C | 0x0E..=0x1F))
+        .count();
+    control_count * 10 > bytes.len()
+}
+
+fn sanitize_content_sample(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .lines()
+        .take(40)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn clean_ai_destination(destination: &str) -> String {
+    destination
+        .trim()
+        .trim_matches(['/', '\\'])
+        .strip_prefix("literal/")
+        .or_else(|| {
+            destination
+                .trim()
+                .trim_matches(['/', '\\'])
+                .strip_prefix(r"literal\")
+        })
+        .unwrap_or_else(|| destination.trim().trim_matches(['/', '\\']))
+        .to_string()
 }
 
 fn applicability_warnings(profile: &RuleProfile, records: &[FileInventoryRecord]) -> Vec<String> {
@@ -738,13 +955,16 @@ struct OllamaGenerateResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     use chrono::{TimeZone, Utc};
+    use tempfile::tempdir;
 
     use crate::ai::{
-        folder_analysis_prompt, profile_draft_prompt, rule_explanation_prompt, select_ollama_model,
-        validate_ai_profile_draft, AiFolderContext, AiRuleDraft, AiRuleProfileDraft,
+        folder_analysis_prompt, json_repair_prompt, profile_draft_prompt, prompt_refinement_prompt,
+        rule_explanation_prompt, select_ollama_model, validate_ai_profile_draft, AiFolderContext,
+        AiRuleDraft, AiRuleProfileDraft,
     };
     use crate::model::{FileEntryKind, FileInventoryRecord, FileTypeBucket};
 
@@ -780,6 +1000,52 @@ mod tests {
         assert_eq!(context.scope_root, "Documents");
         assert_eq!(context.examples[0].relative_path, "Invoices/invoice.pdf");
         assert!(!context.examples[0].relative_path.contains("Alice"));
+    }
+
+    #[test]
+    fn folder_context_samples_text_content_only_when_enabled() {
+        let temp = tempdir().expect("temp dir");
+        fs::write(
+            temp.path().join("notes.txt"),
+            "Invoice notes\nClient: Example\nAmount: 42",
+        )
+        .expect("write notes");
+        let records = [record("notes.txt", FileTypeBucket::Document)];
+
+        let disabled =
+            AiFolderContext::from_records_with_optional_content(temp.path(), &records, false);
+        assert_eq!(disabled.content_samples_included, 0);
+        assert!(disabled.examples[0].content_sample.is_none());
+
+        let enabled =
+            AiFolderContext::from_records_with_optional_content(temp.path(), &records, true);
+        assert_eq!(enabled.content_samples_included, 1);
+        assert!(enabled.content_sample_warnings.is_empty());
+        assert!(enabled.examples[0]
+            .content_sample
+            .as_deref()
+            .expect("content sample")
+            .contains("Invoice notes"));
+        assert!(!serde_json::to_string(&enabled)
+            .expect("serialize context")
+            .contains(temp.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn folder_context_skips_binary_content_samples() {
+        let temp = tempdir().expect("temp dir");
+        fs::write(temp.path().join("notes.txt"), b"text\0binary").expect("write binary-like file");
+        let records = [record("notes.txt", FileTypeBucket::Document)];
+
+        let context =
+            AiFolderContext::from_records_with_optional_content(temp.path(), &records, true);
+
+        assert_eq!(context.content_samples_included, 0);
+        assert!(context.examples[0].content_sample.is_none());
+        assert!(context
+            .content_sample_warnings
+            .iter()
+            .any(|warning| warning.contains("appears binary")));
     }
 
     #[test]
@@ -884,6 +1150,32 @@ mod tests {
     }
 
     #[test]
+    fn ai_profile_draft_strips_literal_destination_prefix() {
+        let validation = validate_ai_profile_draft(
+            AiRuleProfileDraft {
+                profile_id: "ai-profile".to_string(),
+                rationale: None,
+                rules: vec![AiRuleDraft {
+                    name: "Documents".to_string(),
+                    destination: "literal/{year}/Documents".to_string(),
+                    priority: Some(10),
+                    match_all: true,
+                    extensions: Vec::new(),
+                    filename_contains: Vec::new(),
+                    path_contains: Vec::new(),
+                    min_size_bytes: None,
+                    max_size_bytes: None,
+                    year: None,
+                }],
+            },
+            &[record("invoice.pdf", FileTypeBucket::Document)],
+        );
+
+        let profile = validation.profile.expect("usable profile");
+        assert_eq!(profile.rules[0].destination, "{year}/Documents");
+    }
+
+    #[test]
     fn prompts_include_schema_and_relative_context() {
         let context = AiFolderContext::from_records(
             Path::new("D:/Users/Alice/Documents"),
@@ -891,6 +1183,7 @@ mod tests {
         );
         let analysis_prompt = folder_analysis_prompt(&context);
         let draft_prompt = profile_draft_prompt("sort invoices", &context, None);
+        let refinement_prompt = prompt_refinement_prompt("sort invoices", &context);
         let explanation_prompt = rule_explanation_prompt(
             &validate_ai_profile_draft(
                 AiRuleProfileDraft {
@@ -918,9 +1211,21 @@ mod tests {
 
         assert!(analysis_prompt.contains("recommended_strategy"));
         assert!(draft_prompt.contains("Allowed destination tokens"));
+        assert!(refinement_prompt.contains("refined_prompt"));
         assert!(explanation_prompt.contains("rule_order"));
         assert!(analysis_prompt.contains("Invoices/invoice.pdf"));
+        assert!(refinement_prompt.contains("Invoices/invoice.pdf"));
         assert!(!analysis_prompt.contains("D:/Users/Alice"));
+        assert!(!refinement_prompt.contains("D:/Users/Alice"));
+    }
+
+    #[test]
+    fn json_repair_prompt_does_not_add_payload_instructions() {
+        let prompt = json_repair_prompt("{\"ok\": true", "EOF");
+
+        assert!(prompt.contains("Return only valid JSON"));
+        assert!(prompt.contains("{\"ok\": true"));
+        assert!(!prompt.contains("Markdown table"));
     }
 
     fn record(path: &str, detected_type: FileTypeBucket) -> FileInventoryRecord {

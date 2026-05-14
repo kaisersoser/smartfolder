@@ -17,6 +17,8 @@ pub(crate) const RULES: &str = egui_phosphor::regular::SLIDERS_HORIZONTAL;
 pub(crate) const SETTINGS: &str = egui_phosphor::regular::GEAR_SIX;
 /// Help or explanatory details icon.
 pub(crate) const HELP: &str = egui_phosphor::regular::QUESTION;
+/// AI prompt refinement icon.
+pub(crate) const AI_REFINE: &str = egui_phosphor::regular::MAGIC_WAND;
 /// Expand a collapsed navigation/sidebar panel.
 pub(crate) const EXPAND: &str = egui_phosphor::regular::CARET_RIGHT;
 /// Collapse an expanded navigation/sidebar panel.

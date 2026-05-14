@@ -11,7 +11,7 @@ This document captures the strategic direction for `smartfolder` across release 
 | v1 MVP (CLI) | ✅ Released |
 | v2.0 UX rewrite (GUI-first) | ✅ Released |
 | v2.1 installer and distribution | ✅ Released |
-| v2.2 AI-assisted organization | 📋 Planned |
+| v2.2 AI-assisted organization | 🧪 Implementation complete; Ollama E2E verification pending |
 | v2.3 CLI AI parity | 📋 Planned |
 | v2.x cross-platform tracks | 📋 Planned |
 
@@ -143,6 +143,7 @@ select or preload folder → analyze → preview → organize → undo → origi
   - Generated drafts open in the existing Profile workspace.
 - Rules/Profile workspace integration:
   - `Build with AI` prompt-to-rules action.
+  - AI prompt refinement action for clearer prompt wording before profile generation.
   - Requires selected folder or selected subfolder context.
   - AI receives the allowed rule schema, current folder context, user prompt, and existing profile context when relevant.
   - AI-generated rules are validated before appearing in the builder.
@@ -165,43 +166,44 @@ select or preload folder → analyze → preview → organize → undo → origi
 - Failure handling:
   - If Ollama/model/provider readiness fails, AI actions hide outside Settings.
   - Invalid AI JSON triggers one repair attempt.
-  - Failed repair or failed validation leaves current profiles untouched.
-  - Timeouts and cancellation stop cleanly.
+  - Failed repair or failed validation leaves current profiles untouched; invalid drafts remain reviewable without replacing the current profile.
+  - Timeouts stop cleanly; user cancellation drops UI interest and ignores late provider responses.
   - Unreadable content samples are skipped and reported as warnings.
 - Observability:
   - Do not log file contents or full prompts by default.
-  - Log sanitized operational events only: provider status, model, request type, duration, success/failure class, and validation results.
+  - Keep sanitized operational events only: provider, model, request type, duration, success/failure class, and validation results.
   - Settings includes an AI diagnostic export that excludes sensitive payloads by default.
-  - Advanced users can expand raw AI JSON/TOML output when validation fails.
+  - Advanced users can expand raw AI draft JSON during draft review.
 
-### Implementation plan
+### Implementation status
 
-1. Add an AI core module with provider traits, request/response models, validation-safe schemas, and deterministic conversion into `RuleProfile`.
-2. Implement the Ollama provider:
+1. ✅ Add an AI core module with request/response models, validation-safe schemas, and deterministic conversion into `RuleProfile`.
+2. ✅ Implement the Ollama provider:
    - health check
    - model listing
    - model selection
    - tiny structured readiness test
    - analysis/explain/rule-draft requests
-3. Add persisted AI settings:
+3. ✅ Add persisted AI settings:
    - enabled
    - endpoint
    - selected model
    - timeout
    - content inspection enabled
-4. Add the provider availability state machine and session cache.
-5. Add folder-context builders that derive AI-safe metadata from existing deterministic scan output.
-6. Add scoped content sampling for text-like files behind the persistent content-inspection setting.
-7. Add prompt builders and strict response schemas for:
+4. ✅ Add the provider availability state machine.
+5. ✅ Add folder-context builders that derive AI-safe metadata from existing deterministic scan output.
+6. ✅ Add scoped content sampling for text-like files behind the persistent content-inspection setting.
+7. ✅ Add prompt builders and strict response schemas for:
    - folder analysis
    - prompt-to-profile
+   - prompt refinement
    - rule explanation
-8. Add deterministic validation for AI-generated profiles, including warnings for zero-match and shadowed rules.
-9. Add Settings UI for AI configuration, status, diagnostics, and content-inspection warnings.
-10. Add contextual AI actions to Organize and Rules/Profile workspace behind the availability gate.
-11. Add cancellation, timeout, retry, and validation-error surfaces.
-12. Add tests for provider state, schema parsing, safety validation, applicability warnings, and no-mutation failure behavior.
-13. Run release verification:
+8. ✅ Add deterministic validation for AI-generated profiles, including warnings for zero-match and shadowed rules.
+9. ✅ Add Settings UI for AI configuration, status, diagnostics, and content-inspection warnings.
+10. ✅ Add contextual AI actions to Organize and Rules/Profile workspace behind the availability gate.
+11. ✅ Add cancellation, timeout, one-shot JSON repair, and validation-error surfaces.
+12. ✅ Add tests for model selection, schema prompt coverage, safety validation, applicability warnings, content sampling, and no absolute-path leakage.
+13. 🧪 Run release verification:
    - AI unavailable behavior matches v2.1 except Settings.
    - Ollama available path works end to end.
    - Existing deterministic organize/undo tests still pass.
@@ -210,6 +212,7 @@ select or preload folder → analyze → preview → organize → undo → origi
 
 - API key handling and authenticated cloud providers.
 - Secure persisted credential storage.
+- OpenAI-compatible custom endpoints that require API-key or Chat Completions compatibility.
 - CLI AI parity.
 - AI-native organizer separate from deterministic profiles.
 - Semantic tokens such as `{vendor}`, `{project}`, and `{client}`.

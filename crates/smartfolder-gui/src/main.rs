@@ -51,7 +51,7 @@ use smartfolder_core::apply::{
 };
 use smartfolder_core::model::{
     BuiltInMode, ConflictState, FileInventoryRecord, OperationStatus, PlanMode, PlanOperation,
-    PlanSummary, TransactionStatus, UntouchedReason,
+    PlanSummary, TransactionStatus, UntouchedReason, UntouchedRecord,
 };
 use smartfolder_core::planner::{
     generate_plan_to_store_with_progress_and_cancellation, PlanGenerationProgress, PlanOptions,
@@ -3130,6 +3130,7 @@ impl eframe::App for SmartfolderApp {
 enum PreviewFilter {
     All,
     Ready,
+    Untouched,
     NeedsAttention,
 }
 
@@ -3138,15 +3139,16 @@ impl PreviewFilter {
         match self {
             Self::All => "All",
             Self::Ready => "Ready",
+            Self::Untouched => "Untouched",
             Self::NeedsAttention => "Needs attention",
         }
     }
 
-    fn core_filter(self) -> PlanOperationFilter {
+    fn operation_filter(self) -> Option<PlanOperationFilter> {
         match self {
-            Self::All => PlanOperationFilter::All,
-            Self::Ready => PlanOperationFilter::Ready,
-            Self::NeedsAttention => PlanOperationFilter::NeedsAttention,
+            Self::All | Self::Untouched => None,
+            Self::Ready => Some(PlanOperationFilter::Ready),
+            Self::NeedsAttention => Some(PlanOperationFilter::NeedsAttention),
         }
     }
 
@@ -3154,6 +3156,7 @@ impl PreviewFilter {
         match self {
             Self::All => counts.all,
             Self::Ready => counts.ready,
+            Self::Untouched => counts.untouched,
             Self::NeedsAttention => counts.needs_attention,
         }
     }
@@ -3786,7 +3789,7 @@ struct PreviewRow {
     original_folder: String,
     target_folder: String,
     source_full_path: String,
-    destination_full_path: String,
+    destination_full_path: Option<String>,
     reason: String,
     status: String,
 }
@@ -4152,35 +4155,80 @@ fn load_preview_page_from_store(
     filter: PreviewFilter,
     offset: usize,
 ) -> std::result::Result<PreviewPage, String> {
-    let total_rows = store
-        .plan_operation_count(session_id, filter.core_filter())
+    if filter == PreviewFilter::Untouched {
+        let total_rows = store
+            .untouched_count(session_id)
+            .map_err(|error| format!("Failed to count untouched files: {error}"))?;
+        let records = store
+            .untouched_records_page(session_id, offset, PREVIEW_PAGE_SIZE)
+            .map_err(|error| format!("Failed to load untouched files: {error}"))?;
+        return Ok(PreviewPage {
+            rows: untouched_preview_rows(&records, root),
+            total_rows,
+        });
+    }
+
+    if let Some(operation_filter) = filter.operation_filter() {
+        let total_rows = store
+            .plan_operation_count(session_id, operation_filter)
+            .map_err(|error| format!("Failed to count preview operations: {error}"))?;
+        let operations = store
+            .plan_operations_page_filtered(session_id, operation_filter, offset, PREVIEW_PAGE_SIZE)
+            .map_err(|error| format!("Failed to load preview operations: {error}"))?;
+        return Ok(PreviewPage {
+            rows: preview_rows(&operations, root),
+            total_rows,
+        });
+    }
+
+    let operation_total = store
+        .plan_operation_count(session_id, PlanOperationFilter::All)
         .map_err(|error| format!("Failed to count preview operations: {error}"))?;
-    let operations = store
-        .plan_operations_page_filtered(session_id, filter.core_filter(), offset, PREVIEW_PAGE_SIZE)
-        .map_err(|error| format!("Failed to load preview operations: {error}"))?;
-    Ok(PreviewPage {
-        rows: preview_rows(&operations, root),
-        total_rows,
-    })
+    let untouched_total = store
+        .untouched_count(session_id)
+        .map_err(|error| format!("Failed to count untouched files: {error}"))?;
+    let total_rows = operation_total + untouched_total;
+    let mut rows = Vec::new();
+    if offset < operation_total {
+        let operations = store
+            .plan_operations_page_filtered(
+                session_id,
+                PlanOperationFilter::All,
+                offset,
+                PREVIEW_PAGE_SIZE,
+            )
+            .map_err(|error| format!("Failed to load preview operations: {error}"))?;
+        rows.extend(preview_rows(&operations, root));
+    }
+    if rows.len() < PREVIEW_PAGE_SIZE {
+        let untouched_offset = offset.saturating_sub(operation_total);
+        let records = store
+            .untouched_records_page(session_id, untouched_offset, PREVIEW_PAGE_SIZE - rows.len())
+            .map_err(|error| format!("Failed to load untouched files: {error}"))?;
+        rows.extend(untouched_preview_rows(&records, root));
+    }
+    Ok(PreviewPage { rows, total_rows })
 }
 
 fn load_preview_counts_from_store(
     store: &SqliteSessionStore,
     session_id: &str,
 ) -> std::result::Result<PreviewCounts, String> {
+    let operation_count = store
+        .plan_operation_count(session_id, PlanOperationFilter::All)
+        .map_err(|error| format!("Failed to count preview operations: {error}"))?;
+    let untouched = store
+        .untouched_count(session_id)
+        .map_err(|error| format!("Failed to count untouched files: {error}"))?;
     Ok(PreviewCounts {
-        all: store
-            .plan_operation_count(session_id, PlanOperationFilter::All)
-            .map_err(|error| format!("Failed to count preview operations: {error}"))?,
+        all: operation_count + untouched,
         ready: store
             .plan_operation_count(session_id, PlanOperationFilter::Ready)
             .map_err(|error| format!("Failed to count ready operations: {error}"))?,
         needs_attention: store
             .plan_operation_count(session_id, PlanOperationFilter::NeedsAttention)
             .map_err(|error| format!("Failed to count operations needing attention: {error}"))?,
-        untouched: store
-            .untouched_count(session_id)
-            .map_err(|error| format!("Failed to count untouched files: {error}"))?,
+        untouched,
     })
 }
 
@@ -5341,6 +5389,9 @@ fn render_preview_example_row(ui: &mut egui::Ui, row: &PreviewRow) {
 }
 
 fn preview_example_destination_path(row: &PreviewRow) -> String {
+    if row.destination_full_path.is_none() {
+        return "Stays in place".to_string();
+    }
     if row.target_folder == "Selected folder" {
         "./".to_string()
     } else {
@@ -6421,6 +6472,7 @@ fn render_preview_controls(
         for filter in [
             PreviewFilter::All,
             PreviewFilter::Ready,
+            PreviewFilter::Untouched,
             PreviewFilter::NeedsAttention,
         ] {
             let label = format!(
@@ -6442,7 +6494,7 @@ fn render_preview_controls(
     let current_end = (offset + result.preview_rows.len()).min(total_rows);
     ui.horizontal(|ui| {
         let range_text = if total_rows == 0 {
-            "No operations in this view".to_string()
+            "No files in this view".to_string()
         } else {
             format!("Showing {}-{} of {}", offset + 1, current_end, total_rows)
         };
@@ -6472,11 +6524,34 @@ fn preview_rows(operations: &[PlanOperation], root: &Path) -> Vec<PreviewRow> {
             original_folder: relative_folder_label(&operation.source, root),
             target_folder: relative_folder_label(&operation.destination, root),
             source_full_path: operation.source.display().to_string(),
-            destination_full_path: operation.destination.display().to_string(),
+            destination_full_path: Some(operation.destination.display().to_string()),
             reason: operation.reason.clone(),
             status: operation_status(operation).to_string(),
         })
         .collect()
+}
+
+fn untouched_preview_rows(records: &[UntouchedRecord], root: &Path) -> Vec<PreviewRow> {
+    records
+        .iter()
+        .map(|record| PreviewRow {
+            file_name: file_name_label(&record.path),
+            original_folder: relative_folder_label(&record.path, root),
+            target_folder: "Stays in place".to_string(),
+            source_full_path: record.path.display().to_string(),
+            destination_full_path: None,
+            reason: untouched_detail(record),
+            status: "Untouched".to_string(),
+        })
+        .collect()
+}
+
+fn untouched_detail(record: &UntouchedRecord) -> String {
+    if record.detail.trim().is_empty() {
+        untouched_reason_label(record.reason).to_string()
+    } else {
+        record.detail.clone()
+    }
 }
 
 fn file_name_label(path: &Path) -> String {
@@ -6510,7 +6585,7 @@ fn render_preview_rows(
 ) {
     if result.preview_rows.is_empty() {
         *selected_row = None;
-        ui.label("No operations match this view.");
+        ui.label("No files match this view.");
         return;
     }
 
@@ -6542,7 +6617,10 @@ fn render_preview_rows(
                     is_selected,
                     format!(
                         "From: {}\nTo: {}",
-                        row.source_full_path, row.destination_full_path
+                        row.source_full_path,
+                        row.destination_full_path
+                            .as_deref()
+                            .unwrap_or("Stays in place")
                     ),
                 );
                 if file_response.clicked() {
@@ -6552,7 +6630,10 @@ fn render_preview_rows(
                     ui,
                     row,
                     target_width,
-                    format!("Full destination: {}", row.destination_full_path),
+                    row.destination_full_path.as_ref().map_or_else(
+                        || "This file stays in its original folder".to_string(),
+                        |destination| format!("Full destination: {destination}"),
+                    ),
                 );
                 ui.end_row();
             }
@@ -6561,8 +6642,9 @@ fn render_preview_rows(
     if result.preview_rows.len() < result.preview_total_rows {
         ui.add_space(8.0);
         ui.label(format!(
-            "Showing {} of {} matching operations. More rows are stored on disk for paged retrieval.",
-            result.preview_rows.len(), result.preview_total_rows
+            "Showing {} of {} matching files. More rows are stored on disk for paged retrieval.",
+            result.preview_rows.len(),
+            result.preview_total_rows
         ));
     }
 }
@@ -6731,10 +6813,11 @@ fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_ro
                 });
             ui.add_space(6.0);
             truncated_label(ui, &format!("Full source: {}", row.source_full_path));
-            truncated_label(
-                ui,
-                &format!("Full destination: {}", row.destination_full_path),
-            );
+            if let Some(destination) = &row.destination_full_path {
+                truncated_label(ui, &format!("Full destination: {destination}"));
+            } else {
+                truncated_label(ui, "Destination: Stays in original folder");
+            }
         });
 }
 
@@ -8806,7 +8889,7 @@ mod tests {
 
     use smartfolder_core::model::{
         BuiltInMode, Certainty, ConflictState, OperationStatus, OperationType, PlanOperation,
-        SourceSnapshot, TransactionStatus,
+        SourceSnapshot, TransactionStatus, UntouchedReason, UntouchedRecord,
     };
     use smartfolder_core::rules::{CustomRule, RuleProfile};
 
@@ -8815,9 +8898,9 @@ mod tests {
         build_destination_from_segments, can_undo_status, is_cloud_synced_path,
         operation_status_label, parse_destination_segments, preloaded_root_from_args, preview_rows,
         profile_file_stem, same_folder, status_label, transaction_operation_counts,
-        AnalysisPlanSource, DestinationDragPayload, DestinationDragSource, DestinationSegment,
-        LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState, SmartfolderApp,
-        TransactionRow,
+        untouched_preview_rows, AnalysisPlanSource, DestinationDragPayload, DestinationDragSource,
+        DestinationSegment, LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState,
+        SmartfolderApp, TransactionRow,
     };
 
     #[test]
@@ -8934,6 +9017,28 @@ mod tests {
         assert_eq!(rows[0].original_folder, "Selected folder");
         assert_eq!(rows[0].target_folder, "Images / 2013 / January");
         assert!(rows[0].source_full_path.ends_with("loose.jpg"));
+        assert!(rows[0]
+            .destination_full_path
+            .as_ref()
+            .is_some_and(|path| path.ends_with("loose.jpg")));
+    }
+
+    #[test]
+    fn untouched_preview_rows_stay_inspectable_without_destination() {
+        let root = PathBuf::from(r"D:\OneDrive\Documents");
+        let records = [UntouchedRecord {
+            path: root.join("notes.tmp"),
+            reason: UntouchedReason::UnsupportedMetadata,
+            detail: "Unsupported file metadata".to_string(),
+        }];
+
+        let rows = untouched_preview_rows(&records, &root);
+
+        assert_eq!(rows[0].file_name, "notes.tmp");
+        assert_eq!(rows[0].target_folder, "Stays in place");
+        assert_eq!(rows[0].status, "Untouched");
+        assert_eq!(rows[0].destination_full_path, None);
+        assert_eq!(rows[0].reason, "Unsupported file metadata");
     }
 
     #[test]

@@ -320,6 +320,7 @@ struct SmartfolderApp {
     show_recovery_log: bool,
     show_undo_confirmation: Option<String>,
     show_settings_help: bool,
+    show_rules_workspace: bool,
     error_message: Option<String>,
     maintenance_message: Option<String>,
 }
@@ -379,6 +380,7 @@ impl SmartfolderApp {
             show_recovery_log: false,
             show_undo_confirmation: None,
             show_settings_help: false,
+            show_rules_workspace: false,
             error_message: None,
             maintenance_message: preferences_message,
         }
@@ -466,6 +468,7 @@ impl SmartfolderApp {
         self.profile_editor = ProfileEditorState::from_builtin(mode);
         self.loaded_profile = None;
         self.select_builtin_style(mode);
+        self.show_rules_workspace = true;
         self.maintenance_message = Some(format!(
             "Created an editable draft from {}. Save it as a custom profile when ready.",
             Self::mode_label(mode)
@@ -479,6 +482,15 @@ impl SmartfolderApp {
         self.loaded_profile = Some(loaded_profile);
         self.select_custom_rules_style();
         self.maintenance_message = Some(format!("Using custom profile '{profile_id}'."));
+        self.error_message = None;
+    }
+
+    fn edit_saved_profile(&mut self, loaded_profile: LoadedRuleProfile) {
+        let profile_id = loaded_profile.profile.profile_id.clone();
+        self.profile_editor = ProfileEditorState::from_profile(&loaded_profile.profile);
+        self.loaded_profile = Some(loaded_profile);
+        self.show_rules_workspace = true;
+        self.maintenance_message = Some(format!("Editing custom profile '{profile_id}'."));
         self.error_message = None;
     }
 
@@ -691,6 +703,7 @@ impl SmartfolderApp {
                 self.loaded_profile = Some(LoadedRuleProfile { path, profile });
                 self.planning_source = PlanningSource::RuleProfile;
                 self.preferences.last_style = StylePreference::CustomRules;
+                self.show_rules_workspace = true;
                 self.save_preferences_quietly();
                 self.maintenance_message = Some(format!("Imported rule profile '{profile_id}'."));
                 self.error_message = None;
@@ -710,6 +723,7 @@ impl SmartfolderApp {
                 self.loaded_profile = Some(loaded_profile);
                 self.planning_source = PlanningSource::RuleProfile;
                 self.preferences.last_style = StylePreference::CustomRules;
+                self.show_rules_workspace = false;
                 self.save_preferences_quietly();
                 self.maintenance_message =
                     Some(format!("Saved rule profile '{profile_id}' to {path}."));
@@ -1751,13 +1765,47 @@ impl SmartfolderApp {
 
         let saved_profiles = list_saved_rule_profiles();
         let mut profile_to_use: Option<LoadedRuleProfile> = None;
+        let mut profile_to_edit: Option<LoadedRuleProfile> = None;
 
         ui::theme::widgets::card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Rules library").strong().size(18.0));
+            ui.label(
+                RichText::new("Rules library")
+                    .strong()
+                    .size(18.0)
+                    .color(ui::theme::colors::heading_text()),
+            );
             ui.label(
                 RichText::new("Built-ins are read-only. Customize one to create an editable profile.")
                     .color(ui::theme::colors::secondary_text()),
             );
+            ui.add_space(ui::theme::spacing::SM);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(ui::theme::widgets::primary_button("New custom profile"))
+                    .clicked()
+                {
+                    self.profile_editor = ProfileEditorState::default();
+                    self.loaded_profile = None;
+                    self.planning_source = PlanningSource::BuiltIn;
+                    self.show_rules_workspace = true;
+                    self.maintenance_message =
+                        Some("Started a new unsaved profile draft.".to_string());
+                    self.error_message = None;
+                }
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Import TOML..."))
+                    .clicked()
+                {
+                    self.import_rule_profile();
+                }
+                if self.loaded_profile.is_some()
+                    && ui
+                        .add(ui::theme::widgets::secondary_button("Edit active profile"))
+                        .clicked()
+                {
+                    self.show_rules_workspace = true;
+                }
+            });
             ui.add_space(ui::theme::spacing::SM);
 
             ui.label(
@@ -1799,8 +1847,12 @@ impl SmartfolderApp {
                             loaded.path == profile.path
                                 && self.planning_source == PlanningSource::RuleProfile
                         });
-                        if render_saved_profile_row(ui, profile, selected) {
-                            profile_to_use = Some(profile.clone());
+                        match render_saved_profile_row(ui, profile, selected) {
+                            Some(SavedProfileAction::Use) => profile_to_use = Some(profile.clone()),
+                            Some(SavedProfileAction::Edit) => {
+                                profile_to_edit = Some(profile.clone());
+                            }
+                            None => {}
                         }
                         ui.add_space(ui::theme::spacing::XS);
                     }
@@ -1815,58 +1867,9 @@ impl SmartfolderApp {
             self.use_saved_profile(profile);
         }
 
-        ui.add_space(12.0);
-        ui::theme::widgets::card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Profile workspace").strong().size(18.0));
-            ui.label(
-                RichText::new("Edit a draft profile, save it locally, then use it from Organize.")
-                    .color(ui::theme::colors::secondary_text()),
-            );
-            ui.add_space(ui::theme::spacing::SM);
-            render_profile_workspace_status(ui, self.loaded_profile.as_ref());
-            ui.add_space(ui::theme::spacing::SM);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(ui::theme::widgets::primary_button("Save profile"))
-                    .clicked()
-                {
-                    self.save_profile_from_editor();
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Use Custom Rules"))
-                    .clicked()
-                {
-                    self.select_custom_rules_style();
-                    self.active_section = AppSection::Organize;
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Validate"))
-                    .clicked()
-                {
-                    self.validate_profile_editor();
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Import TOML..."))
-                    .clicked()
-                {
-                    self.import_rule_profile();
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Export TOML..."))
-                    .clicked()
-                {
-                    self.export_profile_from_editor();
-                }
-            });
-            ui.add_space(6.0);
-            render_safety_line(
-                ui,
-                "Custom Rules still use preview, conflict checks, and undo history before anything moves.",
-            );
-        });
-
-        ui.add_space(12.0);
-        self.render_profile_editor(ui);
+        if let Some(profile) = profile_to_edit {
+            self.edit_saved_profile(profile);
+        }
     }
 
     fn render_settings_screen(&mut self, ui: &mut egui::Ui) {
@@ -1948,7 +1951,12 @@ impl SmartfolderApp {
     fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
         ui::theme::widgets::card_frame().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Rule builder").strong().size(18.0));
+                ui.label(
+                    RichText::new("Rule builder")
+                        .strong()
+                        .size(18.0)
+                        .color(ui::theme::colors::heading_text()),
+                );
                 ui.label(
                     RichText::new("Rules run from top to bottom; first match wins.")
                         .color(ui::theme::colors::metadata_text()),
@@ -2060,6 +2068,97 @@ impl SmartfolderApp {
         });
     }
 
+    fn render_rules_workspace_window(&mut self, ctx: &egui::Context) {
+        if !self.show_rules_workspace {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("Profile workspace")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(980.0)
+            .default_height(680.0)
+            .min_width(760.0)
+            .min_height(520.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Build a custom rule profile")
+                        .strong()
+                        .size(20.0)
+                        .color(ui::theme::colors::heading_text()),
+                );
+                ui.label(
+                    RichText::new(
+                        "Save the profile locally, then use it from the Rules library or Organize flow.",
+                    )
+                    .color(ui::theme::colors::secondary_text()),
+                );
+                ui.add_space(ui::theme::spacing::SM);
+
+                egui::Frame::group(ui.style())
+                    .fill(ui::theme::colors::surface())
+                    .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+                    .rounding(egui::Rounding::same(8.0))
+                    .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
+                    .show(ui, |ui| {
+                        render_profile_workspace_status(ui, self.loaded_profile.as_ref());
+                        ui.add_space(ui::theme::spacing::SM);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add(ui::theme::widgets::primary_button("Save profile"))
+                                .clicked()
+                            {
+                                self.save_profile_from_editor();
+                            }
+                            if ui
+                                .add(ui::theme::widgets::secondary_button("Use Custom Rules"))
+                                .clicked()
+                            {
+                                self.select_custom_rules_style();
+                                self.active_section = AppSection::Organize;
+                                self.show_rules_workspace = false;
+                            }
+                            if ui
+                                .add(ui::theme::widgets::secondary_button("Validate"))
+                                .clicked()
+                            {
+                                self.validate_profile_editor();
+                            }
+                            if ui
+                                .add(ui::theme::widgets::secondary_button("Import TOML..."))
+                                .clicked()
+                            {
+                                self.import_rule_profile();
+                            }
+                            if ui
+                                .add(ui::theme::widgets::secondary_button("Export TOML..."))
+                                .clicked()
+                            {
+                                self.export_profile_from_editor();
+                            }
+                        });
+                        ui.add_space(ui::theme::spacing::XS);
+                        render_safety_line(
+                            ui,
+                            "Custom Rules still use preview, conflict checks, and undo history before anything moves.",
+                        );
+                    });
+
+                ui.add_space(ui::theme::spacing::MD);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.render_profile_editor(ui);
+                    });
+            });
+
+        if !open {
+            self.show_rules_workspace = false;
+        }
+    }
+
     fn apply_preview_action(&mut self, action: PreviewAction) {
         let Some(result) = &self.analysis_result else {
             return;
@@ -2160,6 +2259,8 @@ impl eframe::App for SmartfolderApp {
                     }
                 });
         });
+
+        self.render_rules_workspace_window(ctx);
 
         if let Some(action) = preview_action {
             self.apply_preview_action(action);
@@ -5597,6 +5698,12 @@ enum BuiltinRuleAction {
     Customize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SavedProfileAction {
+    Use,
+    Edit,
+}
+
 fn builtin_library_items() -> [(BuiltInMode, &'static str, &'static str, &'static str); 3] {
     [
         (
@@ -5707,8 +5814,8 @@ fn render_saved_profile_row(
     ui: &mut egui::Ui,
     profile: &LoadedRuleProfile,
     selected: bool,
-) -> bool {
-    let mut use_profile = false;
+) -> Option<SavedProfileAction> {
+    let mut action = None;
     egui::Frame::group(ui.style())
         .fill(if selected {
             ui::theme::colors::hover_control()
@@ -5729,7 +5836,7 @@ fn render_saved_profile_row(
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - 150.0).max(260.0), 0.0),
+                    egui::vec2((ui.available_width() - 280.0).max(260.0), 0.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.horizontal_wrapped(|ui| {
@@ -5782,12 +5889,18 @@ fn render_saved_profile_row(
                         .add(ui::theme::widgets::secondary_button("Use"))
                         .clicked()
                     {
-                        use_profile = true;
+                        action = Some(SavedProfileAction::Use);
+                    }
+                    if ui
+                        .add(ui::theme::widgets::secondary_button("Edit"))
+                        .clicked()
+                    {
+                        action = Some(SavedProfileAction::Edit);
                     }
                 });
             });
         });
-    use_profile
+    action
 }
 
 fn render_profile_workspace_status(ui: &mut egui::Ui, loaded_profile: Option<&LoadedRuleProfile>) {

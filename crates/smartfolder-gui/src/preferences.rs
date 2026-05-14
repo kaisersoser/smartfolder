@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use smartfolder_core::ai::AiSettings;
 use smartfolder_core::model::BuiltInMode;
 use smartfolder_core::storage::{ensure_config_dir, gui_preferences_path};
 
@@ -30,6 +31,8 @@ pub(crate) struct GuiPreferences {
     pub(crate) last_style: StylePreference,
     /// Whether advanced wizard controls should default open.
     pub(crate) advanced_options_open: bool,
+    /// Optional AI assistance settings.
+    pub(crate) ai: AiSettings,
 }
 
 impl Default for GuiPreferences {
@@ -40,6 +43,7 @@ impl Default for GuiPreferences {
             recent_folders: Vec::new(),
             last_style: StylePreference::TypeYear,
             advanced_options_open: false,
+            ai: AiSettings::default(),
         }
     }
 }

@@ -58,6 +58,7 @@
 //! - [`storage`]: Persistent storage locations for journals and plans.
 //! - [`error`]: Error types used throughout the crate.
 
+pub mod ai;
 pub mod apply;
 pub mod error;
 pub mod model;

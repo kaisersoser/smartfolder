@@ -62,6 +62,9 @@ pub enum SmartfolderError {
 
     #[error("invalid rule profile: {message}")]
     InvalidRuleProfile { message: String },
+
+    #[error("AI provider error: {message}")]
+    AiProvider { message: String },
 }
 
 impl SmartfolderError {

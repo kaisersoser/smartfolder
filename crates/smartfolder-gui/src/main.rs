@@ -41,12 +41,16 @@ use std::time::Duration;
 
 use chrono::{TimeDelta, Utc};
 use eframe::egui::{self, Color32, RichText};
+use smartfolder_core::ai::{
+    validate_ai_profile_draft, AiFolderAnalysis, AiFolderContext, AiProfileValidation,
+    AiProviderState, AiProviderStatus, AiRuleExplanation, AiRuleProfileDraft, OllamaClient,
+};
 use smartfolder_core::apply::{
     apply_stored_plan_with_progress, ApplyOptions, ApplySummary, StoredApplyProgress,
 };
 use smartfolder_core::model::{
-    BuiltInMode, ConflictState, OperationStatus, PlanMode, PlanOperation, PlanSummary,
-    TransactionStatus,
+    BuiltInMode, ConflictState, FileInventoryRecord, OperationStatus, PlanMode, PlanOperation,
+    PlanSummary, TransactionStatus,
 };
 use smartfolder_core::planner::{
     generate_plan_to_store_with_progress_and_cancellation, PlanGenerationProgress, PlanOptions,
@@ -67,6 +71,8 @@ use preferences::{GuiPreferences, MotionPreference, StylePreference, ThemePrefer
 type AnalysisMessage = std::result::Result<AnalysisOutput, String>;
 type ApplyMessage = std::result::Result<ApplyOutput, String>;
 type UndoMessage = std::result::Result<UndoOutput, String>;
+type AiStatusMessage = std::result::Result<AiProviderStatus, String>;
+type AiTaskMessage = std::result::Result<AiTaskOutput, String>;
 
 const PREVIEW_PAGE_SIZE: usize = 100;
 const TRANSACTION_DETAIL_ROW_LIMIT: usize = 100;
@@ -330,6 +336,15 @@ struct SmartfolderApp {
     apply_result: Option<ApplyOutput>,
     show_apply_confirmation: bool,
     undo_receiver: Option<Receiver<UndoMessage>>,
+    ai_status_receiver: Option<Receiver<AiStatusMessage>>,
+    ai_status: Option<AiProviderStatus>,
+    ai_task_receiver: Option<Receiver<AiTaskMessage>>,
+    ai_task: Option<AiTaskKind>,
+    ai_analysis: Option<AiFolderAnalysis>,
+    ai_draft_prompt: String,
+    show_ai_draft_prompt: bool,
+    ai_draft_result: Option<AiDraftProfileResult>,
+    ai_rule_explanation: Option<AiRuleExplanation>,
     undo_result: Option<UndoOutput>,
     transaction_rows: Vec<TransactionRow>,
     transaction_message: Option<String>,
@@ -391,6 +406,15 @@ impl SmartfolderApp {
             apply_result: None,
             show_apply_confirmation: false,
             undo_receiver: None,
+            ai_status_receiver: None,
+            ai_status: None,
+            ai_task_receiver: None,
+            ai_task: None,
+            ai_analysis: None,
+            ai_draft_prompt: String::new(),
+            show_ai_draft_prompt: false,
+            ai_draft_result: None,
+            ai_rule_explanation: None,
             undo_result: None,
             transaction_rows,
             transaction_message,
@@ -416,6 +440,22 @@ impl SmartfolderApp {
 
     fn is_undoing(&self) -> bool {
         self.undo_receiver.is_some()
+    }
+
+    fn is_checking_ai_status(&self) -> bool {
+        self.ai_status_receiver.is_some()
+    }
+
+    fn is_running_ai_task(&self) -> bool {
+        self.ai_task_receiver.is_some()
+    }
+
+    fn ai_is_available(&self) -> bool {
+        self.preferences.ai.enabled
+            && self
+                .ai_status
+                .as_ref()
+                .is_some_and(|status| status.available)
     }
 
     fn has_selected_root(&self) -> bool {
@@ -656,6 +696,9 @@ impl SmartfolderApp {
             );
             let _ = sender.send(AnalysisEvent::Finished(result));
         });
+        self.ai_analysis = None;
+        self.ai_rule_explanation = None;
+        self.ai_draft_result = None;
     }
 
     fn cancel_analysis(&mut self) {
@@ -704,6 +747,271 @@ impl SmartfolderApp {
             Err(message) => {
                 self.maintenance_message = None;
                 self.error_message = Some(message);
+            }
+        }
+    }
+
+    fn start_ai_status_check(&mut self) {
+        if !self.preferences.ai.enabled {
+            self.ai_status = Some(AiProviderStatus {
+                available: false,
+                state: AiProviderState::Disabled,
+                selected_model: None,
+                models: Vec::new(),
+                message: "AI assistance is disabled.".to_string(),
+            });
+            return;
+        }
+
+        let settings = self.preferences.ai.clone();
+        let (sender, receiver) = mpsc::channel::<AiStatusMessage>();
+        self.ai_status_receiver = Some(receiver);
+        self.error_message = None;
+
+        std::thread::spawn(move || {
+            let timeout = settings.timeout();
+            let client = OllamaClient::new(settings.endpoint, timeout);
+            let status = client.check_status(settings.selected_model.as_deref());
+            let _ = sender.send(Ok(status));
+        });
+    }
+
+    fn poll_ai_status(&mut self) {
+        let Some(receiver) = &self.ai_status_receiver else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(message) => {
+                self.ai_status_receiver = None;
+                match message {
+                    Ok(status) => {
+                        if status.available
+                            && self.preferences.ai.selected_model.is_none()
+                            && status.selected_model.is_some()
+                        {
+                            self.preferences
+                                .ai
+                                .selected_model
+                                .clone_from(&status.selected_model);
+                            self.save_preferences_quietly();
+                        }
+                        self.maintenance_message = Some(status.message.clone());
+                        self.ai_status = Some(status);
+                        self.error_message = None;
+                    }
+                    Err(message) => {
+                        self.ai_status = Some(AiProviderStatus {
+                            available: false,
+                            state: AiProviderState::RequestFailed,
+                            selected_model: None,
+                            models: Vec::new(),
+                            message: message.clone(),
+                        });
+                        self.error_message = Some(message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.ai_status_receiver = None;
+                self.ai_status = Some(AiProviderStatus {
+                    available: false,
+                    state: AiProviderState::RequestFailed,
+                    selected_model: None,
+                    models: Vec::new(),
+                    message: "The AI status worker stopped unexpectedly.".to_string(),
+                });
+                self.error_message = Some("The AI status worker stopped unexpectedly.".to_string());
+            }
+        }
+    }
+
+    fn ai_model_for_task(&self) -> std::result::Result<String, String> {
+        if !self.ai_is_available() {
+            return Err(
+                "AI assistance is not ready. Test the Ollama connection in Settings first."
+                    .to_string(),
+            );
+        }
+        self.ai_status
+            .as_ref()
+            .and_then(|status| status.selected_model.clone())
+            .or_else(|| self.preferences.ai.selected_model.clone())
+            .ok_or_else(|| "Select an Ollama model in Settings first.".to_string())
+    }
+
+    fn start_ai_folder_analysis(&mut self) {
+        let Some(result) = &self.analysis_result else {
+            self.error_message = Some("Run Analyze Folder before using AI Assist.".to_string());
+            return;
+        };
+        let model = match self.ai_model_for_task() {
+            Ok(model) => model,
+            Err(message) => {
+                self.error_message = Some(message);
+                return;
+            }
+        };
+        let endpoint = self.preferences.ai.endpoint.clone();
+        let timeout = self.preferences.ai.timeout();
+        let content_inspection_enabled = self.preferences.ai.content_inspection_enabled;
+        let session_id = result.session_id.clone();
+        let root = result.root.clone();
+        let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
+        self.ai_task_receiver = Some(receiver);
+        self.ai_task = Some(AiTaskKind::FolderAnalysis);
+        self.ai_analysis = None;
+        self.error_message = None;
+
+        std::thread::spawn(move || {
+            let message = run_ai_folder_analysis(
+                &endpoint,
+                timeout,
+                &model,
+                &session_id,
+                &root,
+                content_inspection_enabled,
+            );
+            let _ = sender.send(message);
+        });
+    }
+
+    fn start_ai_draft_profile(&mut self) {
+        let prompt = self.ai_draft_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.error_message =
+                Some("Describe the rule profile you want AI to draft.".to_string());
+            return;
+        }
+        let Some(result) = &self.analysis_result else {
+            self.error_message =
+                Some("Run Analyze Folder before building rules with AI.".to_string());
+            return;
+        };
+        let model = match self.ai_model_for_task() {
+            Ok(model) => model,
+            Err(message) => {
+                self.error_message = Some(message);
+                return;
+            }
+        };
+        let endpoint = self.preferences.ai.endpoint.clone();
+        let timeout = self.preferences.ai.timeout();
+        let content_inspection_enabled = self.preferences.ai.content_inspection_enabled;
+        let session_id = result.session_id.clone();
+        let root = result.root.clone();
+        let existing_profile = self.profile_editor.to_profile().ok();
+        let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
+        self.ai_task_receiver = Some(receiver);
+        self.ai_task = Some(AiTaskKind::DraftProfile);
+        self.ai_draft_result = None;
+        self.error_message = None;
+
+        std::thread::spawn(move || {
+            let message = run_ai_profile_draft(
+                &endpoint,
+                timeout,
+                &model,
+                &session_id,
+                &root,
+                content_inspection_enabled,
+                &prompt,
+                existing_profile.as_ref(),
+            );
+            let _ = sender.send(message);
+        });
+    }
+
+    fn start_ai_rule_explanation(&mut self) {
+        let profile = match self.profile_editor.to_profile() {
+            Ok(profile) => profile,
+            Err(message) => {
+                self.error_message = Some(format!(
+                    "Validate the profile before explaining it: {message}"
+                ));
+                return;
+            }
+        };
+        let Some(result) = &self.analysis_result else {
+            self.error_message =
+                Some("Run Analyze Folder before explaining rules with AI.".to_string());
+            return;
+        };
+        let model = match self.ai_model_for_task() {
+            Ok(model) => model,
+            Err(message) => {
+                self.error_message = Some(message);
+                return;
+            }
+        };
+        let endpoint = self.preferences.ai.endpoint.clone();
+        let timeout = self.preferences.ai.timeout();
+        let content_inspection_enabled = self.preferences.ai.content_inspection_enabled;
+        let session_id = result.session_id.clone();
+        let root = result.root.clone();
+        let (sender, receiver) = mpsc::channel::<AiTaskMessage>();
+        self.ai_task_receiver = Some(receiver);
+        self.ai_task = Some(AiTaskKind::RuleExplanation);
+        self.error_message = None;
+
+        std::thread::spawn(move || {
+            let message = run_ai_rule_explanation(
+                &endpoint,
+                timeout,
+                &model,
+                &session_id,
+                &root,
+                content_inspection_enabled,
+                &profile,
+            );
+            let _ = sender.send(message);
+        });
+    }
+
+    fn poll_ai_task(&mut self) {
+        let Some(receiver) = &self.ai_task_receiver else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(message) => {
+                self.ai_task_receiver = None;
+                self.ai_task = None;
+                match message {
+                    Ok(AiTaskOutput::FolderAnalysis(analysis)) => {
+                        self.ai_analysis = Some(analysis);
+                        self.maintenance_message =
+                            Some("AI folder analysis completed.".to_string());
+                        self.error_message = None;
+                    }
+                    Ok(AiTaskOutput::DraftProfile(result)) => {
+                        if let Some(profile) = &result.validation.profile {
+                            self.profile_editor = ProfileEditorState::from_profile(profile);
+                            self.loaded_profile = None;
+                        }
+                        let message = ai_draft_summary_message(&result.validation);
+                        self.ai_draft_result = Some(result);
+                        self.maintenance_message = Some(message);
+                        self.error_message = None;
+                    }
+                    Ok(AiTaskOutput::RuleExplanation(explanation)) => {
+                        self.ai_rule_explanation = Some(explanation);
+                        self.maintenance_message =
+                            Some("AI rule explanation completed.".to_string());
+                        self.error_message = None;
+                    }
+                    Err(message) => {
+                        self.error_message = Some(message);
+                        self.maintenance_message = None;
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.ai_task_receiver = None;
+                self.ai_task = None;
+                self.error_message = Some("The AI worker stopped unexpectedly.".to_string());
             }
         }
     }
@@ -1423,6 +1731,7 @@ impl SmartfolderApp {
         );
         self.render_status_messages(ui);
         ui.add_space(10.0);
+        let mut start_ai_folder_analysis_requested = false;
 
         let mut requested_step = None;
         render_organize_step_indicator(
@@ -1699,6 +2008,18 @@ impl SmartfolderApp {
 
             if self.organize_step == OrganizeStep::Preview {
                 ui.add_space(10.0);
+                if self.ai_is_available() {
+                    if render_ai_assist_panel(
+                        ui,
+                        self.ai_analysis.as_ref(),
+                        self.ai_task,
+                        self.is_running_ai_task(),
+                        self.preferences.ai.content_inspection_enabled,
+                    ) {
+                        start_ai_folder_analysis_requested = true;
+                    }
+                    ui.add_space(10.0);
+                }
                 render_preview_examples(ui, result);
 
                 ui.add_space(8.0);
@@ -1803,6 +2124,9 @@ impl SmartfolderApp {
                 self.show_detailed_preview = show_window;
             }
         }
+        if start_ai_folder_analysis_requested {
+            self.start_ai_folder_analysis();
+        }
     }
 
     fn render_activity_screen(
@@ -1903,6 +2227,17 @@ impl SmartfolderApp {
                 {
                     self.show_rules_workspace = true;
                 }
+                if self.ai_is_available()
+                    && ui
+                        .add(ui::theme::widgets::secondary_button("Build with AI"))
+                        .clicked()
+                {
+                    self.show_rules_workspace = true;
+                    self.show_ai_draft_prompt = true;
+                    self.maintenance_message =
+                        Some("Describe the rule profile you want AI to draft.".to_string());
+                    self.error_message = None;
+                }
             });
             ui.add_space(ui::theme::spacing::SM);
 
@@ -1994,7 +2329,37 @@ impl SmartfolderApp {
                 );
 
                 if preferences_changed {
+                    self.ai_status = None;
                     self.save_preferences_with_message();
+                }
+
+                ui.add_space(ui::theme::spacing::MD);
+                let mut ai_preferences_changed = false;
+                let mut test_ai_connection = false;
+                let checking_ai_status = self.is_checking_ai_status();
+                render_settings_section_panel(
+                    ui,
+                    "AI assistance",
+                    "Optional Ollama-powered help for folder analysis and rule drafting.",
+                    |ui| {
+                        let action = render_ai_preferences(
+                            ui,
+                            &mut self.preferences,
+                            self.ai_status.as_ref(),
+                            checking_ai_status,
+                        );
+                        ai_preferences_changed |= action.changed;
+                        test_ai_connection |= action.test_connection;
+                    },
+                );
+
+                if ai_preferences_changed {
+                    self.ai_status = None;
+                    self.save_preferences_with_message();
+                }
+
+                if test_ai_connection {
+                    self.start_ai_status_check();
                 }
 
                 ui.add_space(ui::theme::spacing::MD);
@@ -2086,6 +2451,10 @@ impl SmartfolderApp {
             .min_height(520.0)
             .show(ctx, |ui| {
                 self.render_profile_workspace_toolbar(ui);
+                if self.show_ai_draft_prompt && self.ai_is_available() {
+                    ui.add_space(ui::theme::spacing::SM);
+                    self.render_ai_rule_builder_panel(ui);
+                }
 
                 ui.add_space(ui::theme::spacing::SM);
                 egui::ScrollArea::vertical()
@@ -2164,6 +2533,93 @@ impl SmartfolderApp {
             {
                 self.export_profile_from_editor();
             }
+            if self.ai_is_available() {
+                if ui
+                    .add(ui::theme::widgets::compact_secondary_button(
+                        "Build with AI",
+                    ))
+                    .clicked()
+                {
+                    self.show_ai_draft_prompt = !self.show_ai_draft_prompt;
+                }
+                if ui
+                    .add_enabled(
+                        !self.is_running_ai_task(),
+                        ui::theme::widgets::compact_secondary_button("Explain"),
+                    )
+                    .clicked()
+                {
+                    self.show_ai_draft_prompt = true;
+                    self.start_ai_rule_explanation();
+                }
+            }
+        });
+    }
+
+    fn render_ai_rule_builder_panel(&mut self, ui: &mut egui::Ui) {
+        settings_note_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("Build rules with AI")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                render_status_chip(
+                    ui,
+                    "Requires scanned folder context",
+                    ui::theme::colors::info(),
+                    ui::theme::colors::info_bg(),
+                );
+            });
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Describe the organization you want. AI drafts deterministic rules, then smartfolder validates them before loading the editor.",
+                    )
+                    .color(ui::theme::colors::secondary_text()),
+                )
+                .wrap(),
+            );
+            ui.add_space(ui::theme::spacing::SM);
+            ui.add_sized(
+                [ui.available_width(), 72.0],
+                egui::TextEdit::multiline(&mut self.ai_draft_prompt)
+                    .hint_text("e.g. Sort invoices into Documents/Invoices by year, and keep screenshots by month."),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.is_running_ai_task(),
+                        ui::theme::widgets::primary_button("Draft profile"),
+                    )
+                    .clicked()
+                {
+                    self.start_ai_draft_profile();
+                }
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Hide"))
+                    .clicked()
+                {
+                    self.show_ai_draft_prompt = false;
+                }
+                if self.ai_task == Some(AiTaskKind::DraftProfile) && self.is_running_ai_task() {
+                    ui.label(
+                        RichText::new("AI is drafting and validating rules.")
+                            .color(ui::theme::colors::secondary_text()),
+                    );
+                }
+            });
+
+            if let Some(result) = &self.ai_draft_result {
+                ui.add_space(ui::theme::spacing::SM);
+                render_ai_draft_result(ui, result);
+            }
+
+            if let Some(explanation) = &self.ai_rule_explanation {
+                ui.add_space(ui::theme::spacing::SM);
+                render_ai_rule_explanation(ui, explanation);
+            }
         });
     }
 
@@ -2225,6 +2681,8 @@ impl eframe::App for SmartfolderApp {
         self.poll_analysis();
         self.poll_apply();
         self.poll_undo();
+        self.poll_ai_status();
+        self.poll_ai_task();
         self.process_keyboard_shortcuts(ctx);
         self.process_dropped_folders(ctx);
         ui::theme::apply_visual_theme(
@@ -2232,7 +2690,12 @@ impl eframe::App for SmartfolderApp {
             self.preferences.visual_theme(frame.info().system_theme),
         );
 
-        if self.is_analyzing() || self.is_applying() || self.is_undoing() {
+        if self.is_analyzing()
+            || self.is_applying()
+            || self.is_undoing()
+            || self.is_checking_ai_status()
+            || self.is_running_ai_task()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
@@ -2911,6 +3374,27 @@ struct AnalysisOutput {
     preview_rows: Vec<PreviewRow>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiTaskKind {
+    FolderAnalysis,
+    DraftProfile,
+    RuleExplanation,
+}
+
+#[derive(Debug, Clone)]
+enum AiTaskOutput {
+    FolderAnalysis(AiFolderAnalysis),
+    DraftProfile(AiDraftProfileResult),
+    RuleExplanation(AiRuleExplanation),
+}
+
+#[derive(Debug, Clone)]
+struct AiDraftProfileResult {
+    draft: AiRuleProfileDraft,
+    validation: AiProfileValidation,
+    raw_json: String,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct PreviewCounts {
     all: usize,
@@ -3109,6 +3593,108 @@ fn analyze_root(
         preview_total_rows: preview_page.total_rows,
         preview_rows: preview_page.rows,
     })
+}
+
+fn run_ai_folder_analysis(
+    endpoint: &str,
+    timeout: Duration,
+    model: &str,
+    session_id: &str,
+    root: &Path,
+    content_inspection_enabled: bool,
+) -> AiTaskMessage {
+    let context = load_ai_folder_context(session_id, root, content_inspection_enabled)?;
+    let client = OllamaClient::new(endpoint, timeout);
+    client
+        .analyze_folder(model, &context)
+        .map(AiTaskOutput::FolderAnalysis)
+        .map_err(|error| format!("AI folder analysis failed: {error}"))
+}
+
+fn run_ai_profile_draft(
+    endpoint: &str,
+    timeout: Duration,
+    model: &str,
+    session_id: &str,
+    root: &Path,
+    content_inspection_enabled: bool,
+    prompt: &str,
+    existing_profile: Option<&RuleProfile>,
+) -> AiTaskMessage {
+    let context = load_ai_folder_context(session_id, root, content_inspection_enabled)?;
+    let records = load_ai_context_records(session_id)?;
+    let client = OllamaClient::new(endpoint, timeout);
+    let draft = client
+        .draft_profile(model, prompt, &context, existing_profile)
+        .map_err(|error| format!("AI profile draft failed: {error}"))?;
+    let raw_json = serde_json::to_string_pretty(&draft)
+        .map_err(|error| format!("Failed to serialize AI draft: {error}"))?;
+    let validation = validate_ai_profile_draft(draft.clone(), &records);
+    Ok(AiTaskOutput::DraftProfile(AiDraftProfileResult {
+        draft,
+        validation,
+        raw_json,
+    }))
+}
+
+fn run_ai_rule_explanation(
+    endpoint: &str,
+    timeout: Duration,
+    model: &str,
+    session_id: &str,
+    root: &Path,
+    content_inspection_enabled: bool,
+    profile: &RuleProfile,
+) -> AiTaskMessage {
+    let context = load_ai_folder_context(session_id, root, content_inspection_enabled)?;
+    let client = OllamaClient::new(endpoint, timeout);
+    client
+        .explain_profile(model, profile, &context)
+        .map(AiTaskOutput::RuleExplanation)
+        .map_err(|error| format!("AI rule explanation failed: {error}"))
+}
+
+fn load_ai_folder_context(
+    session_id: &str,
+    root: &Path,
+    content_inspection_enabled: bool,
+) -> std::result::Result<AiFolderContext, String> {
+    let records = load_ai_context_records(session_id)?;
+    Ok(AiFolderContext::from_records_with_content_mode(
+        root,
+        &records,
+        content_inspection_enabled,
+    ))
+}
+
+fn load_ai_context_records(
+    session_id: &str,
+) -> std::result::Result<Vec<FileInventoryRecord>, String> {
+    let store = SqliteSessionStore::open_default()
+        .map_err(|error| format!("Failed to open session store: {error}"))?;
+    store
+        .scan_records_page(session_id, 0, 500)
+        .map_err(|error| format!("Failed to load AI folder context: {error}"))
+}
+
+fn ai_draft_summary_message(validation: &AiProfileValidation) -> String {
+    if validation.is_usable() {
+        if validation.warnings.is_empty() {
+            "AI draft profile is valid and loaded into the editor.".to_string()
+        } else {
+            format!(
+                "AI draft profile is loaded with {} warning{}.",
+                validation.warnings.len(),
+                plural(validation.warnings.len())
+            )
+        }
+    } else {
+        format!(
+            "AI draft profile failed validation with {} error{}.",
+            validation.errors.len(),
+            plural(validation.errors.len())
+        )
+    }
 }
 
 fn load_preview_examples_from_store(
@@ -3611,6 +4197,217 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
             }
         }
     });
+}
+
+fn render_ai_assist_panel(
+    ui: &mut egui::Ui,
+    analysis: Option<&AiFolderAnalysis>,
+    active_task: Option<AiTaskKind>,
+    busy: bool,
+    content_inspection_enabled: bool,
+) -> bool {
+    let mut start_requested = false;
+    let aligned_width = preview_aligned_content_width(ui);
+    ui.scope(|ui| {
+        ui.set_max_width(aligned_width);
+        settings_note_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("AI Assist")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                render_status_chip(
+                    ui,
+                    if content_inspection_enabled {
+                        "Content inspection on"
+                    } else {
+                        "Metadata only"
+                    },
+                    if content_inspection_enabled {
+                        ui::theme::colors::warning()
+                    } else {
+                        ui::theme::colors::info()
+                    },
+                    if content_inspection_enabled {
+                        ui::theme::colors::warning_bg()
+                    } else {
+                        ui::theme::colors::info_bg()
+                    },
+                );
+                if ui
+                    .add_enabled(
+                        !busy,
+                        ui::theme::widgets::secondary_button("Analyze with AI"),
+                    )
+                    .clicked()
+                {
+                    start_requested = true;
+                }
+            });
+            if active_task == Some(AiTaskKind::FolderAnalysis) && busy {
+                ui.label(
+                    RichText::new("AI is reviewing the scanned folder context.")
+                        .color(ui::theme::colors::secondary_text()),
+                );
+                return;
+            }
+            if let Some(analysis) = analysis {
+                ui.add_space(ui::theme::spacing::SM);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&analysis.summary)
+                            .color(ui::theme::colors::primary_text()),
+                    )
+                    .wrap(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&analysis.recommended_strategy)
+                            .color(ui::theme::colors::secondary_text()),
+                    )
+                    .wrap(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    render_status_chip(
+                        ui,
+                        ai_confidence_label(analysis.confidence),
+                        ui::theme::colors::info(),
+                        ui::theme::colors::info_bg(),
+                    );
+                    render_status_chip(
+                        ui,
+                        &format!("{} pattern{}", analysis.patterns.len(), plural(analysis.patterns.len())),
+                        ui::theme::colors::success(),
+                        ui::theme::colors::success_bg(),
+                    );
+                    render_status_chip(
+                        ui,
+                        &format!("{} risk{}", analysis.risks.len(), plural(analysis.risks.len())),
+                        ui::theme::colors::warning(),
+                        ui::theme::colors::warning_bg(),
+                    );
+                });
+                if !analysis.patterns.is_empty() || !analysis.risks.is_empty() {
+                    ui.add_space(ui::theme::spacing::XS);
+                    egui::CollapsingHeader::new("AI findings")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            for finding in analysis.patterns.iter().chain(analysis.risks.iter()) {
+                                ui.label(
+                                    RichText::new(&finding.title)
+                                        .strong()
+                                        .color(ui::theme::colors::heading_text()),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&finding.detail)
+                                            .color(ui::theme::colors::secondary_text()),
+                                    )
+                                    .wrap(),
+                                );
+                                ui.add_space(ui::theme::spacing::XS);
+                            }
+                        });
+                }
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Optional. AI uses the completed deterministic scan and never moves files directly.",
+                        )
+                        .color(ui::theme::colors::secondary_text()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
+    });
+    start_requested
+}
+
+fn render_ai_draft_result(ui: &mut egui::Ui, result: &AiDraftProfileResult) {
+    ui.horizontal_wrapped(|ui| {
+        if result.validation.is_usable() {
+            render_status_chip(
+                ui,
+                "Draft loaded",
+                ui::theme::colors::success(),
+                ui::theme::colors::success_bg(),
+            );
+        } else {
+            render_status_chip(
+                ui,
+                "Validation failed",
+                ui::theme::colors::error(),
+                ui::theme::colors::error_bg(),
+            );
+        }
+        if let Some(rationale) = &result.draft.rationale {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(rationale).color(ui::theme::colors::secondary_text()),
+                )
+                .wrap(),
+            );
+        }
+    });
+
+    for warning in &result.validation.warnings {
+        ui.label(RichText::new(format!("Warning: {warning}")).color(ui::theme::colors::warning()));
+    }
+    for error in &result.validation.errors {
+        ui.label(RichText::new(format!("Error: {error}")).color(ui::theme::colors::error()));
+    }
+    egui::CollapsingHeader::new("Raw AI draft JSON")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut raw = result.raw_json.clone();
+            ui.add_sized(
+                [ui.available_width(), 140.0],
+                egui::TextEdit::multiline(&mut raw)
+                    .font(egui::TextStyle::Monospace)
+                    .interactive(false),
+            );
+        });
+}
+
+fn render_ai_rule_explanation(ui: &mut egui::Ui, explanation: &AiRuleExplanation) {
+    ui.label(
+        RichText::new("AI rule explanation")
+            .strong()
+            .color(ui::theme::colors::heading_text()),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(&explanation.summary).color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    if !explanation.rule_order.is_empty() {
+        egui::CollapsingHeader::new("Rule order")
+            .default_open(false)
+            .show(ui, |ui| {
+                for rule in &explanation.rule_order {
+                    ui.label(
+                        RichText::new(&rule.rule_name)
+                            .strong()
+                            .color(ui::theme::colors::primary_text()),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&rule.explanation)
+                                .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
+                }
+            });
+    }
+    for warning in &explanation.warnings {
+        ui.label(RichText::new(format!("Warning: {warning}")).color(ui::theme::colors::warning()));
+    }
 }
 
 fn render_preview_metric_card(
@@ -5682,6 +6479,261 @@ fn render_appearance_preferences(ui: &mut egui::Ui, preferences: &mut GuiPrefere
         });
 
     changed
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AiPreferencesAction {
+    changed: bool,
+    test_connection: bool,
+}
+
+fn render_ai_preferences(
+    ui: &mut egui::Ui,
+    preferences: &mut GuiPreferences,
+    status: Option<&AiProviderStatus>,
+    checking: bool,
+) -> AiPreferencesAction {
+    let mut action = AiPreferencesAction::default();
+
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "AI stays off until Ollama is reachable, a model is selected, and a structured readiness check succeeds.",
+            )
+            .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
+
+    ui.horizontal_wrapped(|ui| {
+        action.changed |= ui
+            .checkbox(&mut preferences.ai.enabled, "Enable AI assistance")
+            .changed();
+        render_ai_status_chip(ui, preferences.ai.enabled, status, checking);
+    });
+
+    ui.add_space(ui::theme::spacing::SM);
+    egui::Grid::new("ai-preferences-grid")
+        .num_columns(2)
+        .spacing([ui::theme::spacing::LG, ui::theme::spacing::SM])
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new("Provider")
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            ui.label(RichText::new("Ollama").color(ui::theme::colors::secondary_text()));
+            ui.end_row();
+
+            ui.label(
+                RichText::new("Endpoint")
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            action.changed |= ui
+                .add_enabled(
+                    preferences.ai.enabled,
+                    egui::TextEdit::singleline(&mut preferences.ai.endpoint)
+                        .desired_width(260.0)
+                        .hint_text("http://localhost:11434"),
+                )
+                .changed();
+            ui.end_row();
+
+            ui.label(
+                RichText::new("Model")
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            if let Some(status) = status {
+                if status.models.is_empty() {
+                    ui.label(
+                        RichText::new("No installed models found")
+                            .color(ui::theme::colors::metadata_text()),
+                    );
+                } else {
+                    let selected = preferences
+                        .ai
+                        .selected_model
+                        .clone()
+                        .or_else(|| status.selected_model.clone())
+                        .unwrap_or_else(|| "Select model".to_string());
+                    egui::ComboBox::from_id_source("ai-model-preference")
+                        .width(260.0)
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for model in &status.models {
+                                action.changed |= ui
+                                    .selectable_value(
+                                        &mut preferences.ai.selected_model,
+                                        Some(model.clone()),
+                                        model,
+                                    )
+                                    .changed();
+                            }
+                        });
+                }
+            } else {
+                action.changed |= ui
+                    .add_enabled(
+                        preferences.ai.enabled,
+                        egui::TextEdit::singleline(
+                            preferences
+                                .ai
+                                .selected_model
+                                .get_or_insert_with(String::new),
+                        )
+                        .desired_width(260.0)
+                        .hint_text("selected after Test connection"),
+                    )
+                    .changed();
+                if preferences.ai.selected_model.as_deref() == Some("") {
+                    preferences.ai.selected_model = None;
+                }
+            }
+            ui.end_row();
+
+            ui.label(
+                RichText::new("Timeout")
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            ui.horizontal(|ui| {
+                action.changed |= ui
+                    .add_enabled(
+                        preferences.ai.enabled,
+                        egui::DragValue::new(&mut preferences.ai.timeout_seconds)
+                            .range(5..=300)
+                            .speed(1.0),
+                    )
+                    .changed();
+                ui.label(
+                    RichText::new("seconds")
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            });
+            ui.end_row();
+        });
+
+    ui.add_space(ui::theme::spacing::SM);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                preferences.ai.enabled && !checking,
+                ui::theme::widgets::secondary_button(if checking {
+                    "Testing..."
+                } else {
+                    "Test connection"
+                }),
+            )
+            .clicked()
+        {
+            action.test_connection = true;
+        }
+
+        if let Some(status) = status {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&status.message)
+                        .size(ui::theme::typography::CAPTION)
+                        .color(if status.available {
+                            ui::theme::colors::success()
+                        } else {
+                            ui::theme::colors::metadata_text()
+                        }),
+                )
+                .wrap(),
+            );
+        }
+    });
+
+    ui.add_space(ui::theme::spacing::SM);
+    settings_note_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let changed = ui
+            .add_enabled(
+                preferences.ai.enabled,
+                egui::Checkbox::new(
+                    &mut preferences.ai.content_inspection_enabled,
+                    "Allow AI to inspect sampled text file contents",
+                ),
+            )
+            .changed();
+        action.changed |= changed;
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Off by default. When enabled, only sampled text-like file contents are used; OCR, media, and broad binary extraction are out of scope for v2.2.",
+                )
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+            )
+            .wrap(),
+        );
+    });
+
+    action
+}
+
+fn render_ai_status_chip(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    status: Option<&AiProviderStatus>,
+    checking: bool,
+) {
+    let (label, text_color, fill) = if !enabled {
+        (
+            "Disabled",
+            ui::theme::colors::metadata_text(),
+            ui::theme::colors::subtle_surface(),
+        )
+    } else if checking {
+        (
+            "Checking",
+            ui::theme::colors::info(),
+            ui::theme::colors::info_bg(),
+        )
+    } else {
+        match status.map(|status| status.state) {
+            Some(AiProviderState::Ready) => (
+                "Ready",
+                ui::theme::colors::success(),
+                ui::theme::colors::success_bg(),
+            ),
+            Some(AiProviderState::NoModels) => (
+                "No models",
+                ui::theme::colors::warning(),
+                ui::theme::colors::warning_bg(),
+            ),
+            Some(AiProviderState::ModelMissing) => (
+                "Model missing",
+                ui::theme::colors::warning(),
+                ui::theme::colors::warning_bg(),
+            ),
+            Some(AiProviderState::EndpointUnavailable | AiProviderState::RequestFailed) => (
+                "Unavailable",
+                ui::theme::colors::error(),
+                ui::theme::colors::error_bg(),
+            ),
+            Some(AiProviderState::Disabled) | None => (
+                "Not tested",
+                ui::theme::colors::metadata_text(),
+                ui::theme::colors::subtle_surface(),
+            ),
+        }
+    };
+
+    render_status_chip(ui, label, text_color, fill);
+}
+
+fn ai_confidence_label(confidence: smartfolder_core::ai::AiConfidence) -> &'static str {
+    match confidence {
+        smartfolder_core::ai::AiConfidence::Low => "Low confidence",
+        smartfolder_core::ai::AiConfidence::Medium => "Medium confidence",
+        smartfolder_core::ai::AiConfidence::High => "High confidence",
+    }
 }
 
 fn render_explorer_integration_settings(ui: &mut egui::Ui) {

@@ -2414,8 +2414,8 @@ impl SmartfolderApp {
         ui.add_space(ui::theme::spacing::MD);
 
         let activity_scope = self.active_root().map_or_else(
-            || "Showing recorded activity from all folders on this device.".to_string(),
-            |root| format!("Showing activity for {}.", folder_name_label(&root)),
+            || "Activity for all folders".to_string(),
+            |root| format!("Activity for {}", folder_name_label(&root)),
         );
         render_activity_scope_bar(
             ui,
@@ -2425,6 +2425,7 @@ impl SmartfolderApp {
             } else {
                 "All folders"
             },
+            history_action,
         );
 
         ui.add_space(ui::theme::spacing::MD);
@@ -3111,6 +3112,10 @@ impl eframe::App for SmartfolderApp {
                     self.show_recovery_log = !self.show_recovery_log;
                 }
                 HistoryAction::CompleteApply => self.complete_apply_result(),
+                HistoryAction::ChangeFolder => {
+                    self.active_section = AppSection::Organize;
+                    self.organize_step = OrganizeStep::Folder;
+                }
                 HistoryAction::ConfirmUndo(transaction_id) => {
                     self.show_undo_confirmation = Some(transaction_id);
                 }
@@ -3589,6 +3594,7 @@ enum HistoryAction {
     CloseDetails,
     ToggleRecoveryLog,
     CompleteApply,
+    ChangeFolder,
     ConfirmUndo(String),
 }
 
@@ -5785,18 +5791,20 @@ fn render_undo_progress(ui: &mut egui::Ui) {
     });
 }
 
-fn render_activity_scope_bar(ui: &mut egui::Ui, scope: &str, status: &str) {
+fn render_activity_scope_bar(
+    ui: &mut egui::Ui,
+    scope: &str,
+    status: &str,
+    action: &mut Option<HistoryAction>,
+) {
     settings_note_frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new("Current scope")
+                RichText::new(scope)
                     .strong()
+                    .size(ui::theme::typography::CARD_TITLE)
                     .color(ui::theme::colors::heading_text()),
-            );
-            ui.add(
-                egui::Label::new(RichText::new(scope).color(ui::theme::colors::secondary_text()))
-                    .wrap(),
             );
             render_status_chip(
                 ui,
@@ -5804,6 +5812,12 @@ fn render_activity_scope_bar(ui: &mut egui::Ui, scope: &str, status: &str) {
                 ui::theme::colors::secondary_text(),
                 ui::theme::colors::surface(),
             );
+            if ui
+                .add(ui::theme::widgets::tertiary_button("Change folder"))
+                .clicked()
+            {
+                *action = Some(HistoryAction::ChangeFolder);
+            }
         });
     });
 }
@@ -5929,13 +5943,18 @@ fn render_current_folder_activity(
 
     if rows.len() > 1 {
         ui.add_space(ui::theme::spacing::MD);
-        ui.label(
-            RichText::new("Earlier activity")
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.add_space(ui::theme::spacing::XS);
-        for row in rows.iter().skip(1).take(5) {
+        let mut current_date = "";
+        for row in rows.iter().skip(1).take(8) {
+            let date = activity_date_label(row);
+            if date != current_date {
+                current_date = date;
+                ui.add_space(ui::theme::spacing::XS);
+                ui.label(
+                    RichText::new(date)
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+            }
             render_activity_record_row(ui, row, busy, false, action);
             ui.add_space(ui::theme::spacing::XS);
         }
@@ -5964,28 +5983,56 @@ fn render_activity_record_row(
     featured: bool,
     action: &mut Option<HistoryAction>,
 ) {
-    let row_fill = if featured {
-        ui::theme::colors::surface()
-    } else {
-        ui::theme::colors::elevated_surface()
-    };
+    let can_restore = can_undo_status(row.status);
+    let row_fill = ui::theme::colors::elevated_surface();
     egui::Frame::group(ui.style())
         .fill(row_fill)
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::MD))
+        .stroke(egui::Stroke::new(
+            1.0,
+            if featured && can_restore {
+                ui::theme::colors::success()
+            } else {
+                ui::theme::colors::border()
+            },
+        ))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let actions_width = 260.0_f32.min(ui.available_width() * 0.32);
-            let text_width =
-                (ui.available_width() - actions_width - ui::theme::spacing::MD).max(320.0);
+            let actions_width = 220.0_f32.min(ui.available_width() * 0.34);
+            let time_width = 64.0;
+            let text_width = (ui.available_width()
+                - actions_width
+                - time_width
+                - (ui::theme::spacing::MD * 2.0))
+                .max(280.0);
 
             ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(time_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.label(
+                            RichText::new(activity_time_label(row))
+                                .monospace()
+                                .color(ui::theme::colors::metadata_text()),
+                        );
+                        if featured && can_restore {
+                            ui.label(
+                                RichText::new("Restore ready")
+                                    .size(ui::theme::typography::CAPTION)
+                                    .color(ui::theme::colors::success()),
+                            );
+                        }
+                    },
+                );
                 ui.allocate_ui_with_layout(
                     egui::vec2(text_width, 0.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            let (stroke, fill) = activity_status_colors(row.status);
+                            ui::theme::widgets::status_dot(ui, stroke);
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(activity_event_title(row))
@@ -5994,7 +6041,6 @@ fn render_activity_record_row(
                                 )
                                 .wrap(),
                             );
-                            let (stroke, fill) = activity_status_colors(row.status);
                             render_status_chip(ui, status_label(row.status), stroke, fill);
                         });
                         ui.add(
@@ -6003,11 +6049,6 @@ fn render_activity_record_row(
                                     .color(ui::theme::colors::secondary_text()),
                             )
                             .wrap(),
-                        );
-                        ui.label(
-                            RichText::new(format!("Recorded on {}", row.started_at))
-                                .size(ui::theme::typography::CAPTION)
-                                .color(ui::theme::colors::metadata_text()),
                         );
                         ui.add_space(ui::theme::spacing::XS);
                         render_activity_count_chips(
@@ -6025,7 +6066,7 @@ fn render_activity_record_row(
                     {
                         *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
                     }
-                    let can_undo = can_undo_status(row.status) && !busy;
+                    let can_undo = can_restore && !busy;
                     if ui
                         .add_enabled(can_undo, ui::theme::widgets::secondary_button("Restore"))
                         .on_disabled_hover_text(
@@ -8619,12 +8660,12 @@ fn activity_event_title(row: &TransactionRow) -> String {
             plural(row.completed)
         ),
         TransactionStatus::RolledBack => format!(
-            "Undid organization in {folder}: {} file{} restored",
+            "Restored previous layout in {folder}: {} file{} restored",
             row.rolled_back,
             plural(row.rolled_back)
         ),
         TransactionStatus::PartiallyRolledBack => format!(
-            "Partially undid organization in {folder}: {} file{} restored",
+            "Partially restored previous layout in {folder}: {} file{} restored",
             row.rolled_back,
             plural(row.rolled_back)
         ),
@@ -8643,6 +8684,20 @@ fn activity_event_title(row: &TransactionRow) -> String {
             row.failed, row.completed
         ),
     }
+}
+
+fn activity_date_label(row: &TransactionRow) -> &str {
+    row.started_at
+        .split_once(' ')
+        .map_or(row.started_at.as_str(), |(date, _)| date)
+}
+
+fn activity_time_label(row: &TransactionRow) -> &str {
+    row.started_at
+        .split_once(' ')
+        .map_or("", |(_, time)| time)
+        .get(0..5)
+        .unwrap_or("")
 }
 
 fn activity_detail_headline(detail: &TransactionDetail) -> String {
@@ -8690,11 +8745,11 @@ fn activity_detail(row: &TransactionRow) -> String {
             plural(row.skipped + row.failed)
         ),
         TransactionStatus::RolledBack => format!(
-            "Rollback completed {}. Original file locations were restored where possible.",
+            "Restore completed {}. Original file locations were restored where possible.",
             row.started_at
         ),
         TransactionStatus::PartiallyRolledBack => {
-            "Rollback completed with remaining issues. Review details before making more changes."
+            "Restore completed with remaining issues. Review details before making more changes."
                 .to_string()
         }
         TransactionStatus::Interrupted | TransactionStatus::InProgress => format!(
@@ -8954,13 +9009,13 @@ mod tests {
     use smartfolder_core::rules::{CustomRule, RuleProfile};
 
     use super::{
-        activity_count_summary, activity_event_title, apply_destination_drop,
-        build_destination_from_segments, can_undo_status, is_cloud_synced_path,
-        operation_status_label, parse_destination_segments, preloaded_root_from_args, preview_rows,
-        profile_file_stem, same_folder, status_label, transaction_operation_counts,
-        untouched_preview_rows, AnalysisPlanSource, DestinationDragPayload, DestinationDragSource,
-        DestinationSegment, LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState,
-        SmartfolderApp, TransactionRow,
+        activity_count_summary, activity_date_label, activity_event_title, activity_time_label,
+        apply_destination_drop, build_destination_from_segments, can_undo_status,
+        is_cloud_synced_path, operation_status_label, parse_destination_segments,
+        preloaded_root_from_args, preview_rows, profile_file_stem, same_folder, status_label,
+        transaction_operation_counts, untouched_preview_rows, AnalysisPlanSource,
+        DestinationDragPayload, DestinationDragSource, DestinationSegment, LoadedRuleProfile,
+        PlanningSource, ProfileEditorState, RuleEditorState, SmartfolderApp, TransactionRow,
     };
 
     #[test]
@@ -9046,6 +9101,15 @@ mod tests {
         assert_eq!(
             activity_count_summary(&row),
             "3 moved / 0 restored / 1 needs review"
+        );
+
+        assert_eq!(activity_date_label(&row), "2026-05-12");
+        assert_eq!(activity_time_label(&row), "13:00");
+
+        let restored_row = test_transaction_row(TransactionStatus::RolledBack);
+        assert_eq!(
+            activity_event_title(&restored_row),
+            "Restored previous layout in Documents: 0 files restored"
         );
     }
 

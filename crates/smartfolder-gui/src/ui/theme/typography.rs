@@ -2,7 +2,7 @@
 
 //! Typography tokens for the smartfolder GUI.
 //!
-//! egui does not use CSS-style named text classes, so this module maps the RC2
+//! egui does not use CSS-style named text classes, so this module maps the v2
 //! type scale to `TextStyle` entries that can be applied consistently across
 //! screens.
 

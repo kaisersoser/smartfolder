@@ -3,7 +3,7 @@
 //! Semantic color tokens for the smartfolder GUI.
 //!
 //! These helpers keep color use tied to product meaning instead of local RGB
-//! choices. The palette follows the RC2 design system and resolves against the
+//! choices. The palette follows the v2 design system and resolves against the
 //! currently applied visual theme.
 
 use std::sync::atomic::{AtomicBool, Ordering};

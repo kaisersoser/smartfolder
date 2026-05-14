@@ -1,6 +1,6 @@
 //! Icon tokens for the smartfolder GUI.
 //!
-//! RC2 uses Phosphor icons through `egui-phosphor`. These semantic mappings keep
+//! The v2 desktop UI uses Phosphor icons through `egui-phosphor`. These semantic mappings keep
 //! screen code tied to product meaning instead of raw icon symbol names.
 
 /// Folder or organize action icon.
@@ -17,6 +17,10 @@ pub(crate) const RULES: &str = egui_phosphor::regular::SLIDERS_HORIZONTAL;
 pub(crate) const SETTINGS: &str = egui_phosphor::regular::GEAR_SIX;
 /// Help or explanatory details icon.
 pub(crate) const HELP: &str = egui_phosphor::regular::QUESTION;
+/// Expand a collapsed navigation/sidebar panel.
+pub(crate) const EXPAND: &str = egui_phosphor::regular::CARET_RIGHT;
+/// Collapse an expanded navigation/sidebar panel.
+pub(crate) const COLLAPSE: &str = egui_phosphor::regular::CARET_LEFT;
 
 /// Combine an icon glyph with a product label.
 pub(crate) fn label(icon: &str, text: &str) -> String {

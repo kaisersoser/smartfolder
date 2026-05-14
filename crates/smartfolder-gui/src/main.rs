@@ -58,11 +58,14 @@ const TRANSACTION_DETAIL_ROW_LIMIT: usize = 100;
 const WINDOW_WIDTH: f32 = 1160.0;
 const WINDOW_HEIGHT: f32 = 780.0;
 const SHELL_NAV_WIDTH: f32 = ui::theme::spacing::SIDEBAR_WIDTH;
+const SHELL_NAV_COLLAPSED_WIDTH: f32 = 56.0;
 const CARD_MIN_WIDTH: f32 = 188.0;
 const PREVIEW_EXAMPLE_LIMIT: usize = 3;
 const INSTRUCTION_PANEL_HEIGHT: f32 = 216.0;
 const ORGANIZE_STEP_BUTTON_WIDTH: f32 = 150.0;
 const ORGANIZE_STEP_FRAME_MARGIN: f32 = 12.0;
+const PROFILE_WORKSPACE_FIELD_HEIGHT: f32 = 32.0;
+const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppSection {
@@ -321,6 +324,7 @@ struct SmartfolderApp {
     show_undo_confirmation: Option<String>,
     show_settings_help: bool,
     show_rules_workspace: bool,
+    shell_nav_expanded: bool,
     error_message: Option<String>,
     maintenance_message: Option<String>,
 }
@@ -381,6 +385,7 @@ impl SmartfolderApp {
             show_undo_confirmation: None,
             show_settings_help: false,
             show_rules_workspace: false,
+            shell_nav_expanded: false,
             error_message: None,
             maintenance_message: preferences_message,
         }
@@ -1200,14 +1205,92 @@ impl SmartfolderApp {
         }
     }
 
+    fn render_shell_nav(&mut self, ui: &mut egui::Ui) {
+        if self.shell_nav_expanded {
+            self.render_sidebar(ui);
+        } else {
+            self.render_collapsed_sidebar(ui);
+        }
+    }
+
+    fn render_nav_toggle(&mut self, ui: &mut egui::Ui) {
+        let (icon, tooltip) = if self.shell_nav_expanded {
+            (ui::icons::COLLAPSE, "Collapse sidebar")
+        } else {
+            (ui::icons::EXPAND, "Expand sidebar")
+        };
+        if ui
+            .add_sized(
+                [36.0, 36.0],
+                egui::Button::new(
+                    RichText::new(icon)
+                        .size(18.0)
+                        .color(ui::theme::colors::primary_text()),
+                )
+                .fill(ui::theme::colors::soft_control())
+                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border())),
+            )
+            .on_hover_text(tooltip)
+            .clicked()
+        {
+            self.shell_nav_expanded = !self.shell_nav_expanded;
+        }
+    }
+
+    fn render_collapsed_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(ui::theme::spacing::SM);
+        ui.vertical_centered(|ui| {
+            self.render_nav_toggle(ui);
+            ui.add_space(ui::theme::spacing::MD);
+
+            for section in AppSection::ALL {
+                let selected = self.active_section == section;
+                let response = ui
+                    .add_sized(
+                        [40.0, 40.0],
+                        egui::Button::new(RichText::new(section.icon()).size(18.0).color(
+                            if selected {
+                                ui::theme::colors::primary_blue()
+                            } else {
+                                ui::theme::colors::secondary_text()
+                            },
+                        ))
+                        .fill(if selected {
+                            ui::theme::colors::hover_control()
+                        } else {
+                            ui::theme::colors::soft_control()
+                        })
+                        .stroke(egui::Stroke::new(
+                            if selected { 2.0 } else { 1.0 },
+                            if selected {
+                                ui::theme::colors::primary_blue()
+                            } else {
+                                ui::theme::colors::border()
+                            },
+                        )),
+                    )
+                    .on_hover_text(format!("{} ({})", section.title(), section.shortcut()));
+                if response.clicked() {
+                    self.active_section = section;
+                }
+                ui.add_space(ui::theme::spacing::XS);
+            }
+        });
+    }
+
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(ui::theme::spacing::MD);
-        ui.label(
-            RichText::new("smartfolder")
-                .size(24.0)
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("smartfolder")
+                    .size(24.0)
+                    .strong()
+                    .color(ui::theme::colors::heading_text()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.render_nav_toggle(ui);
+            });
+        });
         ui.label(
             RichText::new("Organize files safely, then undo changes if you need to.")
                 .color(ui::theme::colors::secondary_text()),
@@ -1949,122 +2032,26 @@ impl SmartfolderApp {
     }
 
     fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
-        ui::theme::widgets::card_frame().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Rule builder")
-                        .strong()
-                        .size(18.0)
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.label(
-                    RichText::new("Rules run from top to bottom; first match wins.")
-                        .color(ui::theme::colors::metadata_text()),
-                );
-            });
-            ui.add_space(ui::theme::spacing::SM);
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(PROFILE_RULE_LIST_WIDTH, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    render_rule_list_panel(ui, &mut self.profile_editor);
+                },
+            );
 
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Profile id");
-                ui.add_sized(
-                    [220.0, 24.0],
-                    egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
-                );
-                if ui
-                    .add(ui::theme::widgets::secondary_button("New profile"))
-                    .clicked()
-                {
-                    self.profile_editor = ProfileEditorState::default();
-                    self.loaded_profile = None;
-                    self.planning_source = PlanningSource::BuiltIn;
-                    self.maintenance_message =
-                        Some("Started a new unsaved profile draft.".to_string());
-                    self.error_message = None;
-                }
-            });
+            ui.separator();
 
-            ui.add_space(ui::theme::spacing::MD);
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(260.0, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(
-                            RichText::new("Rules")
-                                .strong()
-                                .color(ui::theme::colors::heading_text()),
-                        );
-                        ui.add_space(ui::theme::spacing::XS);
-                        let mut selected_rule = self.profile_editor.selected_rule_index();
-                        for (index, rule) in self.profile_editor.rules.iter().enumerate() {
-                            if render_rule_list_item(ui, rule, index, index == selected_rule)
-                                .clicked()
-                            {
-                                selected_rule = index;
-                            }
-                            ui.add_space(ui::theme::spacing::XS);
-                        }
-                        self.profile_editor.selected_rule = selected_rule;
-                        ui.add_space(ui::theme::spacing::SM);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .add(ui::theme::widgets::secondary_button("Add rule"))
-                                .clicked()
-                            {
-                                self.profile_editor.add_rule();
-                            }
-                            if ui
-                                .add(ui::theme::widgets::secondary_button("Duplicate"))
-                                .clicked()
-                            {
-                                self.profile_editor.duplicate_selected_rule();
-                            }
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .add_enabled(
-                                    self.profile_editor.selected_rule_index() > 0,
-                                    ui::theme::widgets::secondary_button("Move up"),
-                                )
-                                .clicked()
-                            {
-                                self.profile_editor.move_selected_rule(-1);
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.profile_editor.selected_rule_index() + 1
-                                        < self.profile_editor.rules.len(),
-                                    ui::theme::widgets::secondary_button("Move down"),
-                                )
-                                .clicked()
-                            {
-                                self.profile_editor.move_selected_rule(1);
-                            }
-                        });
-                        if ui
-                            .add_enabled(
-                                self.profile_editor.rules.len() > 1,
-                                ui::theme::widgets::secondary_button("Delete rule"),
-                            )
-                            .clicked()
-                        {
-                            self.profile_editor.delete_selected_rule();
-                        }
-                    },
-                );
-
-                ui.separator();
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        if let Some(rule) = self.profile_editor.selected_rule_mut() {
-                            render_rule_detail_editor(ui, rule);
-                        }
-                    },
-                );
-            });
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    if let Some(rule) = self.profile_editor.selected_rule_mut() {
+                        render_rule_detail_editor(ui, rule);
+                    }
+                },
+            );
         });
     }
 
@@ -2083,70 +2070,9 @@ impl SmartfolderApp {
             .min_width(760.0)
             .min_height(520.0)
             .show(ctx, |ui| {
-                ui.label(
-                    RichText::new("Build a custom rule profile")
-                        .strong()
-                        .size(20.0)
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.label(
-                    RichText::new(
-                        "Save the profile locally, then use it from the Rules library or Organize flow.",
-                    )
-                    .color(ui::theme::colors::secondary_text()),
-                );
+                self.render_profile_workspace_toolbar(ui);
+
                 ui.add_space(ui::theme::spacing::SM);
-
-                egui::Frame::group(ui.style())
-                    .fill(ui::theme::colors::surface())
-                    .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-                    .rounding(egui::Rounding::same(8.0))
-                    .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-                    .show(ui, |ui| {
-                        render_profile_workspace_status(ui, self.loaded_profile.as_ref());
-                        ui.add_space(ui::theme::spacing::SM);
-                        ui.horizontal_wrapped(|ui| {
-                            if ui
-                                .add(ui::theme::widgets::primary_button("Save profile"))
-                                .clicked()
-                            {
-                                self.save_profile_from_editor();
-                            }
-                            if ui
-                                .add(ui::theme::widgets::secondary_button("Use Custom Rules"))
-                                .clicked()
-                            {
-                                self.select_custom_rules_style();
-                                self.active_section = AppSection::Organize;
-                                self.show_rules_workspace = false;
-                            }
-                            if ui
-                                .add(ui::theme::widgets::secondary_button("Validate"))
-                                .clicked()
-                            {
-                                self.validate_profile_editor();
-                            }
-                            if ui
-                                .add(ui::theme::widgets::secondary_button("Import TOML..."))
-                                .clicked()
-                            {
-                                self.import_rule_profile();
-                            }
-                            if ui
-                                .add(ui::theme::widgets::secondary_button("Export TOML..."))
-                                .clicked()
-                            {
-                                self.export_profile_from_editor();
-                            }
-                        });
-                        ui.add_space(ui::theme::spacing::XS);
-                        render_safety_line(
-                            ui,
-                            "Custom Rules still use preview, conflict checks, and undo history before anything moves.",
-                        );
-                    });
-
-                ui.add_space(ui::theme::spacing::MD);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -2157,6 +2083,73 @@ impl SmartfolderApp {
         if !open {
             self.show_rules_workspace = false;
         }
+    }
+
+    fn render_profile_workspace_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Build a custom rule profile")
+                    .strong()
+                    .size(18.0)
+                    .color(ui::theme::colors::heading_text()),
+            );
+            render_profile_workspace_status(ui, self.loaded_profile.as_ref());
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Profile id")
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            );
+            ui.add_sized(
+                [200.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
+            );
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("New"))
+                .clicked()
+            {
+                self.profile_editor = ProfileEditorState::default();
+                self.loaded_profile = None;
+                self.planning_source = PlanningSource::BuiltIn;
+                self.maintenance_message = Some("Started a new unsaved profile draft.".to_string());
+                self.error_message = None;
+            }
+            ui.separator();
+            if ui
+                .add(ui::theme::widgets::compact_primary_button("Save"))
+                .clicked()
+            {
+                self.save_profile_from_editor();
+            }
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("Use"))
+                .clicked()
+            {
+                self.select_custom_rules_style();
+                self.active_section = AppSection::Organize;
+                self.show_rules_workspace = false;
+            }
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("Validate"))
+                .clicked()
+            {
+                self.validate_profile_editor();
+            }
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("Import"))
+                .clicked()
+            {
+                self.import_rule_profile();
+            }
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button("Export"))
+                .clicked()
+            {
+                self.export_profile_from_editor();
+            }
+        });
     }
 
     fn apply_preview_action(&mut self, action: PreviewAction) {
@@ -2231,10 +2224,16 @@ impl eframe::App for SmartfolderApp {
         let mut preview_action = None;
         let mut history_action = None;
 
+        let shell_nav_width = if self.shell_nav_expanded {
+            SHELL_NAV_WIDTH
+        } else {
+            SHELL_NAV_COLLAPSED_WIDTH
+        };
+
         egui::SidePanel::left("app-shell-nav")
             .resizable(false)
-            .exact_width(SHELL_NAV_WIDTH)
-            .show(ctx, |ui| self.render_sidebar(ui));
+            .exact_width(shell_nav_width)
+            .show(ctx, |ui| self.render_shell_nav(ui));
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -2511,6 +2510,8 @@ struct ProfileEditorState {
 struct RuleEditorState {
     rule_name: String,
     destination: String,
+    destination_text_mode: bool,
+    new_destination_segment: String,
     priority: String,
     match_all: bool,
     extensions: String,
@@ -2536,9 +2537,11 @@ impl Default for RuleEditorState {
         Self {
             rule_name: "PDFs".to_string(),
             destination: "Documents/PDFs".to_string(),
+            destination_text_mode: false,
+            new_destination_segment: String::new(),
             priority: "10".to_string(),
             match_all: false,
-            extensions: "pdf".to_string(),
+            extensions: String::new(),
             filename_contains: String::new(),
             path_contains: String::new(),
             min_size_bytes: String::new(),
@@ -2572,6 +2575,8 @@ impl ProfileEditorState {
             rules: vec![RuleEditorState {
                 rule_name: rule_name.to_string(),
                 destination: destination.to_string(),
+                destination_text_mode: false,
+                new_destination_segment: String::new(),
                 match_all: true,
                 extensions: String::new(),
                 filename_contains: String::new(),
@@ -2598,6 +2603,8 @@ impl ProfileEditorState {
         self.rules.push(RuleEditorState {
             rule_name: format!("Rule {}", self.rules.len() + 1),
             destination: "Other".to_string(),
+            destination_text_mode: false,
+            new_destination_segment: String::new(),
             priority: ((self.rules.len() + 1) * 10).to_string(),
             extensions: String::new(),
             ..RuleEditorState::default()
@@ -2656,6 +2663,8 @@ impl RuleEditorState {
         Self {
             rule_name: rule.name.clone(),
             destination: rule.destination.clone(),
+            destination_text_mode: false,
+            new_destination_segment: String::new(),
             priority: rule
                 .priority
                 .map_or_else(String::new, |value| value.to_string()),
@@ -5434,7 +5443,7 @@ const SETTINGS_HELP_ROWS: [(&str, &str, &str); 4] = [
     ),
     (
         "Appearance",
-        "Theme and motion preferences are saved locally for the RC2 design system.",
+        "Theme and motion preferences are saved locally for this device.",
         "Preferences saved",
     ),
     (
@@ -5593,10 +5602,8 @@ fn render_settings_section_panel(
 fn render_appearance_preferences(ui: &mut egui::Ui, preferences: &mut GuiPreferences) -> bool {
     ui.add(
         egui::Label::new(
-            RichText::new(
-                "These preferences are saved locally and will carry into the RC2 wizard.",
-            )
-            .color(ui::theme::colors::secondary_text()),
+            RichText::new("These preferences are saved locally and apply across the desktop app.")
+                .color(ui::theme::colors::secondary_text()),
         )
         .wrap(),
     );
@@ -5908,7 +5915,7 @@ fn render_profile_workspace_status(ui: &mut egui::Ui, loaded_profile: Option<&Lo
         ui.horizontal_wrapped(|ui| {
             render_status_chip(
                 ui,
-                "Saved profile loaded",
+                "Saved",
                 ui::theme::colors::success(),
                 ui::theme::colors::success_bg(),
             );
@@ -5916,7 +5923,6 @@ fn render_profile_workspace_status(ui: &mut egui::Ui, loaded_profile: Option<&Lo
                 RichText::new(format!("Editing {}", profile.profile.profile_id))
                     .color(ui::theme::colors::primary_text()),
             );
-            truncated_label(ui, &format!("Saved at: {}", profile.path.display()));
         });
     } else {
         ui.horizontal_wrapped(|ui| {
@@ -5934,6 +5940,87 @@ fn render_profile_workspace_status(ui: &mut egui::Ui, loaded_profile: Option<&Lo
     }
 }
 
+fn render_rule_list_panel(ui: &mut egui::Ui, editor: &mut ProfileEditorState) {
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Rules")
+                .strong()
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_status_chip(
+            ui,
+            &format!("{} rule{}", editor.rules.len(), plural(editor.rules.len())),
+            ui::theme::colors::secondary_text(),
+            ui::theme::colors::elevated_surface(),
+        );
+    });
+    ui.add_space(ui::theme::spacing::XS);
+
+    let mut selected_rule = editor.selected_rule_index();
+    for (index, rule) in editor.rules.iter().enumerate() {
+        if render_rule_list_item(ui, rule, index, index == selected_rule).clicked() {
+            selected_rule = index;
+        }
+        ui.add_space(4.0);
+    }
+    editor.selected_rule = selected_rule;
+
+    ui.add_space(ui::theme::spacing::SM);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_sized(
+                [80.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                ui::theme::widgets::compact_secondary_button("Add"),
+            )
+            .clicked()
+        {
+            editor.add_rule();
+        }
+        if ui
+            .add_sized(
+                [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                ui::theme::widgets::compact_secondary_button("Duplicate"),
+            )
+            .clicked()
+        {
+            editor.duplicate_selected_rule();
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                editor.selected_rule_index() > 0,
+                ui::theme::widgets::compact_secondary_button("Up")
+                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
+            )
+            .clicked()
+        {
+            editor.move_selected_rule(-1);
+        }
+        if ui
+            .add_enabled(
+                editor.selected_rule_index() + 1 < editor.rules.len(),
+                ui::theme::widgets::compact_secondary_button("Down")
+                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
+            )
+            .clicked()
+        {
+            editor.move_selected_rule(1);
+        }
+        if ui
+            .add_enabled(
+                editor.rules.len() > 1,
+                ui::theme::widgets::compact_secondary_button("Delete")
+                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
+            )
+            .clicked()
+        {
+            editor.delete_selected_rule();
+        }
+    });
+}
+
 fn render_rule_list_item(
     ui: &mut egui::Ui,
     rule: &RuleEditorState,
@@ -5947,83 +6034,72 @@ fn render_rule_list_item(
         rule_destination_summary(rule)
     );
     ui.add_sized(
-        [ui.available_width(), 64.0],
-        egui::Button::new(RichText::new(label).color(ui::theme::colors::primary_text()))
-            .fill(if selected {
-                ui::theme::colors::hover_control()
+        [ui.available_width(), 46.0],
+        egui::Button::new(
+            RichText::new(label)
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::primary_text()),
+        )
+        .fill(if selected {
+            ui::theme::colors::hover_control()
+        } else {
+            ui::theme::colors::surface()
+        })
+        .stroke(egui::Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                ui::theme::colors::primary_blue()
             } else {
-                ui::theme::colors::surface()
-            })
-            .stroke(egui::Stroke::new(
-                if selected { 2.0 } else { 1.0 },
-                if selected {
-                    ui::theme::colors::primary_blue()
-                } else {
-                    ui::theme::colors::border()
-                },
-            )),
+                ui::theme::colors::border()
+            },
+        )),
     )
 }
 
 fn render_rule_detail_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
     ui.label(
         RichText::new("Selected rule")
             .strong()
             .color(ui::theme::colors::heading_text()),
     );
     ui.add_space(ui::theme::spacing::XS);
-    egui::Grid::new("rule-detail-editor")
-        .num_columns(2)
-        .spacing([14.0, 8.0])
-        .show(ui, |ui| {
-            ui.label("Rule name");
-            ui.add_sized(
-                [280.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.rule_name),
-            );
-            ui.end_row();
-
-            ui.label("Destination");
-            ui.add_sized(
-                [360.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.destination),
-            );
-            ui.end_row();
-
-            ui.label("Priority");
-            ui.add_sized(
-                [120.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.priority),
-            );
-            ui.end_row();
-        });
-    ui.add_space(ui::theme::spacing::XS);
     ui.horizontal_wrapped(|ui| {
         ui.label(
-            RichText::new("Destination tokens")
+            RichText::new("Rule name")
                 .size(ui::theme::typography::CAPTION)
                 .color(ui::theme::colors::metadata_text()),
         );
-        for token in [
-            "{type}",
-            "{year}",
-            "{month}",
-            "{day}",
-            "{extension}",
-            "{filename}",
-        ] {
-            if ui
-                .add(ui::theme::widgets::secondary_button(token))
-                .clicked()
-            {
-                append_destination_token(&mut rule.destination, token);
-            }
-        }
+        ui.add_sized(
+            [190.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+            egui::TextEdit::singleline(&mut rule.rule_name),
+        );
+        ui.label(
+            RichText::new("Priority")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+        ui.add_sized(
+            [56.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+            egui::TextEdit::singleline(&mut rule.priority),
+        );
+        ui.checkbox(&mut rule.match_all, "Match all files");
     });
 
-    ui.add_space(ui::theme::spacing::MD);
-    ui.checkbox(&mut rule.match_all, "Match all files");
+    ui.add_space(ui::theme::spacing::SM);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Destination")
+                .strong()
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_destination_mode_toggle(ui, rule);
+    });
+    ui.add_space(ui::theme::spacing::SM);
+    render_destination_builder(ui, rule);
+
     if rule.match_all {
+        ui.add_space(ui::theme::spacing::XS);
         ui.add(
             egui::Label::new(
                 RichText::new(
@@ -6036,7 +6112,7 @@ fn render_rule_detail_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
         return;
     }
 
-    ui.add_space(ui::theme::spacing::SM);
+    ui.add_space(ui::theme::spacing::MD);
     ui.label(
         RichText::new("Conditions")
             .strong()
@@ -6044,49 +6120,405 @@ fn render_rule_detail_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
     );
     egui::Grid::new("rule-condition-editor")
         .num_columns(2)
-        .spacing([14.0, 8.0])
+        .spacing([12.0, 6.0])
         .show(ui, |ui| {
             ui.label("Extensions");
             ui.add_sized(
-                [260.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.extensions).hint_text("pdf, docx"),
+                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.extensions)
+                    .hint_text(example_hint("pdf, docx")),
             );
             ui.end_row();
 
             ui.label("Filename contains");
             ui.add_sized(
-                [260.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.filename_contains).hint_text("invoice"),
+                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.filename_contains)
+                    .hint_text(example_hint("invoice")),
             );
             ui.end_row();
 
             ui.label("Path contains");
             ui.add_sized(
-                [260.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.path_contains).hint_text("downloads"),
+                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.path_contains)
+                    .hint_text(example_hint("downloads")),
             );
             ui.end_row();
 
             ui.label("Year");
             ui.add_sized(
-                [120.0, 24.0],
-                egui::TextEdit::singleline(&mut rule.year).hint_text("2026"),
+                [96.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.year).hint_text(example_hint("2026")),
             );
             ui.end_row();
 
             ui.label("Size range");
             ui.horizontal(|ui| {
                 ui.add_sized(
-                    [120.0, 24.0],
-                    egui::TextEdit::singleline(&mut rule.min_size_bytes).hint_text("min bytes"),
+                    [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                    egui::TextEdit::singleline(&mut rule.min_size_bytes)
+                        .hint_text(example_hint("1000")),
                 );
                 ui.add_sized(
-                    [120.0, 24.0],
-                    egui::TextEdit::singleline(&mut rule.max_size_bytes).hint_text("max bytes"),
+                    [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                    egui::TextEdit::singleline(&mut rule.max_size_bytes)
+                        .hint_text(example_hint("200000")),
                 );
             });
             ui.end_row();
         });
+}
+
+fn example_hint(value: &str) -> RichText {
+    RichText::new(format!("e.g. {value}"))
+        .italics()
+        .color(ui::theme::colors::metadata_text())
+}
+
+#[derive(Debug, Clone)]
+struct DestinationDragPayload {
+    source: DestinationDragSource,
+}
+
+#[derive(Debug, Clone)]
+enum DestinationDragSource {
+    Existing(usize),
+    Token(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DestinationSegment {
+    Text(String),
+    Token(String),
+}
+
+impl DestinationSegment {
+    fn label(&self) -> &str {
+        match self {
+            Self::Text(value) | Self::Token(value) => value,
+        }
+    }
+
+    fn is_token(&self) -> bool {
+        matches!(self, Self::Token(_))
+    }
+}
+
+fn render_destination_mode_toggle(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.horizontal_wrapped(|ui| {
+        ui.selectable_value(&mut rule.destination_text_mode, false, "Visual");
+        ui.selectable_value(&mut rule.destination_text_mode, true, "Text");
+    });
+}
+
+fn render_destination_builder(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    if rule.destination_text_mode {
+        render_destination_text_editor(ui, rule);
+    } else {
+        render_destination_visual_editor(ui, rule);
+    }
+}
+
+fn render_destination_text_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.add_sized(
+        [
+            ui.available_width().min(520.0),
+            PROFILE_WORKSPACE_FIELD_HEIGHT,
+        ],
+        egui::TextEdit::singleline(&mut rule.destination)
+            .hint_text(example_hint("Documents/PDFs/{year}/{month}")),
+    );
+    ui.label(
+        RichText::new("Use / between folders. Supported tokens: {type}, {year}, {month}, {day}, {extension}, {filename}.")
+            .size(ui::theme::typography::CAPTION)
+            .color(ui::theme::colors::metadata_text()),
+    );
+}
+
+fn render_destination_visual_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Drag chips to reorder. Drop outside to remove.")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+    });
+
+    let mut segments = parse_destination_segments(&rule.destination);
+    let mut dropped_payload: Option<(usize, DestinationDragPayload)> = None;
+
+    let path_response = destination_path_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            if segments.is_empty() {
+                ui.label(
+                    RichText::new("Drop a token or add a folder segment.")
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            }
+
+            for (index, segment) in segments.iter().enumerate() {
+                let chip_response = ui.dnd_drag_source(
+                    egui::Id::new(("destination-segment", index, segment.label())),
+                    DestinationDragPayload {
+                        source: DestinationDragSource::Existing(index),
+                    },
+                    |ui| {
+                        render_destination_segment_chip(ui, segment);
+                    },
+                );
+                let response = chip_response
+                    .response
+                    .on_hover_text("Drag to reorder. Drag outside the path to remove.");
+                if let Some(payload) = response.dnd_release_payload::<DestinationDragPayload>() {
+                    let target_index = ui
+                        .ctx()
+                        .pointer_interact_pos()
+                        .map(|position| {
+                            if position.x > response.rect.center().x {
+                                index + 1
+                            } else {
+                                index
+                            }
+                        })
+                        .unwrap_or(index);
+                    dropped_payload = Some((target_index, (*payload).clone()));
+                }
+            }
+        });
+    });
+
+    if dropped_payload.is_none() {
+        if let Some(payload) = path_response
+            .response
+            .dnd_release_payload::<DestinationDragPayload>()
+        {
+            dropped_payload = Some((segments.len(), (*payload).clone()));
+        }
+    }
+
+    if let Some((target_index, payload)) = dropped_payload {
+        apply_destination_drop(&mut segments, target_index, payload);
+        rule.destination = build_destination_from_segments(&segments);
+    } else if let Some(index) =
+        destination_segment_removed_outside_path(ui, path_response.response.rect, segments.len())
+    {
+        if index < segments.len() {
+            segments.remove(index);
+            rule.destination = build_destination_from_segments(&segments);
+            egui::DragAndDrop::clear_payload(ui.ctx());
+        }
+    }
+
+    ui.add_space(ui::theme::spacing::XS);
+    render_destination_add_segment(ui, rule);
+    ui.add_space(ui::theme::spacing::XS);
+    render_destination_token_palette(ui, rule);
+}
+
+fn destination_path_frame() -> egui::Frame {
+    egui::Frame::group(&egui::Style::default())
+        .fill(ui::theme::colors::surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(4.0))
+}
+
+fn render_destination_segment_chip(ui: &mut egui::Ui, segment: &DestinationSegment) {
+    let stroke = if segment.is_token() {
+        ui::theme::colors::info()
+    } else {
+        ui::theme::colors::secondary_text()
+    };
+    let fill = if segment.is_token() {
+        ui::theme::colors::info_bg()
+    } else {
+        ui::theme::colors::elevated_surface()
+    };
+
+    egui::Frame::group(ui.style())
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .rounding(egui::Rounding::same(999.0))
+        .inner_margin(egui::Margin::symmetric(9.0, 4.0))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(segment.label())
+                    .monospace()
+                    .strong()
+                    .size(ui::theme::typography::CAPTION)
+                    .color(stroke),
+            );
+        });
+}
+
+fn destination_segment_removed_outside_path(
+    ui: &mut egui::Ui,
+    path_rect: egui::Rect,
+    segment_count: usize,
+) -> Option<usize> {
+    if segment_count == 0 || !ui.ctx().input(|input| input.pointer.any_released()) {
+        return None;
+    }
+
+    let pointer = ui.ctx().pointer_interact_pos()?;
+    if path_rect.contains(pointer) {
+        return None;
+    }
+
+    let payload = egui::DragAndDrop::payload::<DestinationDragPayload>(ui.ctx())?;
+    match payload.source {
+        DestinationDragSource::Existing(index) => Some(index),
+        DestinationDragSource::Token(_) => None,
+    }
+}
+
+fn render_destination_add_segment(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Folder segment")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+        ui.add_sized(
+            [180.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+            egui::TextEdit::singleline(&mut rule.new_destination_segment)
+                .hint_text(example_hint("Invoices")),
+        );
+        if ui
+            .add_sized(
+                [72.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                ui::theme::widgets::compact_secondary_button("Add"),
+            )
+            .clicked()
+        {
+            append_text_destination_segment(rule);
+        }
+    });
+}
+
+fn render_destination_token_palette(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Tokens")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+        for token in ["{type}", "{year}", "{month}", "{day}", "{extension}"] {
+            render_token_palette_chip(ui, rule, token);
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Advanced")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+        render_token_palette_chip(ui, rule, "{filename}");
+    });
+}
+
+fn render_token_palette_chip(ui: &mut egui::Ui, rule: &mut RuleEditorState, token: &'static str) {
+    let response = ui.dnd_drag_source(
+        egui::Id::new(("destination-token-palette", token)),
+        DestinationDragPayload {
+            source: DestinationDragSource::Token(token.to_string()),
+        },
+        |ui| {
+            let button = egui::Button::new(
+                RichText::new(token)
+                    .monospace()
+                    .strong()
+                    .color(ui::theme::colors::info()),
+            )
+            .fill(ui::theme::colors::surface())
+            .stroke(egui::Stroke::new(1.0, ui::theme::colors::info()))
+            .min_size(egui::vec2(72.0, PROFILE_WORKSPACE_FIELD_HEIGHT));
+            if ui.add(button).clicked() {
+                append_destination_token(&mut rule.destination, token);
+            }
+        },
+    );
+    response
+        .response
+        .on_hover_text("Drag into destination or click to append");
+}
+
+fn parse_destination_segments(destination: &str) -> Vec<DestinationSegment> {
+    destination
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            if is_destination_token(segment) {
+                DestinationSegment::Token(segment.to_string())
+            } else {
+                DestinationSegment::Text(segment.to_string())
+            }
+        })
+        .collect()
+}
+
+fn build_destination_from_segments(segments: &[DestinationSegment]) -> String {
+    segments
+        .iter()
+        .map(|segment| segment.label())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn apply_destination_drop(
+    segments: &mut Vec<DestinationSegment>,
+    target_index: usize,
+    payload: DestinationDragPayload,
+) {
+    match payload.source {
+        DestinationDragSource::Existing(source_index) => {
+            if source_index >= segments.len() {
+                return;
+            }
+            let segment = segments.remove(source_index);
+            let adjusted_target = if source_index < target_index {
+                target_index.saturating_sub(1)
+            } else {
+                target_index
+            };
+            segments.insert(adjusted_target.min(segments.len()), segment);
+        }
+        DestinationDragSource::Token(token) => {
+            segments.insert(
+                target_index.min(segments.len()),
+                DestinationSegment::Token(token),
+            );
+        }
+    }
+}
+
+fn append_text_destination_segment(rule: &mut RuleEditorState) {
+    let trimmed = rule
+        .new_destination_segment
+        .trim()
+        .trim_matches(['/', '\\'])
+        .to_string();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut segments = parse_destination_segments(&rule.destination);
+    segments.push(if is_destination_token(&trimmed) {
+        DestinationSegment::Token(trimmed)
+    } else {
+        DestinationSegment::Text(trimmed)
+    });
+    rule.destination = build_destination_from_segments(&segments);
+    rule.new_destination_segment.clear();
+}
+
+fn is_destination_token(segment: &str) -> bool {
+    matches!(
+        segment,
+        "{type}" | "{year}" | "{month}" | "{day}" | "{extension}" | "{filename}"
+    )
 }
 
 fn append_destination_token(destination: &mut String, token: &str) {
@@ -6452,9 +6884,11 @@ mod tests {
     use smartfolder_core::rules::{CustomRule, RuleProfile};
 
     use super::{
-        activity_count_summary, activity_event_title, can_undo_status, is_cloud_synced_path,
-        operation_status_label, preloaded_root_from_args, preview_rows, profile_file_stem,
-        same_folder, status_label, transaction_operation_counts, AnalysisPlanSource,
+        activity_count_summary, activity_event_title, apply_destination_drop,
+        build_destination_from_segments, can_undo_status, is_cloud_synced_path,
+        operation_status_label, parse_destination_segments, preloaded_root_from_args, preview_rows,
+        profile_file_stem, same_folder, status_label, transaction_operation_counts,
+        AnalysisPlanSource, DestinationDragPayload, DestinationDragSource, DestinationSegment,
         LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState, SmartfolderApp,
         TransactionRow,
     };
@@ -6605,6 +7039,8 @@ mod tests {
             rules: vec![RuleEditorState {
                 rule_name: "Invoices".to_string(),
                 destination: "Documents/Invoices/{year}".to_string(),
+                destination_text_mode: false,
+                new_destination_segment: String::new(),
                 priority: "5".to_string(),
                 match_all: false,
                 extensions: "pdf, docx".to_string(),
@@ -6646,6 +7082,52 @@ mod tests {
             "Family_Photos_2026"
         );
         assert_eq!(profile_file_stem("***"), "profile");
+    }
+
+    #[test]
+    fn destination_visual_builder_round_trips_segments() {
+        let segments = parse_destination_segments(r"Documents/PDFs/{year}\{month}");
+        assert_eq!(
+            segments,
+            vec![
+                DestinationSegment::Text("Documents".to_string()),
+                DestinationSegment::Text("PDFs".to_string()),
+                DestinationSegment::Token("{year}".to_string()),
+                DestinationSegment::Token("{month}".to_string()),
+            ]
+        );
+        assert_eq!(
+            build_destination_from_segments(&segments),
+            "Documents/PDFs/{year}/{month}"
+        );
+    }
+
+    #[test]
+    fn destination_drop_reorders_and_inserts_tokens() {
+        let mut segments = parse_destination_segments("Documents/PDFs/{year}");
+        apply_destination_drop(
+            &mut segments,
+            1,
+            DestinationDragPayload {
+                source: DestinationDragSource::Existing(2),
+            },
+        );
+        assert_eq!(
+            build_destination_from_segments(&segments),
+            "Documents/{year}/PDFs"
+        );
+
+        apply_destination_drop(
+            &mut segments,
+            3,
+            DestinationDragPayload {
+                source: DestinationDragSource::Token("{month}".to_string()),
+            },
+        );
+        assert_eq!(
+            build_destination_from_segments(&segments),
+            "Documents/{year}/PDFs/{month}"
+        );
     }
 
     fn test_transaction_operation(

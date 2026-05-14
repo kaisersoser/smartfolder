@@ -7,13 +7,20 @@ Version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — v2.0 release candidate
+## [Unreleased] — v2.1 development
 
-The v2.0 release-candidate is feature-complete. The remaining release gate is a manual GUI smoke review:
+### Planned
 
-```text
-right-click folder → Organize with smartfolder → analyze → preview → organize → undo → original layout restored
-```
+- Windows installer and uninstall flow.
+- Installer-managed Explorer context-menu registration.
+- Start Menu shortcut and optional desktop shortcut.
+- Release metadata and signing preparation for distributed binaries.
+
+---
+
+## [2.0.0] — 2026-05-14
+
+The v2.0 Windows-first desktop release completes the GUI-first UX rewrite while preserving the existing preview, safety, and undo model.
 
 ### Added
 

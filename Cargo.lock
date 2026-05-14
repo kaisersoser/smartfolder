@@ -3299,7 +3299,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smartfolder-cli"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -3312,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "smartfolder-core"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "chrono",
  "directories",
@@ -3326,7 +3326,7 @@ dependencies = [
 
 [[package]]
 name = "smartfolder-gui"
-version = "0.1.0"
+version = "2.1.0"
 dependencies = [
  "chrono",
  "eframe",

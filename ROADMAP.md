@@ -9,8 +9,9 @@ This document captures the strategic direction for `smartfolder` across release 
 | Track | Status |
 |-------|--------|
 | v1 MVP (CLI) | ✅ Released |
-| v2.0 UX rewrite (GUI-first) | 🔶 Release-candidate — manual smoke review remaining |
-| v2.1+ (installer, AI, cross-platform) | 📋 Planned |
+| v2.0 UX rewrite (GUI-first) | ✅ Released |
+| v2.1 installer and distribution | 🚧 Active |
+| v2.x AI and cross-platform tracks | 📋 Planned |
 
 ---
 
@@ -66,9 +67,15 @@ select or preload folder → analyze → preview → organize → undo → origi
 
 ## v2.1 — Installer and distribution
 
+**Goal:** make the Windows desktop app easy to install, update, and launch without relying on source checkouts or manual script registration.
+
 - Windows installer (MSI or NSIS) with optional silent install.
-- Auto-update check (opt-in).
-- Pinned `smartfolder` on PATH after install.
+- Start Menu shortcut and optional desktop shortcut.
+- Explorer context-menu registration from the installer, with uninstall cleanup.
+- Optional `smartfolder` CLI on PATH after install.
+- Portable package retained for users who do not want installation.
+- Release signing and version metadata for distributed binaries.
+- Auto-update check research; implementation remains opt-in only.
 
 ---
 

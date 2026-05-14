@@ -1,6 +1,6 @@
 //! Theme entry points for the smartfolder GUI design system.
 //!
-//! The theme module centralizes visual tokens that map the RC2 design system to
+//! The theme module centralizes visual tokens that map the v2 design system to
 //! egui primitives. It applies window-level visuals and re-exports small token
 //! modules so screen code can share spacing, color, typography, and widget
 //! behavior.

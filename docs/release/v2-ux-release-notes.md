@@ -27,7 +27,7 @@ Right-click folder -> Organize with smartfolder -> Analyze Folder -> Preview -> 
 
 ## Validation
 
-Release readiness requires the full automated test stack plus a manual disposable-folder proof:
+The v2.0 release is validated by the full automated test stack plus a manual disposable-folder proof:
 
 ```text
 select or preload folder -> analyze -> preview -> organize -> undo -> original layout restored

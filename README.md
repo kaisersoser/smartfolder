@@ -1,10 +1,20 @@
 # smartfolder
 
-`smartfolder` is a CLI-first folder organizer for power users and developers. It scans a selected folder, generates deterministic organization plans, previews proposed file moves, applies confirmed operations with a transaction journal, and supports undo.
+`smartfolder` is a Windows-first desktop folder organizer with a compatible CLI for power users and automation. It scans a selected folder, generates deterministic organization plans, previews proposed file moves, applies confirmed operations with a transaction journal, and supports undo.
 
-## v1 scope
+## v2 desktop workflow
 
-The first version focuses on safe, transparent, reversible organization:
+The current desktop app focuses on the safe Explorer-to-preview workflow:
+
+- Right-click a folder in Explorer and choose `Organize with smartfolder`.
+- Open the GUI with that folder preselected.
+- Choose a built-in style or saved custom rule profile.
+- Analyze, preview, organize, and undo from the same app.
+- Use Activity, Rules, and Settings for restore history, rule profiles, and local preferences.
+
+## v1 CLI scope
+
+The original CLI version focuses on safe, transparent, reversible organization:
 
 - Metadata, filename, path, extension, size, and timestamp analysis only.
 - Deterministic type/date/extension organization rules.
@@ -36,7 +46,7 @@ cargo build --release
 
 When built without `--release`, the executable is created at `.\target\debug\smartfolder.exe`.
 
-An experimental Windows-first GUI crate also exists and can be started with:
+The Windows-first GUI crate can be started with:
 
 ```powershell
 cargo run -p smartfolder-gui -- <root>

@@ -2,11 +2,11 @@
 
 ## Status
 
-This plan is finalized for v2.0 release-candidate review.
+This plan is finalized as the v2.0 release record.
 
 The original v2 technical foundation is implemented: GUI launch, folder selection, bounded-memory analysis, paged preview, safe apply, undo, profile import/editing, Explorer launcher script, and portable packaging script exist.
 
-The v2 priority changed from capability expansion to a major UX rewrite. UX-1 through UX-9 are now implemented as the release-candidate track. Automated validation is complete; the remaining release gate is manual GUI smoke review from the Windows desktop workflow.
+The v2 priority changed from capability expansion to a major UX rewrite. UX-1 through UX-9 are implemented and shipped as the v2.0 Windows-first desktop release.
 
 ## Product direction
 
@@ -95,7 +95,7 @@ These shipped pieces become the implementation substrate for the UX rewrite:
 
 ### Milestone UX-0 - Baseline stabilization before rewrite
 
-**Status:** implemented - baseline and release-candidate validation complete for the required UX test stack
+**Status:** implemented - baseline and v2.0 validation complete for the required UX test stack
 
 Purpose:
 
@@ -126,7 +126,7 @@ Implementation notes:
 
 ### Milestone UX-1 - New Organize screen shell
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -167,7 +167,7 @@ Right-click folder in Explorer -> Organize with smartfolder -> folder is already
 
 ### Milestone UX-2 - Guided folder and style selection
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -206,7 +206,7 @@ User can understand the first two actions within 30 seconds: confirm the presele
 
 ### Milestone UX-3 - Analysis progress and summary cards
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -240,7 +240,7 @@ After analysis, user can answer: how many files are safe to organize, how many n
 
 ### Milestone UX-4 - Simplified preview with progressive details
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -279,7 +279,7 @@ User can understand where files will go without reading full absolute paths or r
 
 ### Milestone UX-5 - Organize Files apply flow and immediate undo
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -317,7 +317,7 @@ Analyze -> preview -> Organize Files -> Undo Changes restores the original layou
 
 ### Milestone UX-6 - Activity screen and restore history language
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -349,7 +349,7 @@ User can find a prior organization action and understand whether it can be undon
 
 ### Milestone UX-7 - Rules screen cleanup
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -385,7 +385,7 @@ Create simple PDF profile -> Analyze Folder with Custom Rules -> preview expecte
 
 ### Milestone UX-8 - Settings, advanced controls, and desktop integration polish
 
-**Status:** implemented - release-candidate scope complete
+**Status:** implemented - v2.0 scope complete
 
 Purpose:
 
@@ -419,7 +419,7 @@ Explorer context menu opens smartfolder with the selected folder preloaded and n
 
 ### Milestone UX-9 - Hardening, accessibility, and release readiness
 
-**Status:** implemented - automated validation complete; manual GUI smoke review remains recommended before tagging release
+**Status:** implemented - v2.0 release validation complete
 
 Purpose:
 
@@ -528,13 +528,11 @@ Required manual checks:
 
 ## Final release gate
 
-The UX rewrite plan is approved and implemented through UX-9. Do not expand v2.0 scope before release-candidate review; keep AI recommendations, automatic organization, duplicate detection, content extraction, regex-heavy workflows, and a full multi-rule designer out of this release.
+The UX rewrite plan was approved and implemented through UX-9. AI recommendations, automatic organization, duplicate detection, content extraction, regex-heavy workflows, and installer work remain outside the v2.0 release.
 
-Release-candidate signoff should focus on the manual desktop proof that automated tests cannot cover:
+Release signoff focused on the manual desktop proof that automated tests cannot cover:
 
 - Explorer context menu opens `Organize with smartfolder` with the clicked folder preselected.
 - A disposable folder completes Analyze Folder -> Preview -> Organize Files -> Undo Changes.
 - Undo restores the original layout.
 - Organize, Activity, Rules, and Settings remain readable at the target window size.
-
-If those checks pass, the v2.0 UX rewrite is ready to tag as a release candidate.

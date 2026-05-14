@@ -2460,21 +2460,44 @@ impl SmartfolderApp {
         let mut profile_to_use: Option<LoadedRuleProfile> = None;
         let mut profile_to_edit: Option<LoadedRuleProfile> = None;
 
+        render_active_profile_panel(
+            ui,
+            self.planning_source,
+            self.mode,
+            self.loaded_profile.as_ref(),
+            &mut profile_to_edit,
+            &mut self.maintenance_message,
+        );
+        ui.add_space(ui::theme::spacing::MD);
+
+        if self.ai_is_available() {
+            render_rules_ai_panel(
+                ui,
+                self.has_selected_root(),
+                self.is_running_ai_task(),
+                &mut self.show_rules_workspace,
+                &mut self.show_ai_draft_prompt,
+                &mut self.maintenance_message,
+                &mut self.error_message,
+            );
+            ui.add_space(ui::theme::spacing::MD);
+        }
+
         ui::theme::widgets::card_frame().show(ui, |ui| {
             ui.label(
                 RichText::new("Rules library")
                     .strong()
-                    .size(18.0)
+                    .size(ui::theme::typography::CARD_TITLE)
                     .color(ui::theme::colors::heading_text()),
             );
             ui.label(
-                RichText::new("Built-ins are read-only. Customize one to create an editable profile.")
+                RichText::new("Compare built-in styles and saved custom profiles.")
                     .color(ui::theme::colors::secondary_text()),
             );
             ui.add_space(ui::theme::spacing::SM);
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add(ui::theme::widgets::primary_button("New custom profile"))
+                    .add(ui::theme::widgets::secondary_button("New custom profile"))
                     .clicked()
                 {
                     self.profile_editor = ProfileEditorState::default();
@@ -2490,24 +2513,6 @@ impl SmartfolderApp {
                     .clicked()
                 {
                     self.import_rule_profile();
-                }
-                if self.loaded_profile.is_some()
-                    && ui
-                        .add(ui::theme::widgets::secondary_button("Edit active profile"))
-                        .clicked()
-                {
-                    self.show_rules_workspace = true;
-                }
-                if self.ai_is_available()
-                    && ui
-                        .add(ui::theme::widgets::secondary_button("Build with AI"))
-                        .clicked()
-                {
-                    self.show_rules_workspace = true;
-                    self.show_ai_draft_prompt = true;
-                    self.maintenance_message =
-                        Some("Describe the rule profile you want AI to draft.".to_string());
-                    self.error_message = None;
                 }
             });
             ui.add_space(ui::theme::spacing::SM);
@@ -7822,6 +7827,173 @@ enum SavedProfileAction {
     Edit,
 }
 
+fn render_active_profile_panel(
+    ui: &mut egui::Ui,
+    planning_source: PlanningSource,
+    mode: BuiltInMode,
+    loaded_profile: Option<&LoadedRuleProfile>,
+    profile_to_edit: &mut Option<LoadedRuleProfile>,
+    maintenance_message: &mut Option<String>,
+) {
+    ui::theme::widgets::card_frame().show(ui, |ui| {
+        ui.label(
+            RichText::new("Active profile")
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.add_space(ui::theme::spacing::XS);
+
+        let (name, rules, destination, is_custom) =
+            active_profile_summary(planning_source, mode, loaded_profile);
+
+        ui.horizontal_wrapped(|ui| {
+            render_status_chip(
+                ui,
+                if is_custom { "Custom" } else { "Built-in" },
+                ui::theme::colors::info(),
+                ui::theme::colors::info_bg(),
+            );
+            ui.label(
+                RichText::new(name)
+                    .strong()
+                    .color(ui::theme::colors::heading_text()),
+            );
+            ui.label(
+                RichText::new(rules)
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            );
+        });
+        ui.label(
+            RichText::new(destination)
+                .monospace()
+                .color(ui::theme::colors::primary_text()),
+        );
+        ui.add_space(ui::theme::spacing::SM);
+        ui.horizontal_wrapped(|ui| {
+            if let Some(profile) = loaded_profile {
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Edit profile"))
+                    .clicked()
+                {
+                    *profile_to_edit = Some(profile.clone());
+                }
+            }
+            if ui
+                .add(ui::theme::widgets::tertiary_button("Use another"))
+                .clicked()
+            {
+                *maintenance_message =
+                    Some("Choose a built-in style or saved custom profile below.".to_string());
+            }
+        });
+    });
+}
+
+fn active_profile_summary(
+    planning_source: PlanningSource,
+    mode: BuiltInMode,
+    loaded_profile: Option<&LoadedRuleProfile>,
+) -> (String, String, String, bool) {
+    match (planning_source, loaded_profile) {
+        (PlanningSource::RuleProfile, Some(profile)) => (
+            profile.profile.profile_id.clone(),
+            format!(
+                "{} rule{}",
+                profile.profile.rules.len(),
+                plural(profile.profile.rules.len())
+            ),
+            profile_destination_example(&profile.profile),
+            true,
+        ),
+        _ => {
+            let (_, title, pattern, _) = builtin_library_items()
+                .into_iter()
+                .find(|(candidate, _, _, _)| *candidate == mode)
+                .unwrap_or((
+                    BuiltInMode::TypeYear,
+                    "Type + Date",
+                    "{type}/{year}/{month}/{day}",
+                    "",
+                ));
+            (
+                title.to_string(),
+                "Read-only built-in".to_string(),
+                format!("Destination: {}", sample_destination_template(pattern)),
+                false,
+            )
+        }
+    }
+}
+
+fn profile_destination_example(profile: &RuleProfile) -> String {
+    profile
+        .rules
+        .first()
+        .map(|rule| {
+            format!(
+                "Destination: {}",
+                sample_destination_template(&rule.destination)
+            )
+        })
+        .unwrap_or_else(|| "Destination: not set".to_string())
+}
+
+fn render_rules_ai_panel(
+    ui: &mut egui::Ui,
+    has_root: bool,
+    running_ai_task: bool,
+    show_rules_workspace: &mut bool,
+    show_ai_draft_prompt: &mut bool,
+    maintenance_message: &mut Option<String>,
+    error_message: &mut Option<String>,
+) {
+    ui::theme::widgets::surface_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new("Rule suggestions")
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.label(
+            RichText::new("Use AI to draft deterministic custom rules, then review and save them before organizing.")
+                .color(ui::theme::colors::secondary_text()),
+        );
+        ui.add_space(ui::theme::spacing::SM);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    has_root && !running_ai_task,
+                    ui::theme::widgets::secondary_button("Suggest rules from current folder"),
+                )
+                .on_disabled_hover_text("Choose a folder before asking AI to suggest rules")
+                .clicked()
+            {
+                *show_rules_workspace = true;
+                *show_ai_draft_prompt = true;
+                *maintenance_message =
+                    Some("Describe how you want files organized, then draft rules.".to_string());
+                *error_message = None;
+            }
+            if ui
+                .add_enabled(
+                    !running_ai_task,
+                    ui::theme::widgets::tertiary_button("Describe how you want files organized"),
+                )
+                .clicked()
+            {
+                *show_rules_workspace = true;
+                *show_ai_draft_prompt = true;
+                *maintenance_message =
+                    Some("Describe the rule profile you want AI to draft.".to_string());
+                *error_message = None;
+            }
+        });
+    });
+}
+
 fn builtin_library_items() -> [(BuiltInMode, &'static str, &'static str, &'static str); 3] {
     [
         (
@@ -7857,17 +8029,17 @@ fn render_builtin_rule_row(
         .fill(if selected {
             ui::theme::colors::hover_control()
         } else {
-            ui::theme::colors::surface()
+            ui::theme::colors::elevated_surface()
         })
         .stroke(egui::Stroke::new(
-            if selected { 2.0 } else { 1.0 },
+            1.0,
             if selected {
                 ui::theme::colors::primary_blue()
             } else {
                 ui::theme::colors::border()
             },
         ))
-        .rounding(egui::Rounding::same(8.0))
+        .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -7877,16 +8049,16 @@ fn render_builtin_rule_row(
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            if selected {
+                                ui::theme::widgets::status_dot(
+                                    ui,
+                                    ui::theme::colors::primary_blue(),
+                                );
+                            }
                             ui.label(
                                 RichText::new(title)
                                     .strong()
                                     .color(ui::theme::colors::heading_text()),
-                            );
-                            render_status_chip(
-                                ui,
-                                "Built-in",
-                                ui::theme::colors::secondary_text(),
-                                ui::theme::colors::elevated_surface(),
                             );
                             if selected {
                                 render_status_chip(
@@ -7898,9 +8070,12 @@ fn render_builtin_rule_row(
                             }
                         });
                         ui.label(
-                            RichText::new(format!("Destination: {pattern}"))
-                                .monospace()
-                                .color(ui::theme::colors::primary_text()),
+                            RichText::new(format!(
+                                "Destination: {}",
+                                sample_destination_template(pattern)
+                            ))
+                            .monospace()
+                            .color(ui::theme::colors::primary_text()),
                         );
                         ui.add(
                             egui::Label::new(
@@ -7912,13 +8087,13 @@ fn render_builtin_rule_row(
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add(ui::theme::widgets::secondary_button("Customize"))
+                        .add(ui::theme::widgets::compact_secondary_button("Customize"))
                         .clicked()
                     {
                         on_action(BuiltinRuleAction::Customize);
                     }
                     if ui
-                        .add(ui::theme::widgets::secondary_button("Use"))
+                        .add(ui::theme::widgets::compact_secondary_button("Use"))
                         .clicked()
                     {
                         on_action(BuiltinRuleAction::Use);
@@ -7938,17 +8113,17 @@ fn render_saved_profile_row(
         .fill(if selected {
             ui::theme::colors::hover_control()
         } else {
-            ui::theme::colors::surface()
+            ui::theme::colors::elevated_surface()
         })
         .stroke(egui::Stroke::new(
-            if selected { 2.0 } else { 1.0 },
+            1.0,
             if selected {
                 ui::theme::colors::primary_blue()
             } else {
                 ui::theme::colors::border()
             },
         ))
-        .rounding(egui::Rounding::same(8.0))
+        .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -7958,6 +8133,12 @@ fn render_saved_profile_row(
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            if selected {
+                                ui::theme::widgets::status_dot(
+                                    ui,
+                                    ui::theme::colors::primary_blue(),
+                                );
+                            }
                             ui.label(
                                 RichText::new(&profile.profile.profile_id)
                                     .strong()
@@ -7985,8 +8166,9 @@ fn render_saved_profile_row(
                         if let Some(rule) = profile.profile.rules.first() {
                             ui.label(
                                 RichText::new(format!(
-                                    "First rule: {} -> {}",
-                                    rule.name, rule.destination
+                                    "{} -> {}",
+                                    rule.name,
+                                    sample_destination_template(&rule.destination)
                                 ))
                                 .color(ui::theme::colors::secondary_text()),
                             );
@@ -8004,13 +8186,13 @@ fn render_saved_profile_row(
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add(ui::theme::widgets::secondary_button("Use"))
+                        .add(ui::theme::widgets::compact_secondary_button("Use"))
                         .clicked()
                     {
                         action = Some(SavedProfileAction::Use);
                     }
                     if ui
-                        .add(ui::theme::widgets::secondary_button("Edit"))
+                        .add(ui::theme::widgets::compact_secondary_button("Edit"))
                         .clicked()
                     {
                         action = Some(SavedProfileAction::Edit);

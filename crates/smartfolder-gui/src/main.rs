@@ -68,7 +68,10 @@ use smartfolder_core::session_store::{PlanOperationFilter, SessionScanSink, Sqli
 use smartfolder_core::storage::ensure_profiles_dir;
 
 use preferences::{GuiPreferences, MotionPreference, StylePreference, ThemePreference};
-use ui::components::status_chip as render_status_chip;
+use ui::components::{
+    note_frame as settings_note_frame, panel_frame as settings_panel_frame,
+    screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
+};
 
 type AnalysisMessage = std::result::Result<AnalysisOutput, String>;
 type ApplyMessage = std::result::Result<ApplyOutput, String>;
@@ -4549,11 +4552,6 @@ fn render_analysis_progress(ui: &mut egui::Ui, ctx: &egui::Context, progress: &A
         });
 }
 
-fn truncated_label(ui: &mut egui::Ui, text: &str) {
-    let width = ui.available_width().max(120.0);
-    ui.add_sized([width, 20.0], egui::Label::new(text).truncate());
-}
-
 fn progress_text(progress: &AnalysisProgress) -> String {
     match progress.fraction {
         Some(fraction) if progress.plan_total > 0 => format!(
@@ -7011,31 +7009,6 @@ fn render_constrained_page(
     });
 }
 
-fn render_screen_heading(ui: &mut egui::Ui, icon: &str, title: &str, detail: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new(icon)
-                .size(18.0)
-                .color(ui::theme::colors::primary_blue()),
-        );
-        ui.label(
-            RichText::new(title)
-                .size(ui::theme::typography::PAGE_TITLE)
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
-    });
-    ui.add_space(ui::theme::spacing::XS);
-    ui.add(
-        egui::Label::new(
-            RichText::new(detail)
-                .size(ui::theme::typography::BODY)
-                .color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-}
-
 fn render_instruction_picker(
     ui: &mut egui::Ui,
     selected_instruction: InstructionPreset,
@@ -7415,22 +7388,6 @@ fn render_settings_help_row(ui: &mut egui::Ui, title: &str, detail: &str, status
                 .wrap(),
         );
     });
-}
-
-fn settings_note_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(ui::theme::colors::subtle_surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::LG))
-}
-
-fn settings_panel_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(ui::theme::colors::elevated_surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::LG))
 }
 
 fn render_settings_section_panel(

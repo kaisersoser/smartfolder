@@ -372,6 +372,9 @@ struct SmartfolderApp {
     show_settings_help: bool,
     show_rules_workspace: bool,
     shell_nav_expanded: bool,
+    show_command_palette: bool,
+    command_palette_query: String,
+    rule_simulation: Option<RuleSimulationResult>,
     error_message: Option<String>,
     maintenance_message: Option<String>,
 }
@@ -449,6 +452,9 @@ impl SmartfolderApp {
             show_settings_help: false,
             show_rules_workspace: false,
             shell_nav_expanded: false,
+            show_command_palette: false,
+            command_palette_query: String::new(),
+            rule_simulation: None,
             error_message: None,
             maintenance_message: preferences_message,
         };
@@ -1289,6 +1295,47 @@ impl SmartfolderApp {
         }
     }
 
+    fn simulate_selected_rule(&mut self) {
+        let Some(result) = &self.analysis_result else {
+            self.error_message = Some("Run Preview before simulating a rule.".to_string());
+            return;
+        };
+        let Some(rule) = self.profile_editor.selected_rule().cloned() else {
+            self.error_message = Some("Select a rule before simulating it.".to_string());
+            return;
+        };
+        let rule_name = rule.rule_name.clone();
+        let session_id = result.session_id.clone();
+        let root = result.root.clone();
+
+        match rule
+            .to_rule()
+            .map_err(|message| format!("Fix this rule before simulating it: {message}"))
+            .and_then(|rule| simulate_rule_against_session(&session_id, &root, &rule))
+        {
+            Ok(simulation) => {
+                self.rule_simulation = Some(simulation);
+                self.maintenance_message = Some(format!(
+                    "Rule '{rule_name}' matched {} file{} in the current preview.",
+                    self.rule_simulation
+                        .as_ref()
+                        .map_or(0, |simulation| simulation.matched_files),
+                    plural(
+                        self.rule_simulation
+                            .as_ref()
+                            .map_or(0, |simulation| simulation.matched_files)
+                    )
+                ));
+                self.error_message = None;
+            }
+            Err(message) => {
+                self.rule_simulation = None;
+                self.error_message = Some(message);
+                self.maintenance_message = None;
+            }
+        }
+    }
+
     fn export_ai_diagnostics(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_file_name("smartfolder-ai-diagnostics.json")
@@ -1751,6 +1798,19 @@ impl SmartfolderApp {
     }
 
     fn process_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let open_palette = ctx.input(|input| {
+            (input.modifiers.ctrl || input.modifiers.command) && input.key_pressed(egui::Key::K)
+                || input.key_pressed(egui::Key::F1)
+        });
+        if open_palette {
+            self.show_command_palette = true;
+            self.command_palette_query.clear();
+        }
+
+        if self.show_command_palette && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.show_command_palette = false;
+        }
+
         let requested_section = ctx.input(|input| {
             if !input.modifiers.alt {
                 return None;
@@ -2790,8 +2850,9 @@ impl SmartfolderApp {
                 egui::vec2(ui.available_width(), 0.0),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
+                    let rule_simulation = self.rule_simulation.clone();
                     if let Some(rule) = self.profile_editor.selected_rule_mut() {
-                        render_rule_detail_editor(ui, rule);
+                        render_rule_detail_editor(ui, rule, rule_simulation.as_ref());
                     }
                 },
             );
@@ -2883,6 +2944,16 @@ impl SmartfolderApp {
                 .clicked()
             {
                 self.validate_profile_editor();
+            }
+            if ui
+                .add_enabled(
+                    self.analysis_result.is_some(),
+                    ui::theme::widgets::compact_secondary_button("Simulate"),
+                )
+                .on_disabled_hover_text("Run Preview before simulating this rule")
+                .clicked()
+            {
+                self.simulate_selected_rule();
             }
             if self.ai_is_available() {
                 if ui
@@ -3129,6 +3200,213 @@ impl SmartfolderApp {
             }
         }
     }
+
+    fn render_command_palette_window(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Option<CommandPaletteAction> {
+        if !self.show_command_palette {
+            return None;
+        }
+
+        let mut action = None;
+        let mut open = true;
+        egui::Window::new("Command palette")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.command_palette_query)
+                        .hint_text("Search commands")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(ui::theme::spacing::SM);
+
+                let query = self.command_palette_query.trim().to_ascii_lowercase();
+                for item in self.command_palette_items() {
+                    if !query.is_empty()
+                        && !item.label.to_ascii_lowercase().contains(&query)
+                        && !item.detail.to_ascii_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+
+                    let response = ui
+                        .add_enabled_ui(item.enabled, |ui| {
+                            ui::theme::widgets::surface_frame().show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        RichText::new(item.label)
+                                            .strong()
+                                            .color(ui::theme::colors::heading_text()),
+                                    );
+                                    ui.label(
+                                        RichText::new(item.detail)
+                                            .size(ui::theme::typography::CAPTION)
+                                            .color(ui::theme::colors::metadata_text()),
+                                    );
+                                });
+                            });
+                        })
+                        .response
+                        .interact(egui::Sense::click());
+
+                    if response.clicked() && item.enabled {
+                        action = Some(item.action);
+                    }
+                    ui.add_space(ui::theme::spacing::XS);
+                }
+            });
+
+        if action.is_some() || !open {
+            self.show_command_palette = false;
+        }
+
+        action
+    }
+
+    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        let busy = self.is_analyzing() || self.is_applying() || self.is_undoing();
+        let ready = self
+            .analysis_result
+            .as_ref()
+            .map_or(0, |result| result.preview_counts.ready);
+        vec![
+            CommandPaletteItem::new(
+                "Go to Organize",
+                "Open the preview-led organize workflow",
+                true,
+                CommandPaletteAction::OpenSection(AppSection::Organize),
+            ),
+            CommandPaletteItem::new(
+                "Go to Activity",
+                "Review recent activity and restore previous layouts",
+                true,
+                CommandPaletteAction::OpenSection(AppSection::Activity),
+            ),
+            CommandPaletteItem::new(
+                "Go to Rules",
+                "Open built-in and custom rule profiles",
+                true,
+                CommandPaletteAction::OpenSection(AppSection::Rules),
+            ),
+            CommandPaletteItem::new(
+                "Go to Settings",
+                "Open app preferences and AI readiness",
+                true,
+                CommandPaletteAction::OpenSection(AppSection::Settings),
+            ),
+            CommandPaletteItem::new(
+                "Choose folder",
+                "Return to folder selection",
+                !busy,
+                CommandPaletteAction::ChooseFolder,
+            ),
+            CommandPaletteItem::new(
+                "Preview current folder",
+                "Analyze the selected folder",
+                self.can_run_analysis() && !busy,
+                CommandPaletteAction::Analyze,
+            ),
+            CommandPaletteItem::new(
+                "Review all changes",
+                "Open the detailed file list",
+                self.analysis_result.is_some(),
+                CommandPaletteAction::ReviewAllChanges,
+            ),
+            CommandPaletteItem::new(
+                "Show preview tree",
+                "Open the detailed preview grouped by destination",
+                self.analysis_result.is_some(),
+                CommandPaletteAction::ShowPreviewTree,
+            ),
+            CommandPaletteItem::new(
+                "Organize ready files",
+                "Move only safe ready files after confirmation",
+                ready > 0 && !busy,
+                CommandPaletteAction::OrganizeReady,
+            ),
+            CommandPaletteItem::new(
+                "Restore latest layout",
+                "Restore the latest restorable activity for this folder",
+                self.latest_restorable_transaction().is_some() && !busy,
+                CommandPaletteAction::RestoreLatest,
+            ),
+            CommandPaletteItem::new(
+                "Open profile workspace",
+                "Edit and validate custom rules",
+                true,
+                CommandPaletteAction::OpenProfileWorkspace,
+            ),
+            CommandPaletteItem::new(
+                "Test AI connection",
+                "Run the Ollama readiness check",
+                !self.is_checking_ai_status(),
+                CommandPaletteAction::TestAiConnection,
+            ),
+        ]
+    }
+
+    fn apply_command_palette_action(&mut self, action: CommandPaletteAction) {
+        match action {
+            CommandPaletteAction::OpenSection(section) => {
+                self.active_section = section;
+            }
+            CommandPaletteAction::ChooseFolder => {
+                self.active_section = AppSection::Organize;
+                self.organize_step = OrganizeStep::Folder;
+            }
+            CommandPaletteAction::Analyze => {
+                self.active_section = AppSection::Organize;
+                self.continue_from_style_step();
+            }
+            CommandPaletteAction::ReviewAllChanges => {
+                self.active_section = AppSection::Organize;
+                self.organize_step = OrganizeStep::Preview;
+                self.show_detailed_preview = true;
+                self.preview_detail_mode = PreviewDetailMode::List;
+            }
+            CommandPaletteAction::ShowPreviewTree => {
+                self.active_section = AppSection::Organize;
+                self.organize_step = OrganizeStep::Preview;
+                self.show_detailed_preview = true;
+                self.preview_detail_mode = PreviewDetailMode::Tree;
+            }
+            CommandPaletteAction::OrganizeReady => {
+                self.active_section = AppSection::Organize;
+                self.continue_from_preview_step();
+            }
+            CommandPaletteAction::RestoreLatest => {
+                if let Some(transaction_id) = self.latest_restorable_transaction() {
+                    self.show_undo_confirmation = Some(transaction_id);
+                }
+            }
+            CommandPaletteAction::OpenProfileWorkspace => {
+                self.active_section = AppSection::Rules;
+                self.show_rules_workspace = true;
+            }
+            CommandPaletteAction::TestAiConnection => {
+                self.active_section = AppSection::Settings;
+                self.start_ai_status_check(AiStatusCheckSource::Manual);
+            }
+        }
+    }
+
+    fn latest_restorable_transaction(&self) -> Option<String> {
+        let active_root = self.active_root();
+        self.transaction_rows
+            .iter()
+            .find(|row| {
+                can_undo_status(row.status)
+                    && active_root
+                        .as_deref()
+                        .map_or(true, |root| same_folder(&row.root, root))
+            })
+            .map(|row| row.transaction_id.clone())
+    }
 }
 
 impl eframe::App for SmartfolderApp {
@@ -3197,6 +3475,10 @@ impl eframe::App for SmartfolderApp {
 
         self.render_rules_workspace_window(ctx);
 
+        if let Some(action) = self.render_command_palette_window(ctx) {
+            self.apply_command_palette_action(action);
+        }
+
         if let Some(action) = preview_action {
             self.apply_preview_action(action);
         }
@@ -3264,6 +3546,43 @@ enum PreviewDetailMode {
 enum AiStatusCheckSource {
     Startup,
     Manual,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CommandPaletteAction {
+    OpenSection(AppSection),
+    ChooseFolder,
+    Analyze,
+    ReviewAllChanges,
+    ShowPreviewTree,
+    OrganizeReady,
+    RestoreLatest,
+    OpenProfileWorkspace,
+    TestAiConnection,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandPaletteItem {
+    label: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    action: CommandPaletteAction,
+}
+
+impl CommandPaletteItem {
+    fn new(
+        label: &'static str,
+        detail: &'static str,
+        enabled: bool,
+        action: CommandPaletteAction,
+    ) -> Self {
+        Self {
+            label,
+            detail,
+            enabled,
+            action,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3549,6 +3868,10 @@ impl ProfileEditorState {
 
     fn selected_rule_index(&self) -> usize {
         self.selected_rule.min(self.rules.len().saturating_sub(1))
+    }
+
+    fn selected_rule(&self) -> Option<&RuleEditorState> {
+        self.rules.get(self.selected_rule_index())
     }
 
     fn selected_rule_mut(&mut self) -> Option<&mut RuleEditorState> {
@@ -3937,6 +4260,14 @@ struct PreviewRow {
 }
 
 #[derive(Debug, Clone)]
+struct RuleSimulationResult {
+    rule_name: String,
+    matched_files: usize,
+    total_files: usize,
+    sample_matches: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 struct ApplyProgress {
     headline: String,
     detail: String,
@@ -4213,6 +4544,52 @@ fn load_ai_context_records(
     store
         .scan_records_page(session_id, 0, 500)
         .map_err(|error| format!("Failed to load AI folder context: {error}"))
+}
+
+fn simulate_rule_against_session(
+    session_id: &str,
+    root: &Path,
+    rule: &CustomRule,
+) -> std::result::Result<RuleSimulationResult, String> {
+    let records = load_all_scan_records(session_id)?;
+    let mut sample_matches = Vec::new();
+    let mut matched_files = 0;
+
+    for record in &records {
+        if rule.match_record(record).is_some() {
+            matched_files += 1;
+            if sample_matches.len() < 5 {
+                sample_matches.push(root.join(&record.root_relative_path).display().to_string());
+            }
+        }
+    }
+
+    Ok(RuleSimulationResult {
+        rule_name: rule.name.clone(),
+        matched_files,
+        total_files: records.len(),
+        sample_matches,
+    })
+}
+
+fn load_all_scan_records(
+    session_id: &str,
+) -> std::result::Result<Vec<FileInventoryRecord>, String> {
+    let store = SqliteSessionStore::open_default()
+        .map_err(|error| format!("Failed to open session store: {error}"))?;
+    let mut records = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = store
+            .scan_records_page(session_id, offset, 500)
+            .map_err(|error| format!("Failed to load rule simulation records: {error}"))?;
+        if page.is_empty() {
+            break;
+        }
+        offset += page.len();
+        records.extend(page);
+    }
+    Ok(records)
 }
 
 fn ai_draft_summary_message(validation: &AiProfileValidation) -> String {
@@ -7083,6 +7460,23 @@ fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_ro
                     ui.label(RichText::new(&row.reason).color(ui::theme::colors::primary_text()));
                     ui.end_row();
                 });
+            ui.add_space(8.0);
+            ui::theme::widgets::surface_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new("Explanation")
+                        .strong()
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::heading_text()),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(preview_row_explanation(row))
+                            .color(ui::theme::colors::secondary_text()),
+                    )
+                    .wrap(),
+                );
+            });
             ui.add_space(6.0);
             truncated_label(ui, &format!("Full source: {}", row.source_full_path));
             if let Some(destination) = &row.destination_full_path {
@@ -7106,6 +7500,27 @@ fn preview_status_colors(status: &str) -> (Color32, Color32) {
         _ => (
             ui::theme::colors::metadata_text(),
             ui::theme::colors::subtle_surface(),
+        ),
+    }
+}
+
+fn preview_row_explanation(row: &PreviewRow) -> String {
+    match row.status.as_str() {
+        "Ready" => format!(
+            "This file matched '{}'. smartfolder found a destination inside the selected folder and no conflict was detected, so it can be organized after confirmation.",
+            row.reason
+        ),
+        "Needs Review" => format!(
+            "This file matched '{}', but the destination needs attention before smartfolder will move it. It stays untouched unless the conflict is resolved.",
+            row.reason
+        ),
+        "Untouched" => format!(
+            "This file stays in place because {}. It will not be moved by the current plan.",
+            row.reason
+        ),
+        _ => format!(
+            "This row is marked '{}'. Review the source and destination before organizing.",
+            row.status
         ),
     }
 }
@@ -7942,7 +8357,11 @@ fn render_rule_list_item(
     response.on_hover_text(rule_destination_summary(rule))
 }
 
-fn render_rule_detail_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+fn render_rule_detail_editor(
+    ui: &mut egui::Ui,
+    rule: &mut RuleEditorState,
+    simulation: Option<&RuleSimulationResult>,
+) {
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
     render_rule_editor_section(ui, "Rule", "Name this rule and set its order.", |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -7976,6 +8395,14 @@ fn render_rule_detail_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
             ui.add_space(ui::theme::spacing::SM);
             render_destination_builder(ui, rule);
         },
+    );
+
+    ui.add_space(ui::theme::spacing::SM);
+    render_rule_editor_section(
+        ui,
+        "Simulation",
+        "Preview how this rule behaves against the latest analyzed folder.",
+        |ui| render_rule_simulation(ui, rule, simulation),
     );
 
     ui.add_space(ui::theme::spacing::SM);
@@ -8022,6 +8449,57 @@ fn render_rule_editor_section(
         ui.add_space(ui::theme::spacing::SM);
         contents(ui);
     });
+}
+
+fn render_rule_simulation(
+    ui: &mut egui::Ui,
+    rule: &RuleEditorState,
+    simulation: Option<&RuleSimulationResult>,
+) {
+    let Some(simulation) = simulation.filter(|simulation| simulation.rule_name == rule.rule_name)
+    else {
+        ui.add(
+            egui::Label::new(
+                RichText::new("Run Preview, then use Simulate in the toolbar.")
+                    .color(ui::theme::colors::secondary_text()),
+            )
+            .wrap(),
+        );
+        return;
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        render_status_chip(
+            ui,
+            &format!(
+                "{} match{}",
+                simulation.matched_files,
+                plural(simulation.matched_files)
+            ),
+            ui::theme::colors::info(),
+            ui::theme::colors::info_bg(),
+        );
+        ui.label(
+            RichText::new(format!(
+                "Checked {} file{} from the current preview.",
+                simulation.total_files,
+                plural(simulation.total_files)
+            ))
+            .color(ui::theme::colors::secondary_text()),
+        );
+    });
+
+    if simulation.sample_matches.is_empty() {
+        ui.label(
+            RichText::new("No sampled files matched this rule.")
+                .color(ui::theme::colors::metadata_text()),
+        );
+    } else {
+        ui.add_space(ui::theme::spacing::XS);
+        for sample in &simulation.sample_matches {
+            truncated_label(ui, &format!("Matched: {sample}"));
+        }
+    }
 }
 
 fn render_rule_conditions_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {

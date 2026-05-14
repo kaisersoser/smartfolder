@@ -2764,34 +2764,24 @@ impl SmartfolderApp {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(
-                RichText::new("Build a custom rule profile")
+                RichText::new(&self.profile_editor.profile_id)
                     .strong()
-                    .size(18.0)
+                    .size(ui::theme::typography::SECTION_TITLE)
                     .color(ui::theme::colors::heading_text()),
+            );
+            render_status_chip(
+                ui,
+                &format!(
+                    "{} rule{}",
+                    self.profile_editor.rules.len(),
+                    plural(self.profile_editor.rules.len())
+                ),
+                ui::theme::colors::secondary_text(),
+                ui::theme::colors::subtle_surface(),
             );
             render_profile_workspace_status(ui, self.loaded_profile.as_ref());
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new("Profile id")
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::metadata_text()),
-            );
-            ui.add_sized(
-                [200.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
-            );
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("New"))
-                .clicked()
-            {
-                self.profile_editor = ProfileEditorState::default();
-                self.loaded_profile = None;
-                self.planning_source = PlanningSource::BuiltIn;
-                self.maintenance_message = Some("Started a new unsaved profile draft.".to_string());
-                self.error_message = None;
-            }
-            ui.separator();
             if ui
                 .add(ui::theme::widgets::compact_primary_button("Save"))
                 .clicked()
@@ -2811,18 +2801,6 @@ impl SmartfolderApp {
                 .clicked()
             {
                 self.validate_profile_editor();
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Import"))
-                .clicked()
-            {
-                self.import_rule_profile();
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Export"))
-                .clicked()
-            {
-                self.export_profile_from_editor();
             }
             if self.ai_is_available() {
                 if ui
@@ -2845,6 +2823,44 @@ impl SmartfolderApp {
                 }
             }
         });
+        egui::CollapsingHeader::new("Advanced")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Profile id")
+                            .size(ui::theme::typography::CAPTION)
+                            .color(ui::theme::colors::metadata_text()),
+                    );
+                    ui.add_sized(
+                        [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                        egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
+                    );
+                    if ui
+                        .add(ui::theme::widgets::compact_secondary_button("New draft"))
+                        .clicked()
+                    {
+                        self.profile_editor = ProfileEditorState::default();
+                        self.loaded_profile = None;
+                        self.planning_source = PlanningSource::BuiltIn;
+                        self.maintenance_message =
+                            Some("Started a new unsaved profile draft.".to_string());
+                        self.error_message = None;
+                    }
+                    if ui
+                        .add(ui::theme::widgets::compact_secondary_button("Import TOML"))
+                        .clicked()
+                    {
+                        self.import_rule_profile();
+                    }
+                    if ui
+                        .add(ui::theme::widgets::compact_secondary_button("Export TOML"))
+                        .clicked()
+                    {
+                        self.export_profile_from_editor();
+                    }
+                });
+            });
     }
 
     fn render_ai_rule_builder_panel(&mut self, ui: &mut egui::Ui) {

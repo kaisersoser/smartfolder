@@ -2770,8 +2770,12 @@ impl SmartfolderApp {
                 );
 
                 if ai_preferences_changed {
+                    let should_auto_check_ai = self.preferences.ai.enabled && !checking_ai_status;
                     self.ai_status = None;
                     self.save_preferences_with_message();
+                    if should_auto_check_ai {
+                        self.start_ai_status_check(AiStatusCheckSource::Startup);
+                    }
                 }
 
                 if test_ai_connection {
@@ -2823,8 +2827,13 @@ impl SmartfolderApp {
                 );
 
                 if advanced_changed {
+                    let should_auto_check_ai =
+                        self.preferences.ai.enabled && !self.is_checking_ai_status();
                     self.ai_status = None;
                     self.save_preferences_with_message();
+                    if should_auto_check_ai {
+                        self.start_ai_status_check(AiStatusCheckSource::Startup);
+                    }
                 }
                 if export_ai_diagnostics {
                     self.export_ai_diagnostics();

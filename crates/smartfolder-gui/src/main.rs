@@ -2317,6 +2317,7 @@ impl SmartfolderApp {
                         self.ai_task,
                         self.is_running_ai_task(),
                         self.preferences.ai.content_inspection_enabled,
+                        result.preview_counts.untouched,
                     ) {
                         Some(AiPreviewAction::Analyze) => {
                             start_ai_folder_analysis_requested = true;
@@ -5249,6 +5250,7 @@ fn render_ai_assist_strip(
     active_task: Option<AiTaskKind>,
     busy: bool,
     content_inspection_enabled: bool,
+    untouched_count: usize,
 ) -> Option<AiPreviewAction> {
     let mut action = None;
     let aligned_width = preview_aligned_content_width(ui);
@@ -5342,7 +5344,11 @@ fn render_ai_assist_strip(
                     if ui
                         .add_enabled(
                             !busy,
-                            ui::theme::widgets::compact_secondary_button("Analyze with AI"),
+                            ui::theme::widgets::compact_secondary_button(if untouched_count > 0 {
+                                "Explain untouched files"
+                            } else {
+                                "Analyze with AI"
+                            }),
                         )
                         .clicked()
                     {

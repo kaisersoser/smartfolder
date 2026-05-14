@@ -68,6 +68,7 @@ use smartfolder_core::session_store::{PlanOperationFilter, SessionScanSink, Sqli
 use smartfolder_core::storage::ensure_profiles_dir;
 
 use preferences::{GuiPreferences, MotionPreference, StylePreference, ThemePreference};
+use ui::components::status_chip as render_status_chip;
 
 type AnalysisMessage = std::result::Result<AnalysisOutput, String>;
 type ApplyMessage = std::result::Result<ApplyOutput, String>;
@@ -7238,18 +7239,6 @@ fn render_organize_step_controls(
             );
         }
     });
-}
-
-fn render_status_chip(ui: &mut egui::Ui, text: &str, stroke: Color32, fill: Color32) {
-    egui::Frame::group(ui.style())
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, stroke))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 4.0))
-        .show(ui, |ui| {
-            ui.set_min_width(0.0);
-            ui.label(RichText::new(text).strong().color(stroke));
-        });
 }
 
 fn render_folder_status_light(ui: &mut egui::Ui, has_root: bool, preselected: bool) {

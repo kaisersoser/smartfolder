@@ -3,7 +3,7 @@
 //! Semantic color tokens for the smartfolder GUI.
 //!
 //! These helpers keep color use tied to product meaning instead of local RGB
-//! choices. The palette follows the v2 design system and resolves against the
+//! choices. The palette follows the v2.25 design system and resolves against the
 //! currently applied visual theme.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,9 @@ struct Palette {
     heading_text: Color32,
     secondary_text: Color32,
     metadata_text: Color32,
+    border_subtle: Color32,
     border: Color32,
+    border_strong: Color32,
     success: Color32,
     success_bg: Color32,
     warning: Color32,
@@ -41,53 +43,57 @@ struct Palette {
 }
 
 const LIGHT: Palette = Palette {
-    app_background: Color32::from_rgb(245, 242, 236),
-    surface: Color32::from_rgb(251, 250, 247),
-    elevated_surface: Color32::WHITE,
-    subtle_surface: Color32::from_rgb(240, 235, 227),
-    soft_control: Color32::from_rgb(248, 246, 242),
-    hover_control: Color32::from_rgb(239, 244, 252),
-    primary_blue: Color32::from_rgb(47, 128, 237),
-    primary_blue_hover: Color32::from_rgb(37, 111, 209),
+    app_background: Color32::from_rgb(245, 247, 250),
+    surface: Color32::from_rgb(250, 251, 253),
+    elevated_surface: Color32::from_rgb(255, 255, 255),
+    subtle_surface: Color32::from_rgb(238, 242, 247),
+    soft_control: Color32::from_rgb(242, 245, 249),
+    hover_control: Color32::from_rgb(230, 239, 252),
+    primary_blue: Color32::from_rgb(53, 126, 229),
+    primary_blue_hover: Color32::from_rgb(39, 108, 203),
     on_primary: Color32::WHITE,
-    primary_text: Color32::from_rgb(45, 45, 45),
-    heading_text: Color32::from_rgb(34, 34, 34),
-    secondary_text: Color32::from_rgb(90, 90, 90),
-    metadata_text: Color32::from_rgb(123, 123, 123),
-    border: Color32::from_rgb(216, 210, 200),
-    success: Color32::from_rgb(79, 157, 105),
-    success_bg: Color32::from_rgb(237, 247, 240),
-    warning: Color32::from_rgb(216, 154, 43),
-    warning_bg: Color32::from_rgb(255, 246, 231),
-    info: Color32::from_rgb(89, 102, 145),
-    info_bg: Color32::from_rgb(236, 236, 244),
-    error: Color32::from_rgb(198, 90, 90),
-    error_bg: Color32::from_rgb(252, 238, 238),
+    primary_text: Color32::from_rgb(36, 42, 51),
+    heading_text: Color32::from_rgb(22, 27, 34),
+    secondary_text: Color32::from_rgb(86, 96, 111),
+    metadata_text: Color32::from_rgb(119, 130, 146),
+    border_subtle: Color32::from_rgb(226, 231, 238),
+    border: Color32::from_rgb(209, 217, 228),
+    border_strong: Color32::from_rgb(181, 193, 209),
+    success: Color32::from_rgb(58, 135, 89),
+    success_bg: Color32::from_rgb(230, 245, 235),
+    warning: Color32::from_rgb(181, 123, 32),
+    warning_bg: Color32::from_rgb(252, 242, 220),
+    info: Color32::from_rgb(76, 111, 185),
+    info_bg: Color32::from_rgb(231, 238, 251),
+    error: Color32::from_rgb(187, 75, 81),
+    error_bg: Color32::from_rgb(251, 233, 234),
 };
 
 const DARK: Palette = Palette {
-    app_background: Color32::from_rgb(18, 20, 22),
-    surface: Color32::from_rgb(25, 27, 30),
-    elevated_surface: Color32::from_rgb(34, 37, 41),
-    subtle_surface: Color32::from_rgb(43, 45, 49),
-    soft_control: Color32::from_rgb(49, 52, 57),
-    hover_control: Color32::from_rgb(43, 57, 78),
-    primary_blue: Color32::from_rgb(102, 168, 255),
-    primary_blue_hover: Color32::from_rgb(77, 144, 235),
-    on_primary: Color32::from_rgb(12, 17, 24),
-    primary_text: Color32::from_rgb(229, 232, 236),
-    heading_text: Color32::from_rgb(247, 248, 249),
-    secondary_text: Color32::from_rgb(187, 193, 201),
-    metadata_text: Color32::from_rgb(144, 151, 161),
-    border: Color32::from_rgb(75, 79, 87),
-    success: Color32::from_rgb(118, 204, 148),
-    success_bg: Color32::from_rgb(29, 58, 40),
-    warning: Color32::from_rgb(235, 184, 91),
-    warning_bg: Color32::from_rgb(70, 50, 24),
-    info: Color32::from_rgb(142, 170, 236),
-    info_bg: Color32::from_rgb(34, 45, 74),
-    error: Color32::from_rgb(234, 126, 126),
-    error_bg: Color32::from_rgb(75, 36, 39),
+    app_background: Color32::from_rgb(15, 17, 21),
+    surface: Color32::from_rgb(23, 26, 32),
+    elevated_surface: Color32::from_rgb(31, 35, 43),
+    subtle_surface: Color32::from_rgb(37, 42, 51),
+    soft_control: Color32::from_rgb(42, 48, 58),
+    hover_control: Color32::from_rgb(40, 54, 76),
+    primary_blue: Color32::from_rgb(106, 168, 255),
+    primary_blue_hover: Color32::from_rgb(138, 188, 255),
+    on_primary: Color32::from_rgb(7, 17, 31),
+    primary_text: Color32::from_rgb(229, 233, 240),
+    heading_text: Color32::from_rgb(243, 246, 251),
+    secondary_text: Color32::from_rgb(195, 202, 214),
+    metadata_text: Color32::from_rgb(143, 151, 165),
+    border_subtle: Color32::from_rgba_premultiplied(255, 255, 255, 20),
+    border: Color32::from_rgba_premultiplied(255, 255, 255, 34),
+    border_strong: Color32::from_rgba_premultiplied(255, 255, 255, 58),
+    success: Color32::from_rgb(97, 211, 148),
+    success_bg: Color32::from_rgba_premultiplied(97, 211, 148, 32),
+    warning: Color32::from_rgb(241, 189, 90),
+    warning_bg: Color32::from_rgba_premultiplied(241, 189, 90, 34),
+    info: Color32::from_rgb(122, 167, 255),
+    info_bg: Color32::from_rgba_premultiplied(122, 167, 255, 34),
+    error: Color32::from_rgb(255, 107, 107),
+    error_bg: Color32::from_rgba_premultiplied(255, 107, 107, 34),
 };
 
 /// Update the active palette used by semantic color tokens.
@@ -103,7 +109,7 @@ fn palette() -> Palette {
     }
 }
 
-/// Warm app background used behind the main content and shell.
+/// App background used behind the main content and shell.
 pub(crate) fn app_background() -> Color32 {
     palette().app_background
 }
@@ -168,9 +174,19 @@ pub(crate) fn metadata_text() -> Color32 {
     palette().metadata_text
 }
 
+/// Low-emphasis border color for quiet separation.
+pub(crate) fn border_subtle() -> Color32 {
+    palette().border_subtle
+}
+
 /// Standard border color.
 pub(crate) fn border() -> Color32 {
     palette().border
+}
+
+/// High-emphasis border color for focus, selection, and critical states.
+pub(crate) fn border_strong() -> Color32 {
+    palette().border_strong
 }
 
 /// Success semantic color.

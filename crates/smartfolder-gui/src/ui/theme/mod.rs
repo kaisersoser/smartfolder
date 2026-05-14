@@ -18,7 +18,7 @@ const INTER_VARIABLE_FONT: &[u8] = include_bytes!("../../../assets/fonts/InterVa
 /// Resolved visual theme used after applying the user's theme preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VisualTheme {
-    /// Warm light theme matching the v2 mockup direction.
+    /// Light theme using the same semantic token roles.
     Light,
     /// Dark theme using the same semantic token roles.
     Dark,
@@ -68,11 +68,14 @@ fn light_visuals() -> Visuals {
     visuals.widgets.noninteractive.fg_stroke.color = colors::primary_text();
     visuals.widgets.inactive.bg_fill = colors::soft_control();
     visuals.widgets.inactive.fg_stroke.color = colors::primary_text();
+    visuals.widgets.inactive.bg_stroke.color = colors::border_subtle();
     visuals.widgets.hovered.bg_fill = colors::hover_control();
     visuals.widgets.hovered.fg_stroke.color = colors::primary_text();
+    visuals.widgets.hovered.bg_stroke.color = colors::border();
     visuals.widgets.hovered.weak_bg_fill = colors::hover_control();
     visuals.widgets.active.bg_fill = colors::primary_blue();
     visuals.widgets.active.fg_stroke.color = colors::on_primary();
+    visuals.widgets.active.bg_stroke.color = colors::primary_blue();
     visuals.widgets.active.weak_bg_fill = colors::primary_blue_hover();
     visuals.override_text_color = Some(colors::primary_text());
     visuals.selection.bg_fill = colors::primary_blue();
@@ -91,11 +94,14 @@ fn dark_visuals() -> Visuals {
     visuals.widgets.noninteractive.fg_stroke.color = colors::primary_text();
     visuals.widgets.inactive.bg_fill = colors::soft_control();
     visuals.widgets.inactive.fg_stroke.color = colors::primary_text();
+    visuals.widgets.inactive.bg_stroke.color = colors::border_subtle();
     visuals.widgets.hovered.bg_fill = colors::hover_control();
     visuals.widgets.hovered.fg_stroke.color = colors::heading_text();
+    visuals.widgets.hovered.bg_stroke.color = colors::border();
     visuals.widgets.hovered.weak_bg_fill = colors::hover_control();
     visuals.widgets.active.bg_fill = colors::primary_blue();
     visuals.widgets.active.fg_stroke.color = colors::on_primary();
+    visuals.widgets.active.bg_stroke.color = colors::primary_blue();
     visuals.widgets.active.weak_bg_fill = colors::primary_blue_hover();
     visuals.override_text_color = Some(colors::primary_text());
     visuals.selection.bg_fill = colors::primary_blue();

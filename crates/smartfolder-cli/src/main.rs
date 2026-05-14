@@ -1,7 +1,7 @@
 //! Command-line interface for smartfolder.
 //!
 //! Provides a user-friendly interface to the smartfolder core library.
-//! The CLI supports six main commands: analyze, preview, apply, resume, undo, and transactions.
+//! The CLI supports analyze, preview, apply, resume, undo, transactions, and profiles commands.
 //!
 //! # Commands
 //!
@@ -11,6 +11,7 @@
 //! - **resume**: Continue an interrupted or failed transaction
 //! - **undo**: Reverse the effects of a transaction
 //! - **transactions**: List, inspect, and cleanup transaction journals
+//! - **profiles**: List, import, inspect, and validate saved rule profiles
 //!
 //! # Workflow
 //!
@@ -37,6 +38,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chrono::Utc;
+use serde::Serialize;
 use smartfolder_core::apply::{apply_plan, ApplyCancellationToken, ApplyOptions};
 use smartfolder_core::model::{BuiltInMode, PlanRecord, TransactionJournal, TransactionStatus};
 use smartfolder_core::planner::{generate_plan, render_preview, render_preview_json, PlanOptions};
@@ -46,6 +48,7 @@ use smartfolder_core::recovery::{
 };
 use smartfolder_core::rules::RuleProfile;
 use smartfolder_core::scanner::{scan_folder, ScanOptions};
+use smartfolder_core::storage::{ensure_profiles_dir, profiles_dir};
 use thiserror::Error;
 
 type Result<T> = std::result::Result<T, CliError>;
@@ -89,6 +92,7 @@ fn run() -> Result<()> {
         Some("resume" | "continue") => run_resume(&args[1..]),
         Some("undo") => run_undo(&args[1..]),
         Some("transactions") => run_transactions(&args[1..]),
+        Some("profiles") => run_profiles(&args[1..]),
         Some(command) => Err(CliError::UnknownCommand {
             command: (*command).to_string(),
         }),
@@ -119,8 +123,13 @@ fn run_analyze(args: &[String]) -> Result<()> {
     }
     let now = Utc::now();
     let plan_id = format!("plan_{}", now.format("%Y%m%d%H%M%S"));
-    let plan_options = match command.profile {
-        Some(profile_path) => {
+    let plan_options = match command.profile_source {
+        Some(ProfileSource::Path(profile_path)) => {
+            let profile = RuleProfile::from_toml(&fs::read_to_string(&profile_path)?)?;
+            PlanOptions::rule_profile(profile, plan_id, now)
+        }
+        Some(ProfileSource::Saved(profile_id)) => {
+            let profile_path = saved_profile_path(&profile_id)?;
             let profile = RuleProfile::from_toml(&fs::read_to_string(&profile_path)?)?;
             PlanOptions::rule_profile(profile, plan_id, now)
         }
@@ -322,16 +331,120 @@ fn run_transactions(args: &[String]) -> Result<()> {
     }
 }
 
+/// List, import, inspect, or validate rule profiles.
+fn run_profiles(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            let json = parse_flag_options(&args[1..], &["--json"])?.contains(&"--json");
+            let profiles = list_saved_profiles()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&profiles)?);
+            } else if profiles.is_empty() {
+                println!("No saved profiles found.");
+            } else {
+                for profile in profiles {
+                    println!(
+                        "{} | {} rule{} | {}",
+                        profile.profile_id,
+                        profile.rule_count,
+                        if profile.rule_count == 1 { "" } else { "s" },
+                        profile.path.display()
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some("inspect") => {
+            let profile_id = args
+                .get(1)
+                .ok_or(CliError::MissingArgument { name: "profile-id" })?;
+            let json = parse_flag_options(&args[2..], &["--json"])?.contains(&"--json");
+            let path = saved_profile_path(profile_id)?;
+            let profile = RuleProfile::from_toml(&fs::read_to_string(&path)?)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&profile)?);
+            } else {
+                print_profile_summary(&profile, &path);
+            }
+            Ok(())
+        }
+        Some("import") => {
+            let source = args
+                .get(1)
+                .ok_or(CliError::MissingArgument { name: "rules.toml" })?;
+            let mut profile_id_override = None;
+            let mut index = 2;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--id" => {
+                        index += 1;
+                        profile_id_override = Some(value_arg(args, index, "--id")?.to_string());
+                    }
+                    option => {
+                        return Err(CliError::UnknownOption {
+                            option: option.to_string(),
+                        });
+                    }
+                }
+                index += 1;
+            }
+
+            let source_path = PathBuf::from(source);
+            let mut profile = RuleProfile::from_toml(&fs::read_to_string(&source_path)?)?;
+            if let Some(profile_id) = profile_id_override {
+                profile.profile_id = profile_id;
+                profile.validate()?;
+            }
+            let destination = saved_profile_path_for_write(&profile.profile_id)?;
+            fs::write(&destination, profile.to_toml_string()?)?;
+            println!(
+                "Imported profile '{}' to {}.",
+                profile.profile_id,
+                destination.display()
+            );
+            Ok(())
+        }
+        Some("validate") => {
+            let source = args
+                .get(1)
+                .ok_or(CliError::MissingArgument { name: "rules.toml" })?;
+            parse_flag_options(&args[2..], &[])?;
+            let path = PathBuf::from(source);
+            let profile = RuleProfile::from_toml(&fs::read_to_string(&path)?)?;
+            println!(
+                "Profile '{}' is valid ({} rule{}).",
+                profile.profile_id,
+                profile.rules.len(),
+                if profile.rules.len() == 1 { "" } else { "s" }
+            );
+            Ok(())
+        }
+        Some(command) => Err(CliError::UnknownProfilesCommand {
+            command: (*command).to_string(),
+        }),
+        None => Err(CliError::MissingArgument {
+            name: "profiles subcommand",
+        }),
+    }
+}
+
 /// Arguments for the 'analyze' command: scan and plan generation.
 #[derive(Debug)]
 struct AnalyzeCommand {
     root: PathBuf,
     output: Option<PathBuf>,
-    profile: Option<PathBuf>,
+    profile_source: Option<ProfileSource>,
     mode: BuiltInMode,
     scan_options: ScanOptions,
     json: bool,
     quiet: bool,
+}
+
+/// Source for custom rules during analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProfileSource {
+    Path(PathBuf),
+    Saved(String),
 }
 
 impl AnalyzeCommand {
@@ -343,7 +456,7 @@ impl AnalyzeCommand {
         let mut command = Self {
             root: PathBuf::from(root),
             output: None,
-            profile: None,
+            profile_source: None,
             mode: BuiltInMode::Type,
             scan_options: ScanOptions::default(),
             json: false,
@@ -359,7 +472,17 @@ impl AnalyzeCommand {
                 }
                 "--profile" => {
                     index += 1;
-                    command.profile = Some(PathBuf::from(value_arg(args, index, "--profile")?));
+                    command.set_profile_source(ProfileSource::Path(PathBuf::from(value_arg(
+                        args,
+                        index,
+                        "--profile",
+                    )?)))?;
+                }
+                "--profile-id" | "--saved-profile" => {
+                    index += 1;
+                    command.set_profile_source(ProfileSource::Saved(
+                        value_arg(args, index, "--profile-id")?.to_string(),
+                    ))?;
                 }
                 "--mode" => {
                     index += 1;
@@ -400,6 +523,17 @@ impl AnalyzeCommand {
         }
 
         Ok(command)
+    }
+
+    fn set_profile_source(&mut self, source: ProfileSource) -> Result<()> {
+        if self.profile_source.is_some() {
+            return Err(CliError::ConflictingOptions {
+                left: "--profile",
+                right: "--profile-id",
+            });
+        }
+        self.profile_source = Some(source);
+        Ok(())
     }
 }
 
@@ -582,6 +716,106 @@ fn parse_usize(value: &str, option: &'static str) -> Result<usize> {
     })
 }
 
+fn parse_flag_options<'a>(args: &[String], allowed: &[&'a str]) -> Result<Vec<&'a str>> {
+    let mut flags = Vec::new();
+    for arg in args {
+        if let Some(&flag) = allowed.iter().find(|allowed| arg.as_str() == **allowed) {
+            flags.push(flag);
+        } else {
+            return Err(CliError::UnknownOption {
+                option: arg.clone(),
+            });
+        }
+    }
+    Ok(flags)
+}
+
+#[derive(Debug, Serialize)]
+struct SavedProfileSummary {
+    profile_id: String,
+    rule_count: usize,
+    path: PathBuf,
+}
+
+fn list_saved_profiles() -> Result<Vec<SavedProfileSummary>> {
+    let directory = ensure_profiles_dir()?;
+    let mut profiles = Vec::new();
+
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(profile) = RuleProfile::from_toml(&content) {
+                profiles.push(SavedProfileSummary {
+                    profile_id: profile.profile_id,
+                    rule_count: profile.rules.len(),
+                    path,
+                });
+            }
+        }
+    }
+
+    profiles.sort_by(|left, right| {
+        left.profile_id
+            .cmp(&right.profile_id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(profiles)
+}
+
+fn saved_profile_path(profile_id: &str) -> Result<PathBuf> {
+    Ok(profiles_dir()?.join(format!("{}.toml", profile_file_stem(profile_id)?)))
+}
+
+fn saved_profile_path_for_write(profile_id: &str) -> Result<PathBuf> {
+    Ok(ensure_profiles_dir()?.join(format!("{}.toml", profile_file_stem(profile_id)?)))
+}
+
+fn profile_file_stem(profile_id: &str) -> Result<String> {
+    let stem = profile_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+
+    if stem.is_empty() {
+        Err(CliError::InvalidProfileId {
+            profile_id: profile_id.to_string(),
+        })
+    } else {
+        Ok(stem)
+    }
+}
+
+fn print_profile_summary(profile: &RuleProfile, path: &std::path::Path) {
+    println!("Profile: {}", profile.profile_id);
+    println!("Path: {}", path.display());
+    println!(
+        "Rules: {} rule{}",
+        profile.rules.len(),
+        if profile.rules.len() == 1 { "" } else { "s" }
+    );
+    for (index, rule) in profile.rules.iter().enumerate() {
+        println!(
+            "{}. {} -> {}{}",
+            index + 1,
+            rule.name,
+            rule.destination,
+            if rule.match_all { " (match all)" } else { "" }
+        );
+    }
+}
+
 /// Ask user for confirmation, requiring explicit 'yes' response.
 fn confirm_or_decline(message: &str) -> Result<()> {
     print!("{message} Type 'yes' to continue: ");
@@ -648,13 +882,14 @@ smartfolder {}
 USAGE:
     {program} <COMMAND>
 
-PLANNED COMMANDS:
+COMMANDS:
     analyze <root>              Analyze a folder and optionally write a plan
     preview <plan.json>         Preview a generated plan
     apply <plan.json>           Apply a confirmed plan
     resume <transaction-id>     Resume an interrupted or failed transaction
     undo <transaction-id>       Undo a transaction
     transactions <SUBCOMMAND>   List, inspect, or clean transaction journals
+    profiles <SUBCOMMAND>       List, import, inspect, or validate rule profiles
 
 OPTIONS:
     -h, --help                  Print help
@@ -663,6 +898,8 @@ OPTIONS:
 ANALYZE OPTIONS:
     --output <plan.json>        Write the generated plan as JSON
     --profile <rules.toml>      Use a TOML custom rule profile
+    --profile-id <id>           Use a saved app-local rule profile
+    --saved-profile <id>        Alias for --profile-id
     --mode <mode>               Built-in mode: type, date, extension, type-year, type-date
     --include-subfolders        Recurse into subfolders during analysis
     --recursive                 Alias for --include-subfolders
@@ -690,6 +927,12 @@ TRANSACTION SUBCOMMANDS:
     transactions list
     transactions inspect <transaction-id>
     transactions cleanup [--include-incomplete]
+
+PROFILE SUBCOMMANDS:
+    profiles list [--json]
+    profiles inspect <profile-id> [--json]
+    profiles import <rules.toml> [--id <profile-id>]
+    profiles validate <rules.toml>
 ",
         smartfolder_core::version()
     );
@@ -714,10 +957,22 @@ enum CliError {
     #[error("missing value for option {option}")]
     MissingOptionValue { option: &'static str },
 
+    #[error("conflicting options: {left} and {right}")]
+    ConflictingOptions {
+        left: &'static str,
+        right: &'static str,
+    },
+
     #[error(
         "invalid mode '{mode}'; expected type, date, extension, type-year, type-date, or type-year-month-day"
     )]
     InvalidMode { mode: String },
+
+    #[error("invalid profile id '{profile_id}'")]
+    InvalidProfileId { profile_id: String },
+
+    #[error("unknown profiles subcommand '{command}'")]
+    UnknownProfilesCommand { command: String },
 
     #[error("invalid number for {option}: {value}")]
     InvalidNumber { option: &'static str, value: String },
@@ -757,7 +1012,10 @@ impl CliError {
             | Self::UnknownOption { .. }
             | Self::MissingArgument { .. }
             | Self::MissingOptionValue { .. }
+            | Self::ConflictingOptions { .. }
             | Self::InvalidMode { .. }
+            | Self::InvalidProfileId { .. }
+            | Self::UnknownProfilesCommand { .. }
             | Self::InvalidNumber { .. }
             | Self::ConfirmationDeclined
             | Self::TransactionNotResumable { .. }
@@ -804,7 +1062,10 @@ mod tests {
 
         assert_eq!(command.root, PathBuf::from(r"D:\Root"));
         assert_eq!(command.output, Some(PathBuf::from("plan.json")));
-        assert_eq!(command.profile, Some(PathBuf::from("rules.toml")));
+        assert_eq!(
+            command.profile_source,
+            Some(ProfileSource::Path(PathBuf::from("rules.toml")))
+        );
         assert_eq!(command.mode, BuiltInMode::TypeYear);
         assert_eq!(command.scan_options.max_depth, Some(2));
         assert!(command.scan_options.current_folder_only);
@@ -838,6 +1099,32 @@ mod tests {
             .expect("max depth parses");
         assert!(!max_depth.scan_options.current_folder_only);
         assert_eq!(max_depth.scan_options.max_depth, Some(2));
+    }
+
+    #[test]
+    fn analyze_parser_supports_saved_profile_ids() {
+        let command = AnalyzeCommand::parse(&strings(&[
+            r"D:\Root",
+            "--profile-id",
+            "my-profile",
+            "--quiet",
+        ]))
+        .expect("profile id should parse");
+
+        assert_eq!(
+            command.profile_source,
+            Some(ProfileSource::Saved("my-profile".to_string()))
+        );
+
+        let conflict = AnalyzeCommand::parse(&strings(&[
+            r"D:\Root",
+            "--profile",
+            "rules.toml",
+            "--profile-id",
+            "my-profile",
+        ]))
+        .expect_err("profile sources should be mutually exclusive");
+        assert!(matches!(conflict, CliError::ConflictingOptions { .. }));
     }
 
     #[test]

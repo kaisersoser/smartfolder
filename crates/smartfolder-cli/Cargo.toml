@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ctrlc = "3"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smartfolder-core = { path = "../smartfolder-core" }
 thiserror = "2"

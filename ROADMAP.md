@@ -10,7 +10,7 @@ This document captures the strategic direction for `smartfolder` across release 
 |-------|--------|
 | v1 MVP (CLI) | ✅ Released |
 | v2.0 UX rewrite (GUI-first) | ✅ Released |
-| v2.1 installer and distribution | 🚧 Active |
+| v2.1 installer and distribution | ✅ Released |
 | v2.x AI and cross-platform tracks | 📋 Planned |
 
 ---
@@ -75,7 +75,23 @@ select or preload folder → analyze → preview → organize → undo → origi
 - Optional `smartfolder` CLI on PATH after install.
 - Portable package retained for users who do not want installation.
 - Release signing and version metadata for distributed binaries.
-- Auto-update check research; implementation remains opt-in only.
+
+### Included in v2.1
+
+- Per-user Windows installer script.
+- Matching uninstall script.
+- Installer-managed Explorer registration and cleanup.
+- Start Menu shortcut and optional desktop shortcut.
+- Optional CLI `PATH` registration.
+- Portable package with GUI and CLI binaries.
+- CLI saved-profile parity with GUI profile storage.
+- CLI profile list/import/inspect/validate commands.
+
+### Deferred after v2.1
+
+- MSI/NSIS wrapper around the scripted installer.
+- Code signing certificate and signed artifacts.
+- Auto-update check; implementation remains opt-in only.
 
 ---
 

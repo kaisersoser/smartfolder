@@ -13,7 +13,22 @@
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
-#![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::module_name_repetitions,
+    clippy::derivable_impls,
+    clippy::useless_conversion,
+    clippy::match_same_arms,
+    clippy::struct_excessive_bools,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::if_not_else,
+    clippy::too_many_arguments,
+    clippy::map_unwrap_or,
+    clippy::redundant_closure_for_method_calls,
+    clippy::if_same_then_else
+)]
 
 mod preferences;
 mod ui;

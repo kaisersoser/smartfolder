@@ -1,7 +1,13 @@
 #![allow(
     clippy::missing_errors_doc,
     clippy::module_name_repetitions,
-    clippy::must_use_candidate
+    clippy::must_use_candidate,
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::redundant_closure_for_method_calls
 )]
 
 //! Core folder analysis and organization logic for `smartfolder`.

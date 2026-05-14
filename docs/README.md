@@ -13,6 +13,7 @@ This folder captures the project-level design and implementation planning histor
   - `ux-enhancement-design.md` - the UX redesign direction for simplifying and polishing the 2.0 GUI
   - `ux-product-vision.md` - the refined UX product vision and implementation priorities after product-direction review
 - `release\`
+  - `windows-installer.md` - per-user Windows install, uninstall, shortcuts, PATH, and Explorer registration
   - `portable-windows.md` - portable Windows package usage and Explorer launcher instructions
   - `v2-ux-release-notes.md` - release notes for the 2.0 UX rewrite
 
@@ -20,4 +21,4 @@ This folder captures the project-level design and implementation planning histor
 
 - v1 MVP: implemented and published
 - v2.0 UX rewrite: released
-- v2.1: active installer and distribution track
+- v2.1: released installer and distribution track

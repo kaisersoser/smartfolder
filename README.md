@@ -73,6 +73,7 @@ To create a portable Windows package under `dist`:
 smartfolder analyze <root> --output plan.json
 smartfolder analyze <root> --include-subfolders --output plan.json
 smartfolder analyze <root> --profile rules.toml --output plan.json
+smartfolder analyze <root> --profile-id my-profile --output plan.json
 smartfolder analyze <root> --mode type-date --quiet --output plan.json
 smartfolder preview plan.json
 smartfolder apply plan.json
@@ -84,6 +85,10 @@ smartfolder undo <transaction-id> --yes
 smartfolder transactions list
 smartfolder transactions inspect <transaction-id>
 smartfolder transactions cleanup
+smartfolder profiles list
+smartfolder profiles import rules.toml
+smartfolder profiles inspect my-profile
+smartfolder profiles validate rules.toml
 ```
 
 Analyze scans only the selected folder by default. Add `--include-subfolders` or `--recursive` when you want to include nested folders, and combine it with `--max-depth <n>` to limit recursion. Use `--json` with commands that support machine-readable output. If an error occurs while `--json` is present, errors are emitted as JSON on stderr.
@@ -132,6 +137,20 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 .\scripts\test-mvp.ps1
+```
+
+## Windows install
+
+Build and install the desktop app plus CLI for the current Windows user:
+
+```powershell
+.\scripts\install-windows.ps1 -AddToPath
+```
+
+This creates a Start Menu shortcut, optionally adds the CLI to user `PATH`, and registers the launch-only Explorer context menu unless `-NoExplorerRegistration` is provided. Remove the installed copy with:
+
+```powershell
+.\scripts\uninstall-windows.ps1
 ```
 
 ## Contributing

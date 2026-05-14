@@ -1,4 +1,4 @@
-# smartfolder 2.0 portable Windows package
+# smartfolder portable Windows package
 
 This package runs smartfolder as a local Windows desktop app. It does not install services, start background tasks, or apply file moves from Explorer.
 
@@ -6,6 +6,12 @@ This package runs smartfolder as a local Windows desktop app. It does not instal
 
 ```powershell
 .\smartfolder-gui.exe
+```
+
+The package also includes the CLI:
+
+```powershell
+.\smartfolder.exe --help
 ```
 
 You can also pass a folder path to preload it:
@@ -26,6 +32,14 @@ Remove it with:
 
 ```powershell
 .\scripts\register-explorer-launcher.ps1 -Unregister
+```
+
+## Optional per-user install
+
+To copy the portable package into `%LOCALAPPDATA%\Programs\smartfolder`, create shortcuts, and register Explorer launch:
+
+```powershell
+.\scripts\install-windows.ps1 -SkipBuild
 ```
 
 ## Data location

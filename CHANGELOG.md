@@ -7,14 +7,31 @@ Version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — v2.1 development
+## [Unreleased] — v2.2 development
 
 ### Planned
 
-- Windows installer and uninstall flow.
-- Installer-managed Explorer context-menu registration.
-- Start Menu shortcut and optional desktop shortcut.
-- Release metadata and signing preparation for distributed binaries.
+- AI-assisted organization research remains opt-in and preview-first.
+- Cross-platform GUI packaging research.
+
+---
+
+## [2.1.0] — 2026-05-14
+
+### Added
+
+- **Per-user Windows installer** — `install-windows.ps1` installs the GUI and CLI under `%LOCALAPPDATA%\Programs\smartfolder`.
+- **Uninstall flow** — `uninstall-windows.ps1` removes shortcuts, Explorer registration, PATH entry, and installed binaries, with optional data removal.
+- **Installer-managed Explorer registration** — install registers the launch-only `Organize with smartfolder` Explorer entry by default.
+- **Start Menu and optional desktop shortcuts** — installer creates Start Menu shortcut and supports `-DesktopShortcut`.
+- **Optional CLI on PATH** — installer supports `-AddToPath`.
+- **CLI saved profile parity** — `analyze --profile-id <id>` can use app-local profiles saved by the GUI.
+- **CLI profile management** — `profiles list`, `profiles inspect`, `profiles import`, and `profiles validate`.
+
+### Changed
+
+- Portable package now includes both `smartfolder-gui.exe` and `smartfolder.exe`.
+- Portable package naming follows the workspace version.
 
 ---
 

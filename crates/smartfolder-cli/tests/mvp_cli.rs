@@ -152,6 +152,7 @@ fn top_level_help_and_version_are_available() {
     let help_stdout = stdout_text(&help);
     assert!(help_stdout.contains("ANALYZE OPTIONS"));
     assert!(help_stdout.contains("TRANSACTION SUBCOMMANDS"));
+    assert!(help_stdout.contains("PROFILE SUBCOMMANDS"));
 
     let version = smartfolder(&context.app_data_root)
         .arg("--version")
@@ -404,6 +405,81 @@ extensions = ["pdf"]
             .join(&day)
             .join("pdf")
             .join("report.pdf")
+    );
+}
+
+#[test]
+fn cli_profiles_manage_saved_gui_profiles() {
+    let context = TestContext::new("root");
+    let report = context.root.join("invoice.pdf");
+    write_file(&report, b"invoice");
+    let rules_path = context.plan_path("saved-rules.toml");
+    fs::write(
+        &rules_path,
+        r#"
+profile_id = "invoices"
+
+[[rules]]
+name = "invoice pdfs"
+destination = "Invoices/{year}/{month}"
+extensions = ["pdf"]
+filename_contains = ["invoice"]
+"#,
+    )
+    .expect("rules file should be written");
+
+    smartfolder(&context.app_data_root)
+        .args([
+            "profiles",
+            "validate",
+            rules_path.to_str().expect("utf-8 path"),
+        ])
+        .assert()
+        .success();
+
+    smartfolder(&context.app_data_root)
+        .args([
+            "profiles",
+            "import",
+            rules_path.to_str().expect("utf-8 path"),
+        ])
+        .assert()
+        .success();
+
+    let list = smartfolder(&context.app_data_root)
+        .args(["profiles", "list"])
+        .assert()
+        .success();
+    assert!(stdout_text(&list).contains("invoices"));
+
+    let inspect = smartfolder(&context.app_data_root)
+        .args(["profiles", "inspect", "invoices"])
+        .assert()
+        .success();
+    assert!(stdout_text(&inspect).contains("invoice pdfs"));
+
+    let plan_path = context.plan_path("saved-profile-plan.json");
+    smartfolder(&context.app_data_root)
+        .args([
+            "analyze",
+            context.root.to_str().expect("root path should be utf-8"),
+            "--profile-id",
+            "invoices",
+            "--output",
+            plan_path.to_str().expect("plan path should be utf-8"),
+            "--quiet",
+        ])
+        .assert()
+        .success();
+
+    let (year, month, _) = expected_date_parts(&report);
+    let plan = read_plan(&plan_path);
+    assert_eq!(
+        relative_destination(&context.root, &plan, "invoice.pdf"),
+        PathBuf::from("Invoices")
+            .join(&year)
+            .join(&month)
+            .join("invoice.pdf")
     );
 }
 

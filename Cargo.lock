@@ -3304,6 +3304,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "ctrlc",
+ "serde",
  "serde_json",
  "smartfolder-core",
  "tempfile",

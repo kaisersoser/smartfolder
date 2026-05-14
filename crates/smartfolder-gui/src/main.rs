@@ -348,6 +348,7 @@ struct SmartfolderApp {
     show_apply_confirmation: bool,
     undo_receiver: Option<Receiver<UndoMessage>>,
     ai_status_receiver: Option<Receiver<AiStatusMessage>>,
+    ai_status_check_source: Option<AiStatusCheckSource>,
     ai_status: Option<AiProviderStatus>,
     ai_task_receiver: Option<Receiver<AiTaskMessage>>,
     ai_task: Option<AiTaskKind>,
@@ -391,7 +392,7 @@ impl SmartfolderApp {
             .built_in_mode()
             .unwrap_or(BuiltInMode::TypeYear);
 
-        Self {
+        let mut app = Self {
             preferences,
             active_section: AppSection::Organize,
             organize_step: OrganizeStep::Folder,
@@ -424,6 +425,7 @@ impl SmartfolderApp {
             show_apply_confirmation: false,
             undo_receiver: None,
             ai_status_receiver: None,
+            ai_status_check_source: None,
             ai_status: None,
             ai_task_receiver: None,
             ai_task: None,
@@ -449,7 +451,9 @@ impl SmartfolderApp {
             shell_nav_expanded: false,
             error_message: None,
             maintenance_message: preferences_message,
-        }
+        };
+        app.startup_ai_status_check();
+        app
     }
 
     fn is_analyzing(&self) -> bool {
@@ -794,7 +798,19 @@ impl SmartfolderApp {
         }
     }
 
-    fn start_ai_status_check(&mut self) {
+    fn startup_ai_status_check(&mut self) {
+        #[cfg(test)]
+        {
+            return;
+        }
+
+        #[cfg(not(test))]
+        if self.preferences.ai.enabled {
+            self.start_ai_status_check(AiStatusCheckSource::Startup);
+        }
+    }
+
+    fn start_ai_status_check(&mut self, source: AiStatusCheckSource) {
         if !self.preferences.ai.enabled {
             self.ai_status = Some(AiProviderStatus {
                 available: false,
@@ -803,12 +819,14 @@ impl SmartfolderApp {
                 models: Vec::new(),
                 message: "AI assistance is disabled.".to_string(),
             });
+            self.ai_status_check_source = None;
             return;
         }
 
         let settings = self.preferences.ai.clone();
         let (sender, receiver) = mpsc::channel::<AiStatusMessage>();
         self.ai_status_receiver = Some(receiver);
+        self.ai_status_check_source = Some(source);
         self.error_message = None;
 
         std::thread::spawn(move || {
@@ -827,6 +845,7 @@ impl SmartfolderApp {
         match receiver.try_recv() {
             Ok(message) => {
                 self.ai_status_receiver = None;
+                let source = self.ai_status_check_source.take();
                 match message {
                     Ok(status) => {
                         if status.available
@@ -839,33 +858,41 @@ impl SmartfolderApp {
                                 .clone_from(&status.selected_model);
                             self.save_preferences_quietly();
                         }
-                        self.maintenance_message = Some(status.message.clone());
+                        if source == Some(AiStatusCheckSource::Manual) {
+                            self.maintenance_message = Some(status.message.clone());
+                        }
                         self.ai_status = Some(status);
                         self.error_message = None;
                     }
                     Err(message) => {
-                        self.ai_status = Some(AiProviderStatus {
-                            available: false,
-                            state: AiProviderState::RequestFailed,
-                            selected_model: None,
-                            models: Vec::new(),
-                            message: message.clone(),
-                        });
-                        self.error_message = Some(message);
+                        if source == Some(AiStatusCheckSource::Manual) {
+                            self.ai_status = Some(AiProviderStatus {
+                                available: false,
+                                state: AiProviderState::RequestFailed,
+                                selected_model: None,
+                                models: Vec::new(),
+                                message: message.clone(),
+                            });
+                            self.error_message = Some(message);
+                        }
                     }
                 }
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.ai_status_receiver = None;
-                self.ai_status = Some(AiProviderStatus {
-                    available: false,
-                    state: AiProviderState::RequestFailed,
-                    selected_model: None,
-                    models: Vec::new(),
-                    message: "The AI status worker stopped unexpectedly.".to_string(),
-                });
-                self.error_message = Some("The AI status worker stopped unexpectedly.".to_string());
+                let source = self.ai_status_check_source.take();
+                if source == Some(AiStatusCheckSource::Manual) {
+                    self.ai_status = Some(AiProviderStatus {
+                        available: false,
+                        state: AiProviderState::RequestFailed,
+                        selected_model: None,
+                        models: Vec::new(),
+                        message: "The AI status worker stopped unexpectedly.".to_string(),
+                    });
+                    self.error_message =
+                        Some("The AI status worker stopped unexpectedly.".to_string());
+                }
             }
         }
     }
@@ -2687,7 +2714,7 @@ impl SmartfolderApp {
                 }
 
                 if test_ai_connection {
-                    self.start_ai_status_check();
+                    self.start_ai_status_check(AiStatusCheckSource::Manual);
                 }
 
                 ui.add_space(ui::theme::spacing::MD);
@@ -3230,6 +3257,13 @@ impl eframe::App for SmartfolderApp {
 enum PreviewDetailMode {
     List,
     Tree,
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiStatusCheckSource {
+    Startup,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

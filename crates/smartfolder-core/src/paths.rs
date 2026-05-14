@@ -51,6 +51,13 @@ pub fn safe_destination_path(
     Ok(root.join(relative))
 }
 
+/// Normalise a caller-supplied relative path by resolving `.` and `..` components
+/// without touching the filesystem, then reject any path that would escape the root
+/// (i.e. one that starts with `..` after normalisation).
+///
+/// # Errors
+///
+/// Returns `PathEscapesRoot` if the resolved path would escape its parent directory.
 pub fn normalize_relative(path: impl AsRef<Path>) -> Result<PathBuf> {
     let path = path.as_ref();
     let mut normalized = PathBuf::new();

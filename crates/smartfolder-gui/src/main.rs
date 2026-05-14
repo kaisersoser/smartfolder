@@ -1883,120 +1883,82 @@ impl SmartfolderApp {
     }
 
     fn render_settings_screen(&mut self, ui: &mut egui::Ui) {
-        render_screen_heading(
-            ui,
-            ui::icons::SETTINGS,
-            "Settings",
-            "Keep the app clean, confirm Explorer launch behavior, and preserve the safer default of analyzing only the selected folder.",
-        );
-        self.render_status_messages(ui);
-        ui.add_space(10.0);
-
-        ui.horizontal_wrapped(|ui| {
-            render_info_card(
-                ui,
-                "Safety defaults",
-                "smartfolder previews first, never overwrites existing files, and keeps subfolders opt-in.",
-                "No automatic organizing",
-            );
-            render_info_card(
-                ui,
-                "History",
-                "Restore history is recorded before files move so Undo Changes can restore completed moves.",
-                "Undo-ready workflow",
-            );
-            render_info_card(
-                ui,
-                "Appearance",
-                "Theme and motion preferences are saved locally as the RC2 design system comes online.",
-                "Preferences saved",
-            );
-            render_info_card(
-                ui,
-                "Keyboard navigation",
-                "Use Alt+1 through Alt+4 to move between Organize, Activity, Rules, and Settings without reaching for the sidebar.",
-                "Section shortcuts",
-            );
-        });
-
-        ui.add_space(10.0);
-        ui::theme::widgets::card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Appearance and motion").strong().size(18.0));
-            ui.label("These preferences are saved locally and will carry into the RC2 wizard.");
-            ui.add_space(8.0);
-
-            let mut changed = false;
-            ui.horizontal(|ui| {
-                ui.label("Theme");
-                egui::ComboBox::from_id_source("theme-preference")
-                    .selected_text(self.preferences.theme.label())
-                    .show_ui(ui, |ui| {
-                        for preference in [
-                            ThemePreference::System,
-                            ThemePreference::Light,
-                            ThemePreference::Dark,
-                        ] {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.preferences.theme,
-                                    preference,
-                                    preference.label(),
-                                )
-                                .changed();
-                        }
-                    });
-
-                ui.label("Motion");
-                egui::ComboBox::from_id_source("motion-preference")
-                    .selected_text(self.preferences.motion.label())
-                    .show_ui(ui, |ui| {
-                        for preference in [
-                            MotionPreference::System,
-                            MotionPreference::Reduced,
-                            MotionPreference::Subtle,
-                            MotionPreference::Full,
-                        ] {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.preferences.motion,
-                                    preference,
-                                    preference.label(),
-                                )
-                                .changed();
-                        }
-                    });
-            });
-
-            if changed {
-                self.save_preferences_with_message();
-            }
-        });
-
-        ui.add_space(10.0);
-        ui::theme::widgets::card_frame()
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(ui::theme::spacing::MD, 0.0))
             .show(ui, |ui| {
-                ui.label(RichText::new("Explorer integration").strong().size(18.0));
-                ui.label("The folder context menu entry should read Organize with smartfolder.");
-                render_safety_line(ui, "It only opens the app with the clicked folder selected.");
-                render_safety_line(ui, "It never organizes files directly from Explorer.");
-                ui.add_space(8.0);
-                ui.label("Register or unregister it with scripts/register-explorer-launcher.ps1 after building the release GUI.");
-            });
+                render_screen_heading(
+                    ui,
+                    ui::icons::SETTINGS,
+                    "Settings",
+                    "Keep the app clean, confirm Explorer launch behavior, and preserve the safer default of analyzing only the selected folder.",
+                );
+                self.render_status_messages(ui);
+                ui.add_space(ui::theme::spacing::MD);
 
-        ui.add_space(10.0);
-        ui::theme::widgets::card_frame()
-            .show(ui, |ui| {
-                ui.label(RichText::new("Storage maintenance").strong().size(18.0));
-                ui.label("Cleanup removes old cached analysis sessions and preview pages. It does not remove restore history for organized files.");
-                if ui
-                    .add_enabled(
-                        !self.is_analyzing() && !self.is_applying() && !self.is_undoing(),
-                        ui::theme::widgets::secondary_button("Clean old session data"),
-                    )
-                    .clicked()
-                {
-                    self.cleanup_old_sessions();
+                render_settings_overview(ui);
+                ui.add_space(ui::theme::spacing::LG);
+
+                let mut preferences_changed = false;
+                render_settings_section_panel(
+                    ui,
+                    "Preferences",
+                    "Local display choices for this device.",
+                    |ui| {
+                        preferences_changed |=
+                            render_appearance_preferences(ui, &mut self.preferences);
+                    },
+                );
+
+                if preferences_changed {
+                    self.save_preferences_with_message();
                 }
+
+                ui.add_space(ui::theme::spacing::MD);
+                render_settings_section_panel(
+                    ui,
+                    "Explorer integration",
+                    "Read-only launch behavior for Windows Explorer.",
+                    render_explorer_integration_settings,
+                );
+
+                ui.add_space(ui::theme::spacing::MD);
+                render_settings_section_panel(
+                    ui,
+                    "Storage maintenance",
+                    "Remove generated cache data without touching restore history.",
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(
+                                    "Cleanup removes old cached analysis sessions and preview pages. It does not remove restore history for organized files.",
+                                )
+                                .color(ui::theme::colors::secondary_text()),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(ui::theme::spacing::SM);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !self.is_analyzing()
+                                        && !self.is_applying()
+                                        && !self.is_undoing(),
+                                    ui::theme::widgets::secondary_button(
+                                        "Clean old session data",
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.cleanup_old_sessions();
+                            }
+                            ui.label(
+                                RichText::new("Available when no analysis, organize, or undo task is running.")
+                                    .size(ui::theme::typography::CAPTION)
+                                    .color(ui::theme::colors::metadata_text()),
+                            );
+                        });
+                    },
+                );
             });
     }
 
@@ -4950,14 +4912,254 @@ fn render_folder_status_light(ui: &mut egui::Ui, has_root: bool, preselected: bo
 }
 
 fn render_safety_line(ui: &mut egui::Ui, text: &str) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         render_status_chip(
             ui,
             "Safe",
             Color32::from_rgb(92, 128, 78),
             Color32::from_rgb(231, 241, 228),
         );
-        ui.label(text);
+        ui.add(egui::Label::new(text).wrap());
+    });
+}
+
+fn render_settings_overview(ui: &mut egui::Ui) {
+    let rows = [
+        (
+            "Safety defaults",
+            "Previews first, never overwrites files, and keeps subfolders opt-in.",
+            "No automatic organizing",
+        ),
+        (
+            "History",
+            "Restore history is recorded before files move so Undo Changes can restore completed moves.",
+            "Undo-ready workflow",
+        ),
+        (
+            "Appearance",
+            "Theme and motion preferences are saved locally for the RC2 design system.",
+            "Preferences saved",
+        ),
+        (
+            "Keyboard navigation",
+            "Use Alt+1 through Alt+4 to move between sections without reaching for the sidebar.",
+            "Section shortcuts",
+        ),
+    ];
+
+    settings_note_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new("Read-only defaults")
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.add_space(ui::theme::spacing::SM);
+        for (index, (title, detail, status)) in rows.iter().enumerate() {
+            render_settings_overview_row(ui, title, detail, status);
+            if index + 1 < rows.len() {
+                ui.add_space(ui::theme::spacing::SM);
+            }
+        }
+    });
+}
+
+fn render_settings_overview_row(ui: &mut egui::Ui, title: &str, detail: &str, status: &str) {
+    let available_width = ui.available_width();
+    if available_width >= 660.0 {
+        let title_width = 156.0;
+        let status_width = 180.0;
+        let detail_width =
+            (available_width - title_width - status_width - (ui::theme::spacing::MD * 2.0))
+                .max(220.0);
+
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [title_width, 22.0],
+                egui::Label::new(
+                    RichText::new(title)
+                        .strong()
+                        .color(ui::theme::colors::primary_text()),
+                ),
+            );
+            ui.add_sized(
+                [detail_width, 22.0],
+                egui::Label::new(RichText::new(detail).color(ui::theme::colors::secondary_text()))
+                    .wrap(),
+            );
+            ui.add_space(ui::theme::spacing::SM);
+            render_status_chip(
+                ui,
+                status,
+                ui::theme::colors::secondary_text(),
+                ui::theme::colors::surface(),
+            );
+        });
+    } else {
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new(title)
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            ui.add(
+                egui::Label::new(RichText::new(detail).color(ui::theme::colors::secondary_text()))
+                    .wrap(),
+            );
+            ui.add_space(ui::theme::spacing::XS);
+            render_status_chip(
+                ui,
+                status,
+                ui::theme::colors::secondary_text(),
+                ui::theme::colors::surface(),
+            );
+        });
+    }
+}
+
+fn settings_note_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(ui::theme::colors::subtle_surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::LG))
+}
+
+fn settings_panel_frame() -> egui::Frame {
+    egui::Frame::none()
+        .fill(ui::theme::colors::elevated_surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::LG))
+}
+
+fn render_settings_section_panel(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    settings_panel_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width().max(CARD_MIN_WIDTH));
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.add(
+            egui::Label::new(
+                RichText::new(detail)
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            )
+            .wrap(),
+        );
+        ui.add_space(ui::theme::spacing::MD);
+        contents(ui);
+    });
+}
+
+fn render_appearance_preferences(ui: &mut egui::Ui, preferences: &mut GuiPreferences) -> bool {
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "These preferences are saved locally and will carry into the RC2 wizard.",
+            )
+            .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
+
+    let mut changed = false;
+    egui::Grid::new("appearance-preferences-grid")
+        .num_columns(2)
+        .spacing([ui::theme::spacing::LG, ui::theme::spacing::SM])
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new("Theme")
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            egui::ComboBox::from_id_source("theme-preference")
+                .width(180.0)
+                .selected_text(preferences.theme.label())
+                .show_ui(ui, |ui| {
+                    for preference in [
+                        ThemePreference::System,
+                        ThemePreference::Light,
+                        ThemePreference::Dark,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut preferences.theme,
+                                preference,
+                                preference.label(),
+                            )
+                            .changed();
+                    }
+                });
+            ui.end_row();
+
+            ui.label(
+                RichText::new("Motion")
+                    .strong()
+                    .color(ui::theme::colors::primary_text()),
+            );
+            egui::ComboBox::from_id_source("motion-preference")
+                .width(180.0)
+                .selected_text(preferences.motion.label())
+                .show_ui(ui, |ui| {
+                    for preference in [
+                        MotionPreference::System,
+                        MotionPreference::Reduced,
+                        MotionPreference::Subtle,
+                        MotionPreference::Full,
+                    ] {
+                        changed |= ui
+                            .selectable_value(
+                                &mut preferences.motion,
+                                preference,
+                                preference.label(),
+                            )
+                            .changed();
+                    }
+                });
+            ui.end_row();
+        });
+
+    changed
+}
+
+fn render_explorer_integration_settings(ui: &mut egui::Ui) {
+    ui.add(
+        egui::Label::new(
+            RichText::new("The folder context menu entry should read Organize with smartfolder.")
+                .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
+    render_safety_line(
+        ui,
+        "It only opens the app with the clicked folder selected.",
+    );
+    render_safety_line(ui, "It never organizes files directly from Explorer.");
+    ui.add_space(ui::theme::spacing::SM);
+    settings_note_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Register or unregister it with scripts/register-explorer-launcher.ps1 after building the release GUI.",
+                )
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+            )
+            .wrap(),
+        );
     });
 }
 

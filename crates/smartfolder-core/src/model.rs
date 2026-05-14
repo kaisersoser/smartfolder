@@ -146,6 +146,7 @@ impl PlanRecord {
         }
     }
 
+    /// Serialize the plan to formatted JSON.
     pub fn to_pretty_json(&self) -> crate::Result<String> {
         serde_json::to_string_pretty(self).map_err(Into::into)
     }
@@ -261,6 +262,12 @@ pub struct PlanWarning {
     pub message: String,
 }
 
+/// Classification of warning types produced during plan generation.
+///
+/// - `CloudFolder`: Root or file is inside a cloud-synced folder (OneDrive, Dropbox, etc.)
+/// - `SpecialFolder`: Root contains system-managed or protected sub-directories
+/// - `ExclusionsApplied`: One or more exclusion rules were active during the scan
+/// - `AmbiguousFiles`: Some files could not be matched to any rule
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanWarningCode {
@@ -311,7 +318,6 @@ impl TransactionJournal {
         }
     }
 
-    /// Serialize the journal to formatted JSON.
     /// Serialize the journal to formatted JSON.
     pub fn to_pretty_json(&self) -> crate::Result<String> {
         serde_json::to_string_pretty(self).map_err(Into::into)

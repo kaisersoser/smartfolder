@@ -68,6 +68,11 @@ impl RuleProfile {
         Ok(toml::to_string_pretty(self)?)
     }
 
+    /// Validate that the profile has a non-empty ID, at least one rule, and all rules are valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRuleProfile` if any constraint is violated.
     pub fn validate(&self) -> Result<()> {
         if self.profile_id.trim().is_empty() {
             return Err(SmartfolderError::InvalidRuleProfile {
@@ -128,6 +133,12 @@ pub struct CustomRule {
 }
 
 impl CustomRule {
+    /// Validate the rule's name, destination path, and condition set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidRuleProfile` if the name or destination is empty, the destination
+    /// escapes the root, no conditions are defined, or size bounds are inverted.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             return Err(SmartfolderError::InvalidRuleProfile {
@@ -160,6 +171,9 @@ impl CustomRule {
         Ok(())
     }
 
+    /// Apply this rule to a file record and return a match if all conditions are satisfied.
+    ///
+    /// Returns `None` for directories, symlinks, or files that do not match all conditions.
     pub fn match_record(&self, record: &FileInventoryRecord) -> Option<RuleMatch> {
         if record.entry_kind != FileEntryKind::File {
             return None;
@@ -231,6 +245,9 @@ impl CustomRule {
     }
 }
 
+/// Apply a built-in organization mode to a file record and return the proposed destination.
+///
+/// Returns `None` for non-file entries (directories, symlinks, etc.).
 pub fn builtin_rule_match(record: &FileInventoryRecord, mode: BuiltInMode) -> Option<RuleMatch> {
     if record.entry_kind != FileEntryKind::File {
         return None;

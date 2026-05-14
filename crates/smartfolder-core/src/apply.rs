@@ -17,7 +17,7 @@
 //! 2. Set up cancellation handling if desired
 //! 3. Call [`apply_plan`] with plan and options
 //! 4. Review [`ApplySummary`] for results
-//! 5. Later: inspect with [`inspect_transaction`] or undo with [`undo_transaction`]
+//! 5. Later: inspect with [`load_journal`] or undo with [`crate::recovery::undo_transaction`]
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -387,6 +387,11 @@ pub fn apply_stored_plan(
     )
 }
 
+/// Load and deserialize a transaction journal from disk.
+///
+/// # Errors
+///
+/// Returns an error if the journal file cannot be read or cannot be parsed as JSON.
 pub fn load_journal(transaction_id: &str) -> Result<TransactionJournal> {
     let path = journal_path(transaction_id)?;
     let contents =

@@ -112,6 +112,7 @@ This repository is a Rust workspace:
 crates/
   smartfolder-core/
   smartfolder-cli/
+  smartfolder-gui/
 ```
 
 Expected checks:
@@ -138,6 +139,9 @@ Documentation is **not optional**. Pull requests without proper documentation wi
 See:
 - [CONTRIBUTING.md](CONTRIBUTING.md) – Code standards and documentation guidelines
 - [DEVELOPMENT_STANDARDS.md](DEVELOPMENT_STANDARDS.md) – Quick reference for standards
+- [ARCHITECTURE.md](ARCHITECTURE.md) – System design, crate responsibilities, and data flow
+- [CHANGELOG.md](CHANGELOG.md) – Release history
+- [ROADMAP.md](ROADMAP.md) – Planned releases and future direction
 - [copilot-instructions.md](copilot-instructions.md) – AI-assisted development guidelines
 
 ## License

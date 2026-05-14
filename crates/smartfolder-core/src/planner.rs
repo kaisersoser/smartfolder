@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 
 use crate::model::{
-    BuiltInMode, ConflictState, OperationType, PlanMode, PlanOperation, PlanRecord, PlanSummary,
-    PlanWarning, PlanWarningCode, SourceSnapshot,
+    BuiltInMode, ConflictState, FileInventoryRecord, OperationType, PlanMode, PlanOperation,
+    PlanRecord, PlanSummary, PlanWarning, PlanWarningCode, SourceSnapshot, UntouchedReason,
+    UntouchedRecord,
 };
 use crate::paths::safe_destination_path;
 use crate::rules::{builtin_rule_match, RuleMatch, RuleProfile};
@@ -145,6 +146,11 @@ pub fn generate_plan(
     for record in &scan.records {
         let Some(rule_match) = rule_match_for_record(record, &options.mode) else {
             plan.ambiguous_files.push(record.root_relative_path.clone());
+            plan.untouched_records.push(untouched_record(
+                record,
+                UntouchedReason::NoMatchingRule,
+                "No organization rule matched this file.",
+            ));
             continue;
         };
 
@@ -159,12 +165,39 @@ pub fn generate_plan(
                         record.root_relative_path.display()
                     ),
                 });
+                plan.untouched_records.push(untouched_record(
+                    record,
+                    UntouchedReason::UnsafeDestination,
+                    format!("Destination was unsafe: {error}"),
+                ));
                 continue;
             }
         };
 
+        if let Some(detail) = already_organized_detail(
+            record,
+            &options.mode,
+            &source,
+            &destination,
+            &rule_match.destination,
+        ) {
+            plan.untouched_records.push(untouched_record(
+                record,
+                UntouchedReason::AlreadyOrganized,
+                detail,
+            ));
+            continue;
+        }
+
         let conflict = detect_conflict(&source, &destination, &mut planned_destinations);
         let selected = matches!(conflict, ConflictState::None);
+        if !selected {
+            plan.untouched_records.push(untouched_record(
+                record,
+                untouched_reason_for_conflict(&conflict),
+                untouched_detail_for_conflict(&conflict),
+            ));
+        }
 
         plan.operations.push(PlanOperation {
             operation_id: format!("op_{:06}", plan.operations.len() + 1),
@@ -307,6 +340,14 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                 let Some(rule_match) = rule_match_for_record(record, &options.mode) else {
                     ambiguous_count += 1;
                     store.insert_ambiguous_file(session_id, &record.root_relative_path)?;
+                    store.insert_untouched_record(
+                        session_id,
+                        &untouched_record(
+                            record,
+                            UntouchedReason::NoMatchingRule,
+                            "No organization rule matched this file.",
+                        ),
+                    )?;
                     maybe_emit_plan_progress(
                         progress,
                         PlanGenerationProgress {
@@ -336,6 +377,14 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                                 ),
                             },
                         )?;
+                        store.insert_untouched_record(
+                            session_id,
+                            &untouched_record(
+                                record,
+                                UntouchedReason::UnsafeDestination,
+                                format!("Destination was unsafe: {error}"),
+                            ),
+                        )?;
                         maybe_emit_plan_progress(
                             progress,
                             PlanGenerationProgress {
@@ -352,6 +401,32 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                     }
                 };
 
+                if let Some(detail) = already_organized_detail(
+                    record,
+                    &options.mode,
+                    &source,
+                    &destination,
+                    &rule_match.destination,
+                ) {
+                    store.insert_untouched_record(
+                        session_id,
+                        &untouched_record(record, UntouchedReason::AlreadyOrganized, detail),
+                    )?;
+                    maybe_emit_plan_progress(
+                        progress,
+                        PlanGenerationProgress {
+                            processed_records,
+                            total_records,
+                            operations_created: operation_count,
+                            ambiguous_files: ambiguous_count,
+                            conflicts: conflict_count,
+                            skipped: skipped_count,
+                            current_path: Some(record.root_relative_path.clone()),
+                        },
+                    );
+                    continue;
+                }
+
                 let destination_key = normalized_destination_key(&destination);
                 let already_planned = store.destination_key_exists(session_id, &destination_key)?;
                 let conflict = detect_conflict_from_store(&source, &destination, already_planned);
@@ -359,6 +434,14 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                 if !selected {
                     conflict_count += 1;
                     skipped_count += 1;
+                    store.insert_untouched_record(
+                        session_id,
+                        &untouched_record(
+                            record,
+                            untouched_reason_for_conflict(&conflict),
+                            untouched_detail_for_conflict(&conflict),
+                        ),
+                    )?;
                 }
 
                 operation_count += 1;
@@ -526,6 +609,80 @@ fn plan_mode(mode: &PlanningMode) -> PlanMode {
     }
 }
 
+fn already_organized_detail(
+    record: &FileInventoryRecord,
+    mode: &PlanningMode,
+    source: &Path,
+    destination: &Path,
+    rule_destination: &Path,
+) -> Option<String> {
+    if normalized_destination_key(source) == normalized_destination_key(destination) {
+        return Some("File is already in the planned destination.".to_string());
+    }
+
+    let PlanningMode::BuiltIn(mode) = mode else {
+        return None;
+    };
+
+    if is_inside_organized_subtree(record, *mode, rule_destination) {
+        return Some(format!(
+            "File is inside an existing {} organization folder.",
+            built_in_mode_guard_label(*mode)
+        ));
+    }
+
+    None
+}
+
+fn is_inside_organized_subtree(
+    record: &FileInventoryRecord,
+    mode: BuiltInMode,
+    rule_destination: &Path,
+) -> bool {
+    if record.depth <= 1 {
+        return false;
+    }
+
+    let Some(source_parent) = record.root_relative_path.parent() else {
+        return false;
+    };
+    let Some(destination_parent) = rule_destination.parent() else {
+        return false;
+    };
+
+    let guard_len = organized_guard_component_count(mode);
+    let guard_prefix = path_component_keys(destination_parent)
+        .into_iter()
+        .take(guard_len)
+        .collect::<Vec<_>>();
+    if guard_prefix.is_empty() {
+        return false;
+    }
+
+    path_component_keys(source_parent).starts_with(&guard_prefix)
+}
+
+fn organized_guard_component_count(mode: BuiltInMode) -> usize {
+    match mode {
+        BuiltInMode::Type | BuiltInMode::Date | BuiltInMode::Extension | BuiltInMode::TypeYear => 1,
+    }
+}
+
+fn built_in_mode_guard_label(mode: BuiltInMode) -> &'static str {
+    match mode {
+        BuiltInMode::Type => "type",
+        BuiltInMode::Date => "date",
+        BuiltInMode::Extension => "extension",
+        BuiltInMode::TypeYear => "type/date",
+    }
+}
+
+fn path_component_keys(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect()
+}
+
 fn detect_conflict(
     source: &Path,
     destination: &Path,
@@ -590,6 +747,46 @@ fn detect_conflict_from_store(
     ConflictState::None
 }
 
+fn untouched_record(
+    record: &FileInventoryRecord,
+    reason: UntouchedReason,
+    detail: impl Into<String>,
+) -> UntouchedRecord {
+    UntouchedRecord {
+        path: record.root_relative_path.clone(),
+        reason,
+        detail: detail.into(),
+    }
+}
+
+fn untouched_reason_for_conflict(conflict: &ConflictState) -> UntouchedReason {
+    match conflict {
+        ConflictState::None => UntouchedReason::AlreadyOrganized,
+        ConflictState::DestinationExists { .. } | ConflictState::CaseOnlyRename { .. } => {
+            UntouchedReason::DestinationConflict
+        }
+        ConflictState::UnsafeDestination { .. } => UntouchedReason::UnsafeDestination,
+    }
+}
+
+fn untouched_detail_for_conflict(conflict: &ConflictState) -> String {
+    match conflict {
+        ConflictState::None => "File is already in the planned destination.".to_string(),
+        ConflictState::DestinationExists { path } => {
+            format!("Destination already exists: {}", path.display())
+        }
+        ConflictState::CaseOnlyRename { path } => {
+            format!(
+                "Destination differs only by letter case: {}",
+                path.display()
+            )
+        }
+        ConflictState::UnsafeDestination { reason } => {
+            format!("Destination was unsafe: {reason}")
+        }
+    }
+}
+
 fn normalized_destination_key(destination: &Path) -> String {
     destination
         .to_string_lossy()
@@ -652,7 +849,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
-    use crate::model::{BuiltInMode, ConflictState};
+    use crate::model::{BuiltInMode, ConflictState, UntouchedReason};
     use crate::planner::{
         generate_plan, generate_plan_to_store_with_progress, render_preview, render_preview_json,
         PlanOptions,
@@ -717,6 +914,11 @@ extensions = ["pdf"]
 
         assert_eq!(plan.operations.len(), 1);
         assert_eq!(plan.ambiguous_files, vec![PathBuf::from("photo.jpg")]);
+        assert_eq!(plan.untouched_records.len(), 1);
+        assert_eq!(
+            plan.untouched_records[0].reason,
+            UntouchedReason::NoMatchingRule
+        );
     }
 
     #[test]
@@ -748,6 +950,133 @@ extensions = ["pdf"]
             ConflictState::DestinationExists { .. }
         ));
         assert!(!operation.selected);
+        assert!(plan.untouched_records.iter().any(|record| {
+            record.path == PathBuf::from("report.pdf")
+                && record.reason == UntouchedReason::DestinationConflict
+        }));
+    }
+
+    #[test]
+    fn already_organized_files_are_left_untouched() {
+        let fixture = fixture_dir();
+        fs::create_dir_all(fixture.path().join("Documents")).expect("fixture dir");
+        fs::write(
+            fixture.path().join("Documents").join("report.pdf"),
+            b"report",
+        )
+        .expect("fixture write");
+
+        let scan = scan_folder(
+            fixture.path(),
+            &ScanOptions {
+                current_folder_only: false,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("scan succeeds");
+        let plan = generate_plan(
+            fixture.path(),
+            &scan,
+            &PlanOptions::built_in(BuiltInMode::Type, "plan_test", test_time()),
+        )
+        .expect("plan succeeds");
+
+        assert!(plan.operations.is_empty());
+        assert!(plan.untouched_records.iter().any(|record| {
+            record.path == path(&["Documents", "report.pdf"])
+                && record.reason == UntouchedReason::AlreadyOrganized
+        }));
+    }
+
+    #[test]
+    fn organized_subtrees_are_left_untouched_when_scanning_subfolders() {
+        let fixture = fixture_dir();
+        fs::create_dir_all(fixture.path().join(path(&["Documents", "Invoices"])))
+            .expect("fixture dir");
+        fs::write(
+            fixture
+                .path()
+                .join(path(&["Documents", "Invoices", "report.pdf"])),
+            b"report",
+        )
+        .expect("fixture write");
+
+        let scan = scan_folder(
+            fixture.path(),
+            &ScanOptions {
+                current_folder_only: false,
+                ..ScanOptions::default()
+            },
+        )
+        .expect("scan succeeds");
+        let plan = generate_plan(
+            fixture.path(),
+            &scan,
+            &PlanOptions::built_in(BuiltInMode::Type, "plan_test", test_time()),
+        )
+        .expect("plan succeeds");
+
+        assert!(plan.operations.is_empty());
+        assert!(plan.untouched_records.iter().any(|record| {
+            record.path == path(&["Documents", "Invoices", "report.pdf"])
+                && record.reason == UntouchedReason::AlreadyOrganized
+        }));
+    }
+
+    #[test]
+    fn stored_plan_persists_already_organized_reasons() {
+        let fixture = fixture_dir();
+        fs::create_dir_all(fixture.path().join("Documents")).expect("fixture dir");
+        fs::write(
+            fixture.path().join("Documents").join("report.pdf"),
+            b"report",
+        )
+        .expect("fixture write");
+
+        let mut store = SqliteSessionStore::in_memory().expect("store opens");
+        let options = PlanOptions::built_in(BuiltInMode::Type, "plan_store_test", test_time());
+        store
+            .create_session_with_id(
+                "session_already_organized",
+                fixture.path(),
+                &crate::model::PlanMode::BuiltIn(BuiltInMode::Type),
+                test_time(),
+            )
+            .expect("session creates");
+        let mut sink = SessionScanSink::new(&mut store, "session_already_organized");
+        let scan = scan_folder_to_sink(
+            fixture.path(),
+            &ScanOptions {
+                current_folder_only: false,
+                ..ScanOptions::default()
+            },
+            &CancellationToken::default(),
+            &mut sink,
+        )
+        .expect("scan streams");
+        drop(sink);
+        store
+            .save_scan_summary("session_already_organized", &scan.summary)
+            .expect("scan summary saves");
+
+        generate_plan_to_store_with_progress(
+            fixture.path(),
+            &mut store,
+            "session_already_organized",
+            &options,
+            1,
+            &mut |_| {},
+        )
+        .expect("plan persists");
+
+        assert!(store
+            .plan_operations_page("session_already_organized", 0, 10)
+            .expect("operations load")
+            .is_empty());
+        let counts = store
+            .untouched_reason_counts("session_already_organized")
+            .expect("untouched counts load");
+        assert_eq!(counts[&UntouchedReason::AlreadyOrganized], 1);
     }
 
     #[test]
@@ -815,6 +1144,12 @@ extensions = ["pdf"]
             .expect("operations load");
         assert_eq!(operations.len(), 1);
         assert!(operations[0].destination.ends_with("report.pdf"));
+        assert_eq!(
+            store
+                .untouched_count("session_plan_test")
+                .expect("untouched count loads"),
+            0
+        );
     }
 
     #[test]
@@ -859,6 +1194,10 @@ extensions = ["pdf"]
             ConflictState::UnsafeDestination { .. }
         ));
         assert!(!plan.operations[0].selected);
+        assert_eq!(
+            plan.untouched_records[0].reason,
+            UntouchedReason::UnsafeDestination
+        );
     }
 
     fn fixture_dir() -> TempDir {

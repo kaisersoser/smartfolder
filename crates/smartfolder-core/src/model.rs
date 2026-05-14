@@ -121,6 +121,8 @@ pub struct PlanRecord {
     pub created_at: DateTime<Utc>,
     pub operations: Vec<PlanOperation>,
     pub ambiguous_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub untouched_records: Vec<UntouchedRecord>,
     pub warnings: Vec<PlanWarning>,
     pub summary: PlanSummary,
 }
@@ -141,6 +143,7 @@ impl PlanRecord {
             created_at,
             operations: Vec::new(),
             ambiguous_files: Vec::new(),
+            untouched_records: Vec::new(),
             warnings: Vec::new(),
             summary: PlanSummary::default(),
         }
@@ -238,6 +241,31 @@ pub enum ConflictState {
 pub struct SourceSnapshot {
     pub size_bytes: u64,
     pub modified_at: Option<DateTime<Utc>>,
+}
+
+/// A file that smartfolder intentionally leaves in place during planning.
+///
+/// Untouched records provide user-facing reasons for files that are not safe or
+/// useful to move. They complement `PlanOperation`: ready operations can be
+/// applied, needs-review operations remain inspectable, and untouched records
+/// explain files that stay where they are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UntouchedRecord {
+    pub path: PathBuf,
+    pub reason: UntouchedReason,
+    pub detail: String,
+}
+
+/// User-facing reason a file remains untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntouchedReason {
+    NoMatchingRule,
+    AlreadyOrganized,
+    UnsupportedMetadata,
+    UnsafeDestination,
+    DestinationConflict,
+    ExcludedByPolicy,
 }
 
 /// Summary statistics of a plan for user feedback.

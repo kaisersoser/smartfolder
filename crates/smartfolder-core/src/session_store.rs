@@ -13,7 +13,7 @@
 //! 4. Stream plan operations into the store.
 //! 5. Query summaries or pages of operations for GUI display.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -21,6 +21,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::model::{
     FileInventoryRecord, PlanMode, PlanOperation, PlanSummary, PlanWarning, ScanWarning,
+    UntouchedReason, UntouchedRecord,
 };
 use crate::scanner::{ScanRecordSink, ScanSummary};
 use crate::storage::session_db_path;
@@ -306,6 +307,10 @@ impl SqliteSessionStore {
             params![session_id],
         )?;
         transaction.execute(
+            "DELETE FROM untouched_files WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        transaction.execute(
             "DELETE FROM plan_warnings WHERE session_id = ?1",
             params![session_id],
         )?;
@@ -370,6 +375,31 @@ impl SqliteSessionStore {
         self.connection.execute(
             "INSERT INTO ambiguous_files (session_id, path) VALUES (?1, ?2)",
             params![session_id, path_to_string(path)],
+        )?;
+        Ok(())
+    }
+
+    /// Insert one untouched file reason into the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or SQLite insertion fails.
+    pub fn insert_untouched_record(
+        &mut self,
+        session_id: &str,
+        record: &UntouchedRecord,
+    ) -> Result<()> {
+        let record_json = serde_json::to_string(record)?;
+        self.connection.execute(
+            "INSERT INTO untouched_files (session_id, path, reason, detail, record_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                path_to_string(&record.path),
+                serde_json::to_string(&record.reason)?,
+                record.detail,
+                record_json
+            ],
         )?;
         Ok(())
     }
@@ -515,6 +545,72 @@ impl SqliteSessionStore {
             operations.push(serde_json::from_str(&row?)?);
         }
         Ok(operations)
+    }
+
+    /// Count untouched files recorded for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite query fails.
+    pub fn untouched_count(&self, session_id: &str) -> Result<usize> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM untouched_files WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Count untouched files grouped by reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite query or JSON decoding fails.
+    pub fn untouched_reason_counts(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeMap<UntouchedReason, usize>> {
+        let mut statement = self.connection.prepare(
+            "SELECT reason, COUNT(*) FROM untouched_files WHERE session_id = ?1 GROUP BY reason",
+        )?;
+        let rows = statement.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (reason_json, count) = row?;
+            let reason = serde_json::from_str(&reason_json)?;
+            counts.insert(reason, count as usize);
+        }
+        Ok(counts)
+    }
+
+    /// Load a page of untouched file reasons for GUI inspection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if SQLite query or JSON decoding fails.
+    pub fn untouched_records_page(
+        &self,
+        session_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<UntouchedRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT record_json FROM untouched_files \
+             WHERE session_id = ?1 ORDER BY rowid LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = statement
+            .query_map(params![session_id, limit as i64, offset as i64], |row| {
+                row.get::<_, String>(0)
+            })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(serde_json::from_str(&row?)?);
+        }
+        Ok(records)
     }
 
     /// Load representative ready operations for a simplified GUI preview.
@@ -675,6 +771,16 @@ impl SqliteSessionStore {
                  path TEXT NOT NULL,
                  FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
              );
+             CREATE TABLE IF NOT EXISTS untouched_files (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 session_id TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 reason TEXT NOT NULL,
+                 detail TEXT NOT NULL,
+                 record_json TEXT NOT NULL,
+                 FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_untouched_files_reason ON untouched_files(session_id, reason);
              CREATE TABLE IF NOT EXISTS plan_warnings (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  session_id TEXT NOT NULL,
@@ -780,7 +886,7 @@ mod tests {
 
     use crate::model::{
         BuiltInMode, Certainty, ConflictState, OperationType, PlanMode, PlanOperation,
-        SourceSnapshot,
+        SourceSnapshot, UntouchedReason, UntouchedRecord,
     };
     use crate::scanner::{scan_folder_to_sink, CancellationToken, ScanOptions};
     use crate::session_store::{PlanOperationFilter, SessionScanSink, SqliteSessionStore};
@@ -967,6 +1073,57 @@ mod tests {
             )
             .expect("attention page loads");
         assert_eq!(attention_page, vec![conflict_operation]);
+    }
+
+    #[test]
+    fn untouched_records_are_paged_and_counted_by_reason() {
+        let fixture = TempDir::new().expect("temp dir");
+        let mut store = SqliteSessionStore::in_memory().expect("store opens");
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 12, 12, 0, 0).unwrap();
+        store
+            .create_session_with_id(
+                "session_untouched",
+                fixture.path(),
+                &PlanMode::BuiltIn(BuiltInMode::Type),
+                created_at,
+            )
+            .expect("session creates");
+
+        let no_match = UntouchedRecord {
+            path: PathBuf::from("loose.unknown"),
+            reason: UntouchedReason::NoMatchingRule,
+            detail: "No organization rule matched this file.".to_string(),
+        };
+        let conflict = UntouchedRecord {
+            path: PathBuf::from("duplicate.pdf"),
+            reason: UntouchedReason::DestinationConflict,
+            detail: "Destination already exists: Documents/report.pdf".to_string(),
+        };
+
+        store
+            .insert_untouched_record("session_untouched", &no_match)
+            .expect("no-match record inserts");
+        store
+            .insert_untouched_record("session_untouched", &conflict)
+            .expect("conflict record inserts");
+
+        assert_eq!(
+            store
+                .untouched_count("session_untouched")
+                .expect("untouched count loads"),
+            2
+        );
+
+        let counts = store
+            .untouched_reason_counts("session_untouched")
+            .expect("reason counts load");
+        assert_eq!(counts[&UntouchedReason::NoMatchingRule], 1);
+        assert_eq!(counts[&UntouchedReason::DestinationConflict], 1);
+
+        let page = store
+            .untouched_records_page("session_untouched", 0, 10)
+            .expect("untouched page loads");
+        assert_eq!(page, vec![no_match, conflict]);
     }
 
     #[test]

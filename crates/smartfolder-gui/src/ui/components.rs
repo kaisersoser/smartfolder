@@ -25,6 +25,18 @@ pub(crate) fn muted_status_chip(ui: &mut egui::Ui, text: &str) {
     );
 }
 
+pub(crate) fn safety_line(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        status_chip(
+            ui,
+            "Safe",
+            theme::colors::success(),
+            theme::colors::success_bg(),
+        );
+        ui.add(egui::Label::new(text).wrap());
+    });
+}
+
 pub(crate) fn truncated_label(ui: &mut egui::Ui, text: &str) {
     let width = ui.available_width().max(120.0);
     ui.add_sized([width, 20.0], egui::Label::new(text).truncate());

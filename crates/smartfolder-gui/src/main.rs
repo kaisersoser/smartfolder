@@ -51,7 +51,7 @@ use smartfolder_core::apply::{
 };
 use smartfolder_core::model::{
     BuiltInMode, ConflictState, FileInventoryRecord, OperationStatus, PlanMode, PlanOperation,
-    PlanSummary, TransactionStatus,
+    PlanSummary, TransactionStatus, UntouchedReason,
 };
 use smartfolder_core::planner::{
     generate_plan_to_store_with_progress_and_cancellation, PlanGenerationProgress, PlanOptions,
@@ -2236,7 +2236,7 @@ impl SmartfolderApp {
                         if self.show_detailed_preview {
                             "Hide Detailed File List"
                         } else {
-                            "View Detailed File List"
+                            "Review all changes"
                         },
                     ))
                     .clicked()
@@ -3705,6 +3705,7 @@ struct AnalysisOutput {
     summary: PlanSummary,
     warning_messages: Vec<String>,
     preview_counts: PreviewCounts,
+    untouched_reason_counts: BTreeMap<UntouchedReason, usize>,
     preview_examples: Vec<PreviewRow>,
     preview_total_rows: usize,
     preview_rows: Vec<PreviewRow>,
@@ -3946,6 +3947,9 @@ fn analyze_root(
     .map_err(|error| format!("Failed to generate plan for {}: {error}", root.display()))?;
     send_progress(sender, AnalysisProgress::loading_preview());
     let preview_counts = load_preview_counts_from_store(&store, &session_id)?;
+    let untouched_reason_counts = store
+        .untouched_reason_counts(&session_id)
+        .map_err(|error| format!("Failed to load untouched reason counts: {error}"))?;
     let preview_examples = load_preview_examples_from_store(&store, &session_id, root)?;
     let preview_page =
         load_preview_page_from_store(&store, &session_id, root, PreviewFilter::All, 0)?;
@@ -3960,6 +3964,7 @@ fn analyze_root(
         summary: plan.summary,
         warning_messages,
         preview_counts,
+        untouched_reason_counts,
         preview_examples,
         preview_total_rows: preview_page.total_rows,
         preview_rows: preview_page.rows,
@@ -4562,37 +4567,7 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
             ui.add_space(6.0);
         }
 
-        let card_gap = ui.spacing().item_spacing.x;
-        let card_width = ((aligned_width - (card_gap * 2.0)) / 3.0).max(160.0);
-        ui.horizontal(|ui| {
-            render_preview_metric_card(
-                ui,
-                card_width,
-                "Ready",
-                ready,
-                "Safe to move",
-                ui::theme::colors::success_bg(),
-                ui::theme::colors::success(),
-            );
-            render_preview_metric_card(
-                ui,
-                card_width,
-                "Review",
-                needs_attention,
-                "Needs attention",
-                ui::theme::colors::warning_bg(),
-                ui::theme::colors::warning(),
-            );
-            render_preview_metric_card(
-                ui,
-                card_width,
-                "Untouched",
-                left_in_place,
-                "Will stay put",
-                ui::theme::colors::subtle_surface(),
-                ui::theme::colors::metadata_text(),
-            );
-        });
+        render_preview_summary_panel(ui, result, ready, needs_attention, left_in_place);
 
         if !compact {
             ui.add_space(8.0);
@@ -4633,6 +4608,76 @@ fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool
                 );
             }
         }
+    });
+}
+
+fn render_preview_summary_panel(
+    ui: &mut egui::Ui,
+    result: &AnalysisOutput,
+    ready: usize,
+    needs_attention: usize,
+    left_in_place: usize,
+) {
+    ui::theme::widgets::surface_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        render_preview_summary_line(
+            ui,
+            ui::theme::colors::success(),
+            &format!("{ready} file{} ready to move", plural(ready)),
+        );
+        let review_line = if needs_attention == 0 {
+            "No planned moves need review".to_string()
+        } else {
+            format!(
+                "{needs_attention} planned move{} need review",
+                plural(needs_attention)
+            )
+        };
+        render_preview_summary_line(
+            ui,
+            if needs_attention == 0 {
+                ui::theme::colors::success()
+            } else {
+                ui::theme::colors::warning()
+            },
+            &review_line,
+        );
+        render_preview_summary_line(
+            ui,
+            ui::theme::colors::metadata_text(),
+            &format!(
+                "{left_in_place} item{} will stay untouched",
+                plural(left_in_place)
+            ),
+        );
+
+        if !result.untouched_reason_counts.is_empty() {
+            ui.add_space(ui::theme::spacing::SM);
+            ui.label(
+                RichText::new("Untouched reasons")
+                    .size(ui::theme::typography::CAPTION)
+                    .strong()
+                    .color(ui::theme::colors::metadata_text()),
+            );
+            for (reason, count) in &result.untouched_reason_counts {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(ui::theme::spacing::MD);
+                    ui::theme::widgets::status_dot(ui, ui::theme::colors::metadata_text());
+                    ui.label(
+                        RichText::new(format!("{} {}", count, untouched_reason_label(*reason)))
+                            .size(ui::theme::typography::CAPTION)
+                            .color(ui::theme::colors::secondary_text()),
+                    );
+                });
+            }
+        }
+    });
+}
+
+fn render_preview_summary_line(ui: &mut egui::Ui, color: Color32, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui::theme::widgets::status_dot(ui, color);
+        ui.label(RichText::new(text).color(ui::theme::colors::primary_text()));
     });
 }
 
@@ -5339,7 +5384,8 @@ fn render_apply_entry(
             .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
             .inner_margin(egui::Margin::same(14.0))
             .show(ui, |ui| {
-                let button_width = 168.0;
+                let button_label = organize_files_label(ready);
+                let button_width = 180.0;
                 let column_gap = 12.0;
                 let text_width = (ui.available_width() - button_width - column_gap).max(220.0);
 
@@ -5376,7 +5422,7 @@ fn render_apply_entry(
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(
-                                        "Organize Files moves the ready items and leaves review or untouched items in place.",
+                                        "smartfolder moves the ready items and leaves review or untouched items in place.",
                                     )
                                     .color(ui::theme::colors::primary_text()),
                                 )
@@ -5402,7 +5448,7 @@ fn render_apply_entry(
                             let response = ui.add_enabled(
                                 can_apply,
                                 egui::Button::new(
-                                    RichText::new("Organize Files")
+                                    RichText::new(button_label)
                                         .strong()
                                         .color(ui::theme::colors::on_primary()),
                                 )
@@ -5420,6 +5466,10 @@ fn render_apply_entry(
                 });
             });
     });
+}
+
+fn organize_files_label(ready: usize) -> String {
+    format!("Organize {ready} file{}", plural(ready))
 }
 
 fn render_apply_confirmation(
@@ -5505,7 +5555,9 @@ fn render_apply_confirmation(
             ui.add_space(12.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(ui::theme::widgets::primary_button("Organize Files"))
+                    .add(ui::theme::widgets::primary_button(organize_files_label(
+                        result.preview_counts.ready,
+                    )))
                     .clicked()
                 {
                     *confirmed = true;
@@ -6298,7 +6350,7 @@ fn plan_summary_headline(result: &AnalysisOutput) -> String {
         return "No safe moves are ready to organize.".to_string();
     }
 
-    if result.preview_counts.needs_attention == 0 && result.summary.ambiguous_files == 0 {
+    if result.preview_counts.needs_attention == 0 && result.preview_counts.untouched == 0 {
         format!(
             "{} safe file{} ready to organize.",
             result.preview_counts.ready,
@@ -6309,8 +6361,8 @@ fn plan_summary_headline(result: &AnalysisOutput) -> String {
             "{} safe file{} ready, with {} item{} left untouched.",
             result.preview_counts.ready,
             plural(result.preview_counts.ready),
-            result.summary.ambiguous_files,
-            plural(result.summary.ambiguous_files)
+            result.preview_counts.untouched,
+            plural(result.preview_counts.untouched)
         )
     } else {
         format!(
@@ -6330,6 +6382,17 @@ fn plan_summary_detail(ready: usize, needs_attention: usize, left_in_place: usiz
         plural(needs_attention),
         plural(left_in_place)
     )
+}
+
+fn untouched_reason_label(reason: UntouchedReason) -> &'static str {
+    match reason {
+        UntouchedReason::NoMatchingRule => "no matching rule",
+        UntouchedReason::AlreadyOrganized => "already organized",
+        UntouchedReason::UnsupportedMetadata => "unsupported metadata",
+        UntouchedReason::UnsafeDestination => "unsafe destination",
+        UntouchedReason::DestinationConflict => "destination conflict",
+        UntouchedReason::ExcludedByPolicy => "excluded by policy",
+    }
 }
 
 fn render_preview_controls(
@@ -6935,7 +6998,7 @@ fn render_organize_step_controls(
                     if ui
                         .add_enabled(
                             ready > 0 && !busy,
-                            ui::theme::widgets::primary_button("Continue to Organize"),
+                            ui::theme::widgets::primary_button(organize_files_label(ready)),
                         )
                         .clicked()
                     {

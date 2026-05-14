@@ -9,6 +9,7 @@
 //! - Shared-core analysis, preview, apply, and undo operations
 //! - Organize-first shell with Activity, Rules, and Settings sections
 //! - Paged preview and transaction history backed by the on-disk session store
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![allow(clippy::module_name_repetitions)]
 
 mod preferences;

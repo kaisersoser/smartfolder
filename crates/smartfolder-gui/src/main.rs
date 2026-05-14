@@ -120,7 +120,7 @@ impl AppSection {
     fn subtitle(self) -> &'static str {
         match self {
             Self::Organize => "Preview safe changes before organizing files.",
-            Self::Activity => "Review recent changes and undo them if needed.",
+            Self::Activity => "Review recent changes and restore previous layouts if needed.",
             Self::Rules => "Manage built-in styles and custom rule profiles.",
             Self::Settings => "Keep the app tidy and confirm launch behavior.",
         }
@@ -161,7 +161,7 @@ impl OrganizeStep {
             Self::Folder => "Choose the root folder",
             Self::Style => "Choose organization rules",
             Self::Preview => "Review example changes",
-            Self::Organize => "Confirm and undo if needed",
+            Self::Organize => "Confirm and keep restore available",
         }
     }
 
@@ -638,6 +638,24 @@ impl SmartfolderApp {
         if let Some(previous) = self.organize_step.previous() {
             self.organize_step = previous;
         }
+    }
+
+    fn complete_apply_result(&mut self) {
+        self.analysis_result = None;
+        self.apply_result = None;
+        self.apply_progress = None;
+        self.undo_result = None;
+        self.show_apply_confirmation = false;
+        self.show_detailed_preview = false;
+        self.preview_filter = PreviewFilter::All;
+        self.preview_offset = 0;
+        self.selected_preview_row = None;
+        self.organize_step = OrganizeStep::Folder;
+        self.furthest_organize_step = if self.has_selected_root() {
+            OrganizeStep::Style
+        } else {
+            OrganizeStep::Folder
+        };
     }
 
     fn save_preferences_quietly(&mut self) {
@@ -1792,7 +1810,7 @@ impl SmartfolderApp {
             });
         });
         ui.label(
-            RichText::new("Organize files safely, then undo changes if you need to.")
+            RichText::new("Organize files safely, then restore the previous layout if needed.")
                 .color(ui::theme::colors::secondary_text()),
         );
         ui.label(
@@ -1907,7 +1925,7 @@ impl SmartfolderApp {
             ui,
             ui::icons::FOLDER,
             "Organize Files",
-            "Open a folder from Explorer or choose one here, preview the safe changes, then organize with undo available afterward.",
+            "Open a folder from Explorer or choose one here, preview the safe changes, then organize with restore available afterward.",
         );
         self.render_status_messages(ui);
         ui.add_space(10.0);
@@ -2390,7 +2408,7 @@ impl SmartfolderApp {
             ui,
             ui::icons::ACTIVITY,
             "Activity",
-            "Review recent organization runs for this folder and undo changes when you need to restore the original layout.",
+            "Review recent organization runs for this folder and restore a previous layout when needed.",
         );
         self.render_status_messages(ui);
         ui.add_space(ui::theme::spacing::MD);
@@ -2658,7 +2676,7 @@ impl SmartfolderApp {
                                 self.cleanup_old_sessions();
                             }
                             ui.label(
-                                RichText::new("Available when no analysis, organize, or undo task is running.")
+                                RichText::new("Available when no analysis, organize, or restore task is running.")
                                     .size(ui::theme::typography::CAPTION)
                                     .color(ui::theme::colors::metadata_text()),
                             );
@@ -3092,6 +3110,7 @@ impl eframe::App for SmartfolderApp {
                 HistoryAction::ToggleRecoveryLog => {
                     self.show_recovery_log = !self.show_recovery_log;
                 }
+                HistoryAction::CompleteApply => self.complete_apply_result(),
                 HistoryAction::ConfirmUndo(transaction_id) => {
                     self.show_undo_confirmation = Some(transaction_id);
                 }
@@ -3569,6 +3588,7 @@ enum HistoryAction {
     ViewDetails(String),
     CloseDetails,
     ToggleRecoveryLog,
+    CompleteApply,
     ConfirmUndo(String),
 }
 
@@ -4443,7 +4463,7 @@ fn transaction_reason_summary(
 fn undo_transaction_for_gui(transaction_id: &str) -> UndoMessage {
     undo_transaction(transaction_id)
         .map(undo_output)
-        .map_err(|error| format!("Failed to undo changes: {error}"))
+        .map_err(|error| format!("Failed to restore previous layout: {error}"))
 }
 
 fn undo_output(summary: UndoSummary) -> UndoOutput {
@@ -5619,7 +5639,10 @@ fn render_apply_confirmation(
             ui.add_space(10.0);
             render_safety_line(ui, "Existing files will not be overwritten.");
             render_safety_line(ui, "Restore history is recorded before files move.");
-            render_safety_line(ui, "Undo Changes will be available after completion.");
+            render_safety_line(
+                ui,
+                "Restore previous layout will be available after completion.",
+            );
 
             if is_cloud_synced_path(&result.root) {
                 ui.add_space(6.0);
@@ -5677,7 +5700,7 @@ fn render_apply_result(
                 ui.add(
                     egui::Label::new(
                         RichText::new(format!(
-                            "{} file{} organized. Undo Changes is ready if you want to restore the original layout.",
+                            "{} file{} moved successfully.",
                             result.completed,
                             plural(result.completed)
                         ))
@@ -5687,55 +5710,59 @@ fn render_apply_result(
                 );
                 ui.add_space(10.0);
 
-                let card_gap = ui.spacing().item_spacing.x;
-                let card_width = ((aligned_width - (card_gap * 2.0)) / 3.0).max(160.0);
-                ui.horizontal(|ui| {
-                    render_preview_metric_card(
+                ui::theme::widgets::surface_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    render_preview_summary_line(
                         ui,
-                        card_width,
-                        "Organized",
-                        result.completed,
-                        "Moved successfully",
-                        ui::theme::colors::success_bg(),
                         ui::theme::colors::success(),
+                        &format!(
+                            "{} file{} moved successfully",
+                            result.completed,
+                            plural(result.completed)
+                        ),
                     );
-                    render_preview_metric_card(
+                    render_preview_summary_line(
                         ui,
-                        card_width,
-                        "Skipped",
-                        result.skipped,
-                        "Left untouched",
-                        ui::theme::colors::subtle_surface(),
-                        ui::theme::colors::metadata_text(),
+                        if result.skipped == 0 && result.failed == 0 {
+                            ui::theme::colors::success()
+                        } else {
+                            ui::theme::colors::warning()
+                        },
+                        &format!("{} skipped · {} failed", result.skipped, result.failed),
                     );
-                    render_preview_metric_card(
+                    render_preview_summary_line(
                         ui,
-                        card_width,
-                        "Failed",
-                        result.failed,
-                        "Need attention",
-                        ui::theme::colors::warning_bg(),
-                        ui::theme::colors::warning(),
+                        ui::theme::colors::success(),
+                        "Restore point saved",
                     );
                 });
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!busy, ui::theme::widgets::secondary_button("Undo Changes"))
+                        .add_enabled(!busy, ui::theme::widgets::primary_button("Done"))
+                        .clicked()
+                    {
+                        *action = Some(HistoryAction::CompleteApply);
+                    }
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            ui::theme::widgets::secondary_button("Restore previous layout"),
+                        )
                         .clicked()
                     {
                         *action = Some(HistoryAction::ConfirmUndo(result.transaction_id.clone()));
                     }
                     if ui
-                        .add_enabled(!busy, ui::theme::widgets::secondary_button("View Details"))
+                        .add_enabled(!busy, ui::theme::widgets::tertiary_button("View details"))
                         .clicked()
                     {
                         *action = Some(HistoryAction::ViewDetails(result.transaction_id.clone()));
                     }
                 });
                 ui.add_space(8.0);
-                egui::CollapsingHeader::new("Restore history details")
+                egui::CollapsingHeader::new("Technical details")
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.label(
@@ -5754,7 +5781,7 @@ fn render_apply_result(
 fn render_undo_progress(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spinner();
-        ui.label("Undoing changes and restoring original file locations...");
+        ui.label("Restoring files to their previous locations...");
     });
 }
 
@@ -6000,8 +6027,10 @@ fn render_activity_record_row(
                     }
                     let can_undo = can_undo_status(row.status) && !busy;
                     if ui
-                        .add_enabled(can_undo, ui::theme::widgets::secondary_button("Undo"))
-                        .on_disabled_hover_text("Only completed or failed activities can be undone")
+                        .add_enabled(can_undo, ui::theme::widgets::secondary_button("Restore"))
+                        .on_disabled_hover_text(
+                            "Only completed or failed activities can be restored",
+                        )
                         .clicked()
                     {
                         *action = Some(HistoryAction::ConfirmUndo(row.transaction_id.clone()));
@@ -6388,12 +6417,12 @@ fn render_undo_confirmation(
     confirmed: &mut bool,
     dismissed: &mut bool,
 ) {
-    egui::Window::new("Confirm undo")
+    egui::Window::new("Restore previous layout")
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label(RichText::new("Undo these changes?").strong());
+            ui.label(RichText::new("Restore previous layout?").strong());
             ui.label("smartfolder will move completed files back to their original paths.");
             ui.label("It will refuse to overwrite anything already at an original path.");
             ui.add_space(6.0);
@@ -6403,7 +6432,7 @@ fn render_undo_confirmation(
                 if ui.button("Cancel").clicked() {
                     *dismissed = true;
                 }
-                if ui.button("Undo Changes").clicked() {
+                if ui.button("Restore previous layout").clicked() {
                     *confirmed = true;
                 }
             });
@@ -6411,7 +6440,7 @@ fn render_undo_confirmation(
 }
 
 fn render_undo_result(ui: &mut egui::Ui, result: &UndoOutput) {
-    ui.label(RichText::new("Changes undone").strong());
+    ui.label(RichText::new("Previous layout restored").strong());
     egui::Grid::new("undo-result")
         .num_columns(2)
         .spacing([16.0, 6.0])
@@ -7126,7 +7155,7 @@ fn render_organize_step_controls(
                 }
                 OrganizeStep::Organize => {
                     helper_text = Some(
-                        "Confirm only when the preview matches what you expect. Undo remains available afterward.",
+                        "Confirm only when the preview matches what you expect. Restore remains available afterward.",
                     );
                 }
             }
@@ -7216,8 +7245,8 @@ const SETTINGS_HELP_ROWS: [(&str, &str, &str); 4] = [
     ),
     (
         "History",
-        "Restore history is recorded before files move so Undo Changes can restore completed moves.",
-        "Undo-ready workflow",
+        "Restore history is recorded before files move so previous layouts can be restored.",
+        "Restore-ready workflow",
     ),
     (
         "Appearance",
@@ -8669,11 +8698,11 @@ fn activity_detail(row: &TransactionRow) -> String {
                 .to_string()
         }
         TransactionStatus::Interrupted | TransactionStatus::InProgress => format!(
-            "Why: {}. {} completed, {} pending. Resume or undo from the recovery controls.",
+            "Why: {}. {} completed, {} pending. Resume or restore from the recovery controls.",
             row.reason_summary, row.completed, row.pending
         ),
         TransactionStatus::Failed => {
-            "Some file moves failed. Review details before retrying or undoing.".to_string()
+            "Some file moves failed. Review details before retrying or restoring.".to_string()
         }
     }
 }

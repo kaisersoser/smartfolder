@@ -462,6 +462,26 @@ impl SmartfolderApp {
         self.save_preferences_quietly();
     }
 
+    fn customize_builtin_style(&mut self, mode: BuiltInMode) {
+        self.profile_editor = ProfileEditorState::from_builtin(mode);
+        self.loaded_profile = None;
+        self.select_builtin_style(mode);
+        self.maintenance_message = Some(format!(
+            "Created an editable draft from {}. Save it as a custom profile when ready.",
+            Self::mode_label(mode)
+        ));
+        self.error_message = None;
+    }
+
+    fn use_saved_profile(&mut self, loaded_profile: LoadedRuleProfile) {
+        let profile_id = loaded_profile.profile.profile_id.clone();
+        self.profile_editor = ProfileEditorState::from_profile(&loaded_profile.profile);
+        self.loaded_profile = Some(loaded_profile);
+        self.select_custom_rules_style();
+        self.maintenance_message = Some(format!("Using custom profile '{profile_id}'."));
+        self.error_message = None;
+    }
+
     fn invalidate_preview_state(&mut self) {
         self.analysis_result = None;
         self.apply_result = None;
@@ -950,7 +970,6 @@ impl SmartfolderApp {
         }
     }
 
-    #[cfg(test)]
     fn mode_label(mode: BuiltInMode) -> &'static str {
         match mode {
             BuiltInMode::Type => "Type",
@@ -1725,149 +1744,125 @@ impl SmartfolderApp {
             ui,
             ui::icons::RULES,
             "Rules",
-            "Use a built-in style or manage a simple custom rule profile for folders that need a more specific destination.",
+            "Choose a built-in style, adapt it into a custom profile, or manage saved rule profiles.",
         );
         self.render_status_messages(ui);
         ui.add_space(10.0);
 
-        ui.horizontal_wrapped(|ui| {
-            render_info_card(
-                ui,
-                "Built-in styles",
-                "Choose a recommended layout here, then jump back to Organize with the same selection already active.",
-                "Wizard linked",
-            );
-            render_info_card(
-                ui,
-                "Custom Rules",
-                "A custom profile adds one specific destination strategy without giving up preview-first safety.",
-                "Preview still required",
-            );
-        });
+        let saved_profiles = list_saved_rule_profiles();
+        let mut profile_to_use: Option<LoadedRuleProfile> = None;
 
-        ui.add_space(10.0);
         ui::theme::widgets::card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Built-in styles").strong().size(18.0));
+            ui.label(RichText::new("Rules library").strong().size(18.0));
             ui.label(
-                "These are the ready-made organization styles available from the Organize screen.",
+                RichText::new("Built-ins are read-only. Customize one to create an editable profile.")
+                    .color(ui::theme::colors::secondary_text()),
             );
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                if render_style_card(
-                    ui,
-                    self.planning_source == PlanningSource::BuiltIn
-                        && self.mode == BuiltInMode::Type,
-                    "By Type",
-                    "Images / PDFs / Videos",
-                    "Use this when a folder has mixed file kinds.",
-                )
-                .clicked()
-                {
-                    self.select_builtin_style(BuiltInMode::Type);
-                    self.active_section = AppSection::Organize;
-                }
+            ui.add_space(ui::theme::spacing::SM);
 
-                if render_style_card(
-                    ui,
-                    self.planning_source == PlanningSource::BuiltIn
-                        && self.mode == BuiltInMode::Date,
-                    "By Date",
-                    "2026 / May / 13",
-                    "Use this when time is the clearest grouping.",
-                )
-                .clicked()
-                {
-                    self.select_builtin_style(BuiltInMode::Date);
-                    self.active_section = AppSection::Organize;
-                }
+            ui.label(
+                RichText::new("Built-in styles")
+                    .strong()
+                    .color(ui::theme::colors::heading_text()),
+            );
+            for (mode, title, pattern, detail) in builtin_library_items() {
+                let selected =
+                    self.planning_source == PlanningSource::BuiltIn && self.mode == mode;
+                render_builtin_rule_row(ui, title, pattern, detail, selected, |action| {
+                    match action {
+                        BuiltinRuleAction::Use => {
+                            self.select_builtin_style(mode);
+                            self.active_section = AppSection::Organize;
+                        }
+                        BuiltinRuleAction::Customize => self.customize_builtin_style(mode),
+                    }
+                });
+                ui.add_space(ui::theme::spacing::XS);
+            }
 
-                if render_style_card(
-                    ui,
-                    self.planning_source == PlanningSource::BuiltIn
-                        && self.mode == BuiltInMode::TypeYear,
-                    "Type + Date",
-                    "Images / 2026 / May",
-                    "Use this for large folders that need both structure and time.",
-                )
-                .clicked()
-                {
-                    self.select_builtin_style(BuiltInMode::TypeYear);
-                    self.active_section = AppSection::Organize;
+            ui.add_space(ui::theme::spacing::MD);
+            ui.label(
+                RichText::new("Custom profiles")
+                    .strong()
+                    .color(ui::theme::colors::heading_text()),
+            );
+            match &saved_profiles {
+                Ok(profiles) if profiles.is_empty() => {
+                    ui.label(
+                        RichText::new("No saved custom profiles yet. Customize a built-in style or save the draft below.")
+                            .color(ui::theme::colors::secondary_text()),
+                    );
                 }
-            });
+                Ok(profiles) => {
+                    for profile in profiles {
+                        let selected = self.loaded_profile.as_ref().is_some_and(|loaded| {
+                            loaded.path == profile.path
+                                && self.planning_source == PlanningSource::RuleProfile
+                        });
+                        if render_saved_profile_row(ui, profile, selected) {
+                            profile_to_use = Some(profile.clone());
+                        }
+                        ui.add_space(ui::theme::spacing::XS);
+                    }
+                }
+                Err(message) => {
+                    ui.colored_label(ui::theme::colors::error(), message);
+                }
+            }
         });
+
+        if let Some(profile) = profile_to_use {
+            self.use_saved_profile(profile);
+        }
 
         ui.add_space(12.0);
         ui::theme::widgets::card_frame().show(ui, |ui| {
-            ui.label(RichText::new("Custom profile").strong().size(18.0));
-            ui.label("A profile gives one folder a specific rule without editing raw TOML.");
-            ui.add_space(8.0);
-            if let Some(profile) = &self.loaded_profile {
-                render_status_chip(
-                    ui,
-                    "Profile loaded",
-                    ui::theme::colors::success(),
-                    ui::theme::colors::success_bg(),
-                );
-                ui.label(format!("Current profile: {}", profile.profile.profile_id));
-                truncated_label(ui, &format!("Saved at: {}", profile.path.display()));
-            } else {
-                render_status_chip(
-                    ui,
-                    "No profile selected",
-                    ui::theme::colors::warning(),
-                    ui::theme::colors::warning_bg(),
-                );
-                ui.label("Create a simple profile below or import an existing TOML profile.");
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            ui.label(RichText::new("Profile workspace").strong().size(18.0));
+            ui.label(
+                RichText::new("Edit a draft profile, save it locally, then use it from Organize.")
+                    .color(ui::theme::colors::secondary_text()),
+            );
+            ui.add_space(ui::theme::spacing::SM);
+            render_profile_workspace_status(ui, self.loaded_profile.as_ref());
+            ui.add_space(ui::theme::spacing::SM);
+            ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add(ui::theme::widgets::primary_button("Use Custom Rules"))
+                    .add(ui::theme::widgets::primary_button("Save profile"))
+                    .clicked()
+                {
+                    self.save_profile_from_editor();
+                }
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Use Custom Rules"))
                     .clicked()
                 {
                     self.select_custom_rules_style();
                     self.active_section = AppSection::Organize;
                 }
                 if ui
-                    .add(ui::theme::widgets::secondary_button("Validate profile"))
+                    .add(ui::theme::widgets::secondary_button("Validate"))
                     .clicked()
                 {
                     self.validate_profile_editor();
                 }
                 if ui
-                    .add(ui::theme::widgets::secondary_button("Save profile"))
+                    .add(ui::theme::widgets::secondary_button("Import TOML..."))
                     .clicked()
                 {
-                    self.save_profile_from_editor();
+                    self.import_rule_profile();
+                }
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Export TOML..."))
+                    .clicked()
+                {
+                    self.export_profile_from_editor();
                 }
             });
             ui.add_space(6.0);
             render_safety_line(
                 ui,
-                "Custom Rules still go through the same preview, conflict checks, and undo flow.",
+                "Custom Rules still use preview, conflict checks, and undo history before anything moves.",
             );
-            egui::CollapsingHeader::new("Advanced TOML actions")
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.label(
-                        "Import or export TOML when you want to share or hand-edit a profile.",
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(ui::theme::widgets::secondary_button("Import TOML..."))
-                            .clicked()
-                        {
-                            self.import_rule_profile();
-                        }
-                        if ui
-                            .add(ui::theme::widgets::secondary_button("Export TOML..."))
-                            .clicked()
-                        {
-                            self.export_profile_from_editor();
-                        }
-                    });
-                });
         });
 
         ui.add_space(12.0);
@@ -1952,99 +1947,116 @@ impl SmartfolderApp {
 
     fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
         ui::theme::widgets::card_frame().show(ui, |ui| {
-            egui::CollapsingHeader::new("Profile editor")
-                .default_open(self.loaded_profile.is_none())
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Profile id");
-                        ui.add_sized(
-                            [160.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
-                        );
-                        ui.label("Rule name");
-                        ui.add_sized(
-                            [180.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.rule_name),
-                        );
-                    });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Rule builder").strong().size(18.0));
+                ui.label(
+                    RichText::new("Rules run from top to bottom; first match wins.")
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            });
+            ui.add_space(ui::theme::spacing::SM);
 
-                    ui.horizontal(|ui| {
-                        ui.label("Destination");
-                        ui.add_sized(
-                            [360.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.destination),
-                        );
-                        ui.label("Priority");
-                        ui.add_sized(
-                            [80.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.priority),
-                        );
-                    });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Profile id");
+                ui.add_sized(
+                    [220.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
+                );
+                if ui
+                    .add(ui::theme::widgets::secondary_button("New profile"))
+                    .clicked()
+                {
+                    self.profile_editor = ProfileEditorState::default();
+                    self.loaded_profile = None;
+                    self.planning_source = PlanningSource::BuiltIn;
+                    self.maintenance_message =
+                        Some("Started a new unsaved profile draft.".to_string());
+                    self.error_message = None;
+                }
+            });
 
-                    ui.horizontal(|ui| {
-                        ui.label("Extensions");
-                        ui.add_sized(
-                            [180.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.extensions),
+            ui.add_space(ui::theme::spacing::MD);
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(260.0, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.label(
+                            RichText::new("Rules")
+                                .strong()
+                                .color(ui::theme::colors::heading_text()),
                         );
-                        ui.label("Filename contains");
-                        ui.add_sized(
-                            [220.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.filename_contains),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Path contains");
-                        ui.add_sized(
-                            [220.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.path_contains),
-                        );
-                        ui.label("Min bytes");
-                        ui.add_sized(
-                            [90.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.min_size_bytes),
-                        );
-                        ui.label("Max bytes");
-                        ui.add_sized(
-                            [90.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.max_size_bytes),
-                        );
-                        ui.label("Year");
-                        ui.add_sized(
-                            [70.0, 22.0],
-                            egui::TextEdit::singleline(&mut self.profile_editor.year),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
+                        ui.add_space(ui::theme::spacing::XS);
+                        let mut selected_rule = self.profile_editor.selected_rule_index();
+                        for (index, rule) in self.profile_editor.rules.iter().enumerate() {
+                            if render_rule_list_item(ui, rule, index, index == selected_rule)
+                                .clicked()
+                            {
+                                selected_rule = index;
+                            }
+                            ui.add_space(ui::theme::spacing::XS);
+                        }
+                        self.profile_editor.selected_rule = selected_rule;
+                        ui.add_space(ui::theme::spacing::SM);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add(ui::theme::widgets::secondary_button("Add rule"))
+                                .clicked()
+                            {
+                                self.profile_editor.add_rule();
+                            }
+                            if ui
+                                .add(ui::theme::widgets::secondary_button("Duplicate"))
+                                .clicked()
+                            {
+                                self.profile_editor.duplicate_selected_rule();
+                            }
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.profile_editor.selected_rule_index() > 0,
+                                    ui::theme::widgets::secondary_button("Move up"),
+                                )
+                                .clicked()
+                            {
+                                self.profile_editor.move_selected_rule(-1);
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.profile_editor.selected_rule_index() + 1
+                                        < self.profile_editor.rules.len(),
+                                    ui::theme::widgets::secondary_button("Move down"),
+                                )
+                                .clicked()
+                            {
+                                self.profile_editor.move_selected_rule(1);
+                            }
+                        });
                         if ui
-                            .add(ui::theme::widgets::secondary_button("Validate profile"))
+                            .add_enabled(
+                                self.profile_editor.rules.len() > 1,
+                                ui::theme::widgets::secondary_button("Delete rule"),
+                            )
                             .clicked()
                         {
-                            self.validate_profile_editor();
+                            self.profile_editor.delete_selected_rule();
                         }
-                        if ui
-                            .add(ui::theme::widgets::primary_button("Save profile"))
-                            .clicked()
-                        {
-                            self.save_profile_from_editor();
+                    },
+                );
+
+                ui.separator();
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if let Some(rule) = self.profile_editor.selected_rule_mut() {
+                            render_rule_detail_editor(ui, rule);
                         }
-                        if ui
-                            .add(ui::theme::widgets::secondary_button("Export profile..."))
-                            .clicked()
-                        {
-                            self.export_profile_from_editor();
-                        }
-                        if ui
-                            .add(ui::theme::widgets::secondary_button("New profile"))
-                            .clicked()
-                        {
-                            self.profile_editor = ProfileEditorState::default();
-                            self.loaded_profile = None;
-                        }
-                    });
-                });
+                    },
+                );
+            });
         });
     }
 
@@ -2295,6 +2307,37 @@ fn load_rule_profile_from_path(path: &Path) -> std::result::Result<RuleProfile, 
         .map_err(|error| format!("Invalid rule profile {}: {error}", path.display()))
 }
 
+fn list_saved_rule_profiles() -> std::result::Result<Vec<LoadedRuleProfile>, String> {
+    let directory = ensure_profiles_dir()
+        .map_err(|error| format!("Failed to open profile directory: {error}"))?;
+    let entries = fs::read_dir(&directory).map_err(|error| {
+        format!(
+            "Failed to read profile directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let mut profiles = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("Failed to read profile entry: {error}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        if let Ok(profile) = load_rule_profile_from_path(&path) {
+            profiles.push(LoadedRuleProfile { path, profile });
+        }
+    }
+
+    profiles.sort_by(|left, right| {
+        left.profile
+            .profile_id
+            .cmp(&right.profile.profile_id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(profiles)
+}
+
 fn save_profile_from_editor(
     editor: &ProfileEditorState,
 ) -> std::result::Result<LoadedRuleProfile, String> {
@@ -2359,9 +2402,16 @@ fn profile_file_stem(profile_id: &str) -> String {
 #[derive(Debug, Clone)]
 struct ProfileEditorState {
     profile_id: String,
+    rules: Vec<RuleEditorState>,
+    selected_rule: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RuleEditorState {
     rule_name: String,
     destination: String,
     priority: String,
+    match_all: bool,
     extensions: String,
     filename_contains: String,
     path_contains: String,
@@ -2374,9 +2424,19 @@ impl Default for ProfileEditorState {
     fn default() -> Self {
         Self {
             profile_id: "my-profile".to_string(),
+            rules: vec![RuleEditorState::default()],
+            selected_rule: 0,
+        }
+    }
+}
+
+impl Default for RuleEditorState {
+    fn default() -> Self {
+        Self {
             rule_name: "PDFs".to_string(),
             destination: "Documents/PDFs".to_string(),
             priority: "10".to_string(),
+            match_all: false,
             extensions: "pdf".to_string(),
             filename_contains: String::new(),
             path_contains: String::new(),
@@ -2389,20 +2449,116 @@ impl Default for ProfileEditorState {
 
 impl ProfileEditorState {
     fn from_profile(profile: &RuleProfile) -> Self {
-        let Some(rule) = profile.rules.first() else {
-            return Self {
-                profile_id: profile.profile_id.clone(),
-                ..Self::default()
-            };
-        };
-
         Self {
             profile_id: profile.profile_id.clone(),
+            rules: if profile.rules.is_empty() {
+                vec![RuleEditorState::default()]
+            } else {
+                profile
+                    .rules
+                    .iter()
+                    .map(RuleEditorState::from_rule)
+                    .collect()
+            },
+            selected_rule: 0,
+        }
+    }
+
+    fn from_builtin(mode: BuiltInMode) -> Self {
+        let (profile_id, rule_name, destination) = builtin_custom_profile_template(mode);
+        Self {
+            profile_id: profile_id.to_string(),
+            rules: vec![RuleEditorState {
+                rule_name: rule_name.to_string(),
+                destination: destination.to_string(),
+                match_all: true,
+                extensions: String::new(),
+                filename_contains: String::new(),
+                path_contains: String::new(),
+                min_size_bytes: String::new(),
+                max_size_bytes: String::new(),
+                year: String::new(),
+                ..RuleEditorState::default()
+            }],
+            selected_rule: 0,
+        }
+    }
+
+    fn selected_rule_index(&self) -> usize {
+        self.selected_rule.min(self.rules.len().saturating_sub(1))
+    }
+
+    fn selected_rule_mut(&mut self) -> Option<&mut RuleEditorState> {
+        let index = self.selected_rule_index();
+        self.rules.get_mut(index)
+    }
+
+    fn add_rule(&mut self) {
+        self.rules.push(RuleEditorState {
+            rule_name: format!("Rule {}", self.rules.len() + 1),
+            destination: "Other".to_string(),
+            priority: ((self.rules.len() + 1) * 10).to_string(),
+            extensions: String::new(),
+            ..RuleEditorState::default()
+        });
+        self.selected_rule = self.rules.len().saturating_sub(1);
+    }
+
+    fn duplicate_selected_rule(&mut self) {
+        let index = self.selected_rule_index();
+        if let Some(rule) = self.rules.get(index).cloned() {
+            let mut duplicate = rule;
+            duplicate.rule_name = format!("{} copy", duplicate.rule_name);
+            self.rules.insert(index + 1, duplicate);
+            self.selected_rule = index + 1;
+        }
+    }
+
+    fn delete_selected_rule(&mut self) {
+        if self.rules.len() <= 1 {
+            return;
+        }
+        let index = self.selected_rule_index();
+        self.rules.remove(index);
+        self.selected_rule = index.min(self.rules.len().saturating_sub(1));
+    }
+
+    fn move_selected_rule(&mut self, direction: isize) {
+        let index = self.selected_rule_index();
+        let next_index = if direction < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(self.rules.len().saturating_sub(1))
+        };
+        if index != next_index {
+            self.rules.swap(index, next_index);
+            self.selected_rule = next_index;
+        }
+    }
+
+    fn to_profile(&self) -> std::result::Result<RuleProfile, String> {
+        let profile = RuleProfile {
+            profile_id: self.profile_id.trim().to_string(),
+            rules: self
+                .rules
+                .iter()
+                .map(RuleEditorState::to_rule)
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        profile.validate().map_err(|error| error.to_string())?;
+        Ok(profile)
+    }
+}
+
+impl RuleEditorState {
+    fn from_rule(rule: &CustomRule) -> Self {
+        Self {
             rule_name: rule.name.clone(),
             destination: rule.destination.clone(),
             priority: rule
                 .priority
                 .map_or_else(String::new, |value| value.to_string()),
+            match_all: rule.match_all,
             extensions: rule.extensions.join(", "),
             filename_contains: rule.filename_contains.join(", "),
             path_contains: rule.path_contains.join(", "),
@@ -2418,23 +2574,42 @@ impl ProfileEditorState {
         }
     }
 
-    fn to_profile(&self) -> std::result::Result<RuleProfile, String> {
-        let profile = RuleProfile {
-            profile_id: self.profile_id.trim().to_string(),
-            rules: vec![CustomRule {
-                name: self.rule_name.trim().to_string(),
-                destination: self.destination.trim().to_string(),
-                priority: parse_optional_number(&self.priority, "priority")?,
-                extensions: comma_separated_values(&self.extensions),
-                filename_contains: comma_separated_values(&self.filename_contains),
-                path_contains: comma_separated_values(&self.path_contains),
-                min_size_bytes: parse_optional_number(&self.min_size_bytes, "min_size_bytes")?,
-                max_size_bytes: parse_optional_number(&self.max_size_bytes, "max_size_bytes")?,
-                year: parse_optional_number(&self.year, "year")?,
-            }],
-        };
-        profile.validate().map_err(|error| error.to_string())?;
-        Ok(profile)
+    fn to_rule(&self) -> std::result::Result<CustomRule, String> {
+        Ok(CustomRule {
+            name: self.rule_name.trim().to_string(),
+            destination: self.destination.trim().to_string(),
+            priority: parse_optional_number(&self.priority, "priority")?,
+            match_all: self.match_all,
+            extensions: comma_separated_values(&self.extensions),
+            filename_contains: comma_separated_values(&self.filename_contains),
+            path_contains: comma_separated_values(&self.path_contains),
+            min_size_bytes: parse_optional_number(&self.min_size_bytes, "min_size_bytes")?,
+            max_size_bytes: parse_optional_number(&self.max_size_bytes, "max_size_bytes")?,
+            year: parse_optional_number(&self.year, "year")?,
+        })
+    }
+}
+
+fn builtin_custom_profile_template(
+    mode: BuiltInMode,
+) -> (&'static str, &'static str, &'static str) {
+    match mode {
+        BuiltInMode::Type => ("custom-by-type", "All files by type", "{type}"),
+        BuiltInMode::Date => (
+            "custom-by-date",
+            "All files by date",
+            "{year}/{month}/{day}",
+        ),
+        BuiltInMode::Extension => (
+            "custom-by-extension",
+            "All files by extension",
+            "{extension}",
+        ),
+        BuiltInMode::TypeYear => (
+            "custom-type-date",
+            "All files by type and date",
+            "{type}/{year}/{month}/{day}",
+        ),
     }
 }
 
@@ -4064,11 +4239,18 @@ fn render_recovery_log(
     busy: bool,
     action: &mut Option<HistoryAction>,
 ) {
-    ui.label(
-        RichText::new("Restore history")
-            .strong()
-            .color(ui::theme::colors::heading_text()),
-    );
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Restore history")
+                .strong()
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.label(
+            RichText::new("Recent recovery journals")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+    });
     if rows.is_empty() {
         ui.add(
             egui::Label::new(
@@ -4080,65 +4262,93 @@ fn render_recovery_log(
         return;
     }
 
-    let width = ui.available_width().max(360.0);
-    let transaction_width = width * 0.24;
-    let status_width = width * 0.14;
-    let summary_width = width * 0.24;
-    let root_width = width * 0.22;
-    let action_width = width * 0.16;
-
-    egui::Grid::new("technical-recovery-log")
-        .num_columns(5)
-        .striped(true)
-        .spacing([8.0, 4.0])
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(420.0)
         .show(ui, |ui| {
-            preview_cell(ui, "Activity", transaction_width, true);
-            preview_cell(ui, "Status", status_width, true);
-            preview_cell(ui, "Summary", summary_width, true);
-            preview_cell(ui, "Root", root_width, true);
-            preview_cell(ui, "Action", action_width, true);
-            ui.end_row();
-
-            for row in rows.iter().take(8) {
-                preview_cell_with_tooltip(
-                    ui,
-                    &activity_event_title(row),
-                    transaction_width,
-                    false,
-                    format!("Activity id: {}", row.transaction_id),
-                );
-                preview_cell(ui, status_label(row.status), status_width, false);
-                preview_cell(ui, &activity_count_summary(row), summary_width, false);
-                preview_cell(ui, &row.root_label, root_width, false);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(!busy, ui::theme::widgets::secondary_button("Details"))
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
-                    }
-                    let can_undo = can_undo_status(row.status) && !busy;
-                    if ui
-                        .add_enabled(
-                            can_undo,
-                            ui::theme::widgets::secondary_button("Undo Changes"),
-                        )
-                        .on_disabled_hover_text("Only completed or failed activities can be undone")
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ConfirmUndo(row.transaction_id.clone()));
-                    }
-                });
-                ui.end_row();
+            for row in rows.iter().take(10) {
+                render_recovery_log_row(ui, row, busy, action);
+                ui.add_space(ui::theme::spacing::XS);
             }
         });
 
-    if rows.len() > 8 {
+    if rows.len() > 10 {
         ui.label(
-            RichText::new(format!("Showing 8 of {} recovery journals.", rows.len()))
+            RichText::new(format!("Showing 10 of {} recovery journals.", rows.len()))
                 .color(ui::theme::colors::metadata_text()),
         );
     }
+}
+
+fn render_recovery_log_row(
+    ui: &mut egui::Ui,
+    row: &TransactionRow,
+    busy: bool,
+    action: &mut Option<HistoryAction>,
+) {
+    egui::Frame::group(ui.style())
+        .fill(ui::theme::colors::surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let available = ui.available_width();
+            let action_width = 132.0_f32.min(available * 0.28);
+            let content_width = (available - action_width - ui::theme::spacing::MD).max(200.0);
+
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(content_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(activity_event_title(row))
+                                        .strong()
+                                        .color(ui::theme::colors::heading_text()),
+                                )
+                                .wrap(),
+                            )
+                            .on_hover_text(format!("Activity id: {}", row.transaction_id));
+
+                            let (stroke, fill) = activity_status_colors(row.status);
+                            render_status_chip(ui, status_label(row.status), stroke, fill);
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(activity_count_summary(row))
+                                    .color(ui::theme::colors::secondary_text()),
+                            )
+                            .wrap(),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("Root: {}", row.root_label))
+                                    .size(ui::theme::typography::CAPTION)
+                                    .color(ui::theme::colors::metadata_text()),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(row.root.display().to_string());
+                    },
+                );
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(action_width, 0.0),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui
+                            .add_enabled(!busy, ui::theme::widgets::secondary_button("Details"))
+                            .clicked()
+                        {
+                            *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
+                        }
+                    },
+                );
+            });
+        });
 }
 
 fn render_transaction_detail_error_window(
@@ -4175,10 +4385,11 @@ fn render_transaction_detail_window(
     let mut open = true;
     egui::Window::new("Activity details")
         .open(&mut open)
+        .title_bar(false)
         .collapsible(false)
         .resizable(true)
-        .default_width(820.0)
-        .default_height(520.0)
+        .default_width(760.0)
+        .default_height(560.0)
         .show(ctx, |ui| {
             render_transaction_detail(ui, detail, action);
         });
@@ -4192,7 +4403,7 @@ fn render_transaction_detail(
     detail: &TransactionDetail,
     action: &mut Option<HistoryAction>,
 ) {
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.label(
             RichText::new("Activity details")
                 .strong()
@@ -4201,13 +4412,16 @@ fn render_transaction_detail(
         );
         let (stroke, fill) = activity_status_colors(detail.status);
         render_status_chip(ui, status_label(detail.status), stroke, fill);
-        if ui
-            .add(ui::theme::widgets::secondary_button("Close"))
-            .clicked()
-        {
-            *action = Some(HistoryAction::CloseDetails);
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(ui::theme::widgets::secondary_button("Close"))
+                .clicked()
+            {
+                *action = Some(HistoryAction::CloseDetails);
+            }
+        });
     });
+    ui.add_space(ui::theme::spacing::SM);
 
     ui.add(
         egui::Label::new(
@@ -4223,7 +4437,14 @@ fn render_transaction_detail(
         )
         .wrap(),
     );
-    truncated_label(ui, &format!("Folder: {}", detail.root));
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("Folder: {}", detail.root))
+                .color(ui::theme::colors::metadata_text()),
+        )
+        .truncate(),
+    )
+    .on_hover_text(&detail.root);
 
     ui.add_space(ui::theme::spacing::SM);
     render_activity_count_chips(
@@ -4270,42 +4491,15 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
         return;
     }
 
-    let width = ui.available_width().max(360.0);
-    let operation_width = width * 0.13;
-    let status_width = width * 0.12;
-    let source_width = width * 0.22;
-    let destination_width = width * 0.22;
-    let reason_width = width * 0.18;
-    let error_width = width * 0.13;
-
     ui.label(RichText::new("Recorded changes").strong());
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .max_height(180.0)
+        .max_height(260.0)
         .show(ui, |ui| {
-            egui::Grid::new("transaction-detail-operations")
-                .num_columns(6)
-                .striped(true)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    preview_cell(ui, "Operation", operation_width, true);
-                    preview_cell(ui, "Status", status_width, true);
-                    preview_cell(ui, "Source", source_width, true);
-                    preview_cell(ui, "Destination", destination_width, true);
-                    preview_cell(ui, "Why", reason_width, true);
-                    preview_cell(ui, "Error", error_width, true);
-                    ui.end_row();
-
-                    for row in &detail.operation_rows {
-                        preview_cell(ui, &row.operation_id, operation_width, false);
-                        preview_cell(ui, operation_status_label(row.status), status_width, false);
-                        preview_cell(ui, &row.source, source_width, false);
-                        preview_cell(ui, &row.destination, destination_width, false);
-                        preview_cell(ui, &row.reason, reason_width, false);
-                        preview_cell(ui, &row.error, error_width, false);
-                        ui.end_row();
-                    }
-                });
+            for row in &detail.operation_rows {
+                render_transaction_operation_row(ui, row);
+                ui.add_space(ui::theme::spacing::XS);
+            }
         });
 
     if detail.total_operations > detail.operation_rows.len() {
@@ -4315,6 +4509,71 @@ fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDeta
             detail.total_operations
         ));
     }
+}
+
+fn render_transaction_operation_row(ui: &mut egui::Ui, row: &TransactionOperationRow) {
+    egui::Frame::group(ui.style())
+        .fill(ui::theme::colors::surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(&row.operation_id)
+                        .monospace()
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                render_status_chip(
+                    ui,
+                    operation_status_label(row.status),
+                    ui::theme::colors::secondary_text(),
+                    ui::theme::colors::elevated_surface(),
+                );
+                ui.label(
+                    RichText::new(&row.reason)
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            });
+            render_path_detail_line(ui, "From", &row.source);
+            render_path_detail_line(ui, "To", &row.destination);
+            if !row.error.trim().is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Error: {}", row.error))
+                            .color(ui::theme::colors::error()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
+}
+
+fn render_path_detail_line(ui: &mut egui::Ui, label: &str, path: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [44.0, 20.0],
+            egui::Label::new(
+                RichText::new(label)
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            ),
+        );
+        let width = ui.available_width().max(120.0);
+        ui.add_sized(
+            [width, 20.0],
+            egui::Label::new(
+                RichText::new(path)
+                    .monospace()
+                    .color(ui::theme::colors::primary_text()),
+            )
+            .truncate(),
+        )
+        .on_hover_text(path);
+    });
 }
 
 fn render_undo_confirmation(
@@ -4598,16 +4857,6 @@ fn preview_table_column_widths(width: f32) -> (f32, f32) {
 
 fn preview_cell(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) {
     let _ = preview_cell_response(ui, text, width, strong);
-}
-
-fn preview_cell_with_tooltip(
-    ui: &mut egui::Ui,
-    text: &str,
-    width: f32,
-    strong: bool,
-    tooltip: impl Into<egui::WidgetText>,
-) {
-    preview_cell_response(ui, text, width, strong).on_hover_text(tooltip);
 }
 
 fn preview_selectable_cell_with_tooltip(
@@ -5342,46 +5591,49 @@ fn render_explorer_integration_settings(ui: &mut egui::Ui) {
     });
 }
 
-fn render_info_card(ui: &mut egui::Ui, title: &str, detail: &str, status: &str) {
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .inner_margin(egui::Margin::same(14.0))
-        .show(ui, |ui| {
-            let card_width = ui.available_width().clamp(CARD_MIN_WIDTH, 320.0);
-            ui.set_width(card_width);
-            ui.label(
-                RichText::new(title)
-                    .strong()
-                    .size(18.0)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            ui.label(RichText::new(detail).color(ui::theme::colors::secondary_text()));
-            ui.add_space(6.0);
-            render_status_chip(
-                ui,
-                status,
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::subtle_surface(),
-            );
-        });
+#[derive(Debug, Clone, Copy)]
+enum BuiltinRuleAction {
+    Use,
+    Customize,
 }
 
-fn render_style_card(
+fn builtin_library_items() -> [(BuiltInMode, &'static str, &'static str, &'static str); 3] {
+    [
+        (
+            BuiltInMode::Type,
+            "By Type",
+            "{type}",
+            "Groups files into Documents, Images, Videos, Archives, and related folders.",
+        ),
+        (
+            BuiltInMode::Date,
+            "By Date",
+            "{year}/{month}/{day}",
+            "Groups files by modified date when time is the clearest way to browse them.",
+        ),
+        (
+            BuiltInMode::TypeYear,
+            "Type + Date",
+            "{type}/{year}/{month}/{day}",
+            "Keeps file kinds together, then adds date folders inside each type.",
+        ),
+    ]
+}
+
+fn render_builtin_rule_row(
     ui: &mut egui::Ui,
-    selected: bool,
     title: &str,
-    example: &str,
+    pattern: &str,
     detail: &str,
-) -> egui::Response {
-    let card_width = ui.available_width().clamp(CARD_MIN_WIDTH, 320.0);
-    ui.add_sized(
-        [card_width, 120.0],
-        egui::Button::new(
-            RichText::new(format!("{title}\n{example}\n{detail}"))
-                .size(14.0)
-                .color(ui::theme::colors::primary_text()),
-        )
+    selected: bool,
+    mut on_action: impl FnMut(BuiltinRuleAction),
+) {
+    egui::Frame::group(ui.style())
+        .fill(if selected {
+            ui::theme::colors::hover_control()
+        } else {
+            ui::theme::colors::surface()
+        })
         .stroke(egui::Stroke::new(
             if selected { 2.0 } else { 1.0 },
             if selected {
@@ -5390,12 +5642,357 @@ fn render_style_card(
                 ui::theme::colors::border()
             },
         ))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2((ui.available_width() - 280.0).max(260.0), 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(title)
+                                    .strong()
+                                    .color(ui::theme::colors::heading_text()),
+                            );
+                            render_status_chip(
+                                ui,
+                                "Built-in",
+                                ui::theme::colors::secondary_text(),
+                                ui::theme::colors::elevated_surface(),
+                            );
+                            if selected {
+                                render_status_chip(
+                                    ui,
+                                    "Active",
+                                    ui::theme::colors::info(),
+                                    ui::theme::colors::info_bg(),
+                                );
+                            }
+                        });
+                        ui.label(
+                            RichText::new(format!("Destination: {pattern}"))
+                                .monospace()
+                                .color(ui::theme::colors::primary_text()),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(detail).color(ui::theme::colors::secondary_text()),
+                            )
+                            .wrap(),
+                        );
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(ui::theme::widgets::secondary_button("Customize"))
+                        .clicked()
+                    {
+                        on_action(BuiltinRuleAction::Customize);
+                    }
+                    if ui
+                        .add(ui::theme::widgets::secondary_button("Use"))
+                        .clicked()
+                    {
+                        on_action(BuiltinRuleAction::Use);
+                    }
+                });
+            });
+        });
+}
+
+fn render_saved_profile_row(
+    ui: &mut egui::Ui,
+    profile: &LoadedRuleProfile,
+    selected: bool,
+) -> bool {
+    let mut use_profile = false;
+    egui::Frame::group(ui.style())
         .fill(if selected {
             ui::theme::colors::hover_control()
         } else {
             ui::theme::colors::surface()
-        }),
+        })
+        .stroke(egui::Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected {
+                ui::theme::colors::primary_blue()
+            } else {
+                ui::theme::colors::border()
+            },
+        ))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2((ui.available_width() - 150.0).max(260.0), 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(&profile.profile.profile_id)
+                                    .strong()
+                                    .color(ui::theme::colors::heading_text()),
+                            );
+                            render_status_chip(
+                                ui,
+                                &format!(
+                                    "{} rule{}",
+                                    profile.profile.rules.len(),
+                                    plural(profile.profile.rules.len())
+                                ),
+                                ui::theme::colors::secondary_text(),
+                                ui::theme::colors::elevated_surface(),
+                            );
+                            if selected {
+                                render_status_chip(
+                                    ui,
+                                    "Active",
+                                    ui::theme::colors::success(),
+                                    ui::theme::colors::success_bg(),
+                                );
+                            }
+                        });
+                        if let Some(rule) = profile.profile.rules.first() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "First rule: {} -> {}",
+                                    rule.name, rule.destination
+                                ))
+                                .color(ui::theme::colors::secondary_text()),
+                            );
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(profile.path.display().to_string())
+                                    .size(ui::theme::typography::CAPTION)
+                                    .color(ui::theme::colors::metadata_text()),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(profile.path.display().to_string());
+                    },
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(ui::theme::widgets::secondary_button("Use"))
+                        .clicked()
+                    {
+                        use_profile = true;
+                    }
+                });
+            });
+        });
+    use_profile
+}
+
+fn render_profile_workspace_status(ui: &mut egui::Ui, loaded_profile: Option<&LoadedRuleProfile>) {
+    if let Some(profile) = loaded_profile {
+        ui.horizontal_wrapped(|ui| {
+            render_status_chip(
+                ui,
+                "Saved profile loaded",
+                ui::theme::colors::success(),
+                ui::theme::colors::success_bg(),
+            );
+            ui.label(
+                RichText::new(format!("Editing {}", profile.profile.profile_id))
+                    .color(ui::theme::colors::primary_text()),
+            );
+            truncated_label(ui, &format!("Saved at: {}", profile.path.display()));
+        });
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            render_status_chip(
+                ui,
+                "Draft",
+                ui::theme::colors::warning(),
+                ui::theme::colors::warning_bg(),
+            );
+            ui.label(
+                RichText::new("Save this draft before using it for Custom Rules.")
+                    .color(ui::theme::colors::secondary_text()),
+            );
+        });
+    }
+}
+
+fn render_rule_list_item(
+    ui: &mut egui::Ui,
+    rule: &RuleEditorState,
+    index: usize,
+    selected: bool,
+) -> egui::Response {
+    let label = format!(
+        "{}. {}\n{}",
+        index + 1,
+        rule.rule_name,
+        rule_destination_summary(rule)
+    );
+    ui.add_sized(
+        [ui.available_width(), 64.0],
+        egui::Button::new(RichText::new(label).color(ui::theme::colors::primary_text()))
+            .fill(if selected {
+                ui::theme::colors::hover_control()
+            } else {
+                ui::theme::colors::surface()
+            })
+            .stroke(egui::Stroke::new(
+                if selected { 2.0 } else { 1.0 },
+                if selected {
+                    ui::theme::colors::primary_blue()
+                } else {
+                    ui::theme::colors::border()
+                },
+            )),
     )
+}
+
+fn render_rule_detail_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    ui.label(
+        RichText::new("Selected rule")
+            .strong()
+            .color(ui::theme::colors::heading_text()),
+    );
+    ui.add_space(ui::theme::spacing::XS);
+    egui::Grid::new("rule-detail-editor")
+        .num_columns(2)
+        .spacing([14.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Rule name");
+            ui.add_sized(
+                [280.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.rule_name),
+            );
+            ui.end_row();
+
+            ui.label("Destination");
+            ui.add_sized(
+                [360.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.destination),
+            );
+            ui.end_row();
+
+            ui.label("Priority");
+            ui.add_sized(
+                [120.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.priority),
+            );
+            ui.end_row();
+        });
+    ui.add_space(ui::theme::spacing::XS);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Destination tokens")
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+        for token in [
+            "{type}",
+            "{year}",
+            "{month}",
+            "{day}",
+            "{extension}",
+            "{filename}",
+        ] {
+            if ui
+                .add(ui::theme::widgets::secondary_button(token))
+                .clicked()
+            {
+                append_destination_token(&mut rule.destination, token);
+            }
+        }
+    });
+
+    ui.add_space(ui::theme::spacing::MD);
+    ui.checkbox(&mut rule.match_all, "Match all files");
+    if rule.match_all {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Use this for built-in-style layouts. It should usually be the last rule.",
+                )
+                .color(ui::theme::colors::secondary_text()),
+            )
+            .wrap(),
+        );
+        return;
+    }
+
+    ui.add_space(ui::theme::spacing::SM);
+    ui.label(
+        RichText::new("Conditions")
+            .strong()
+            .color(ui::theme::colors::heading_text()),
+    );
+    egui::Grid::new("rule-condition-editor")
+        .num_columns(2)
+        .spacing([14.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Extensions");
+            ui.add_sized(
+                [260.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.extensions).hint_text("pdf, docx"),
+            );
+            ui.end_row();
+
+            ui.label("Filename contains");
+            ui.add_sized(
+                [260.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.filename_contains).hint_text("invoice"),
+            );
+            ui.end_row();
+
+            ui.label("Path contains");
+            ui.add_sized(
+                [260.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.path_contains).hint_text("downloads"),
+            );
+            ui.end_row();
+
+            ui.label("Year");
+            ui.add_sized(
+                [120.0, 24.0],
+                egui::TextEdit::singleline(&mut rule.year).hint_text("2026"),
+            );
+            ui.end_row();
+
+            ui.label("Size range");
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [120.0, 24.0],
+                    egui::TextEdit::singleline(&mut rule.min_size_bytes).hint_text("min bytes"),
+                );
+                ui.add_sized(
+                    [120.0, 24.0],
+                    egui::TextEdit::singleline(&mut rule.max_size_bytes).hint_text("max bytes"),
+                );
+            });
+            ui.end_row();
+        });
+}
+
+fn append_destination_token(destination: &mut String, token: &str) {
+    if destination.trim().is_empty() {
+        destination.push_str(token);
+    } else if destination.ends_with('/') || destination.ends_with('\\') {
+        destination.push_str(token);
+    } else {
+        destination.push('/');
+        destination.push_str(token);
+    }
+}
+
+fn rule_destination_summary(rule: &RuleEditorState) -> String {
+    if rule.destination.trim().is_empty() {
+        "No destination set".to_string()
+    } else {
+        format!("-> {}", rule.destination.trim())
+    }
 }
 
 fn activity_event_title(row: &TransactionRow) -> String {
@@ -5497,7 +6094,7 @@ fn activity_detail(row: &TransactionRow) -> String {
 
 fn activity_count_summary(row: &TransactionRow) -> String {
     format!(
-        "{} moved, {} undone, {} attention",
+        "{} moved / {} restored / {} needs review",
         row.completed,
         row.rolled_back,
         row.skipped + row.failed + row.pending
@@ -5745,7 +6342,8 @@ mod tests {
         activity_count_summary, activity_event_title, can_undo_status, is_cloud_synced_path,
         operation_status_label, preloaded_root_from_args, preview_rows, profile_file_stem,
         same_folder, status_label, transaction_operation_counts, AnalysisPlanSource,
-        LoadedRuleProfile, PlanningSource, ProfileEditorState, SmartfolderApp, TransactionRow,
+        LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState, SmartfolderApp,
+        TransactionRow,
     };
 
     #[test]
@@ -5830,7 +6428,7 @@ mod tests {
         assert_eq!(activity_event_title(&row), "Organized 3 files in Documents");
         assert_eq!(
             activity_count_summary(&row),
-            "3 moved, 0 undone, 1 attention"
+            "3 moved / 0 restored / 1 needs review"
         );
     }
 
@@ -5891,15 +6489,19 @@ mod tests {
     fn profile_editor_builds_valid_core_profile() {
         let editor = ProfileEditorState {
             profile_id: "downloads".to_string(),
-            rule_name: "Invoices".to_string(),
-            destination: "Documents/Invoices/{year}".to_string(),
-            priority: "5".to_string(),
-            extensions: "pdf, docx".to_string(),
-            filename_contains: "invoice".to_string(),
-            path_contains: "downloads".to_string(),
-            min_size_bytes: "100".to_string(),
-            max_size_bytes: "200000".to_string(),
-            year: "2026".to_string(),
+            rules: vec![RuleEditorState {
+                rule_name: "Invoices".to_string(),
+                destination: "Documents/Invoices/{year}".to_string(),
+                priority: "5".to_string(),
+                match_all: false,
+                extensions: "pdf, docx".to_string(),
+                filename_contains: "invoice".to_string(),
+                path_contains: "downloads".to_string(),
+                min_size_bytes: "100".to_string(),
+                max_size_bytes: "200000".to_string(),
+                year: "2026".to_string(),
+            }],
+            selected_rule: 0,
         };
 
         let profile = editor.to_profile().expect("editor profile is valid");
@@ -5913,15 +6515,13 @@ mod tests {
 
         let restored = ProfileEditorState::from_profile(&profile);
         assert_eq!(restored.profile_id, "downloads");
-        assert_eq!(restored.extensions, "pdf, docx");
+        assert_eq!(restored.rules[0].extensions, "pdf, docx");
     }
 
     #[test]
     fn profile_editor_rejects_invalid_numbers_and_sanitizes_file_names() {
-        let editor = ProfileEditorState {
-            priority: "soon".to_string(),
-            ..ProfileEditorState::default()
-        };
+        let mut editor = ProfileEditorState::default();
+        editor.rules[0].priority = "soon".to_string();
 
         let message = editor
             .to_profile()
@@ -5975,6 +6575,7 @@ mod tests {
                 name: "PDFs".to_string(),
                 destination: "Documents/PDFs".to_string(),
                 priority: Some(10),
+                match_all: false,
                 extensions: vec!["pdf".to_string()],
                 filename_contains: Vec::new(),
                 path_contains: Vec::new(),

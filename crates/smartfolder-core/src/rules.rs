@@ -122,6 +122,8 @@ pub struct CustomRule {
     pub destination: String,
     pub priority: Option<u32>,
     #[serde(default)]
+    pub match_all: bool,
+    #[serde(default)]
     pub extensions: Vec<String>,
     #[serde(default)]
     pub filename_contains: Vec<String>,
@@ -179,11 +181,12 @@ impl CustomRule {
             return None;
         }
 
-        if !self.matches_extensions(record)
-            || !self.matches_filename(record)
-            || !self.matches_path(record)
-            || !self.matches_size(record)
-            || !self.matches_year(record)
+        if !self.match_all
+            && (!self.matches_extensions(record)
+                || !self.matches_filename(record)
+                || !self.matches_path(record)
+                || !self.matches_size(record)
+                || !self.matches_year(record))
         {
             return None;
         }
@@ -198,7 +201,8 @@ impl CustomRule {
     }
 
     fn condition_count(&self) -> usize {
-        usize::from(!self.extensions.is_empty())
+        usize::from(self.match_all)
+            + usize::from(!self.extensions.is_empty())
             + usize::from(!self.filename_contains.is_empty())
             + usize::from(!self.path_contains.is_empty())
             + usize::from(self.min_size_bytes.is_some())
@@ -466,6 +470,30 @@ extensions = ["pdf"]
         let restored = RuleProfile::from_toml(&serialized).expect("serialized profile parses");
 
         assert_eq!(restored, profile);
+    }
+
+    #[test]
+    fn match_all_rule_can_clone_builtin_style_templates() {
+        let profile = RuleProfile::from_toml(
+            r#"
+profile_id = "custom-type-date"
+
+[[rules]]
+name = "All files by type and date"
+destination = "{type}/{year}/{month}/{day}"
+match_all = true
+"#,
+        )
+        .expect("valid catch-all profile");
+
+        let matched = profile
+            .first_match(&record("report.pdf", FileTypeBucket::Document))
+            .expect("match-all rule should match file");
+
+        assert_eq!(
+            matched.destination,
+            path(&["Documents", "2026", "May", "11", "report.pdf"])
+        );
     }
 
     #[test]

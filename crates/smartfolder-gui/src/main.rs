@@ -3770,6 +3770,7 @@ struct PreviewCounts {
     all: usize,
     ready: usize,
     needs_attention: usize,
+    untouched: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -4172,6 +4173,9 @@ fn load_preview_counts_from_store(
         needs_attention: store
             .plan_operation_count(session_id, PlanOperationFilter::NeedsAttention)
             .map_err(|error| format!("Failed to count operations needing attention: {error}"))?,
+        untouched: store
+            .untouched_count(session_id)
+            .map_err(|error| format!("Failed to count untouched files: {error}"))?,
     })
 }
 
@@ -4523,7 +4527,11 @@ fn cleanup_old_session_data() -> std::result::Result<usize, String> {
 fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool) {
     let ready = result.preview_counts.ready;
     let needs_attention = result.preview_counts.needs_attention;
-    let left_in_place = result.summary.ambiguous_files + result.summary.skipped;
+    let left_in_place = if result.preview_counts.untouched > 0 {
+        result.preview_counts.untouched
+    } else {
+        result.summary.ambiguous_files + result.summary.skipped
+    };
     let aligned_width = preview_aligned_content_width(ui);
 
     ui.scope(|ui| {

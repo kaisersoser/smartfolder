@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 
 use crate::model::{
-    BuiltInMode, ConflictState, OperationType, PlanMode, PlanOperation, PlanRecord, PlanSummary,
-    PlanWarning, PlanWarningCode, SourceSnapshot,
+    BuiltInMode, ConflictState, FileInventoryRecord, OperationType, PlanMode, PlanOperation,
+    PlanRecord, PlanSummary, PlanWarning, PlanWarningCode, SourceSnapshot, UntouchedReason,
+    UntouchedRecord,
 };
 use crate::paths::safe_destination_path;
 use crate::rules::{builtin_rule_match, RuleMatch, RuleProfile};
@@ -145,6 +146,11 @@ pub fn generate_plan(
     for record in &scan.records {
         let Some(rule_match) = rule_match_for_record(record, &options.mode) else {
             plan.ambiguous_files.push(record.root_relative_path.clone());
+            plan.untouched_records.push(untouched_record(
+                record,
+                UntouchedReason::NoMatchingRule,
+                "No organization rule matched this file.",
+            ));
             continue;
         };
 
@@ -159,12 +165,24 @@ pub fn generate_plan(
                         record.root_relative_path.display()
                     ),
                 });
+                plan.untouched_records.push(untouched_record(
+                    record,
+                    UntouchedReason::UnsafeDestination,
+                    format!("Destination was unsafe: {error}"),
+                ));
                 continue;
             }
         };
 
         let conflict = detect_conflict(&source, &destination, &mut planned_destinations);
         let selected = matches!(conflict, ConflictState::None);
+        if !selected {
+            plan.untouched_records.push(untouched_record(
+                record,
+                untouched_reason_for_conflict(&conflict),
+                untouched_detail_for_conflict(&conflict),
+            ));
+        }
 
         plan.operations.push(PlanOperation {
             operation_id: format!("op_{:06}", plan.operations.len() + 1),
@@ -307,6 +325,14 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                 let Some(rule_match) = rule_match_for_record(record, &options.mode) else {
                     ambiguous_count += 1;
                     store.insert_ambiguous_file(session_id, &record.root_relative_path)?;
+                    store.insert_untouched_record(
+                        session_id,
+                        &untouched_record(
+                            record,
+                            UntouchedReason::NoMatchingRule,
+                            "No organization rule matched this file.",
+                        ),
+                    )?;
                     maybe_emit_plan_progress(
                         progress,
                         PlanGenerationProgress {
@@ -336,6 +362,14 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                                 ),
                             },
                         )?;
+                        store.insert_untouched_record(
+                            session_id,
+                            &untouched_record(
+                                record,
+                                UntouchedReason::UnsafeDestination,
+                                format!("Destination was unsafe: {error}"),
+                            ),
+                        )?;
                         maybe_emit_plan_progress(
                             progress,
                             PlanGenerationProgress {
@@ -359,6 +393,14 @@ pub fn generate_plan_to_store_with_progress_and_cancellation(
                 if !selected {
                     conflict_count += 1;
                     skipped_count += 1;
+                    store.insert_untouched_record(
+                        session_id,
+                        &untouched_record(
+                            record,
+                            untouched_reason_for_conflict(&conflict),
+                            untouched_detail_for_conflict(&conflict),
+                        ),
+                    )?;
                 }
 
                 operation_count += 1;
@@ -590,6 +632,46 @@ fn detect_conflict_from_store(
     ConflictState::None
 }
 
+fn untouched_record(
+    record: &FileInventoryRecord,
+    reason: UntouchedReason,
+    detail: impl Into<String>,
+) -> UntouchedRecord {
+    UntouchedRecord {
+        path: record.root_relative_path.clone(),
+        reason,
+        detail: detail.into(),
+    }
+}
+
+fn untouched_reason_for_conflict(conflict: &ConflictState) -> UntouchedReason {
+    match conflict {
+        ConflictState::None => UntouchedReason::AlreadyOrganized,
+        ConflictState::DestinationExists { .. } | ConflictState::CaseOnlyRename { .. } => {
+            UntouchedReason::DestinationConflict
+        }
+        ConflictState::UnsafeDestination { .. } => UntouchedReason::UnsafeDestination,
+    }
+}
+
+fn untouched_detail_for_conflict(conflict: &ConflictState) -> String {
+    match conflict {
+        ConflictState::None => "File is already in the planned destination.".to_string(),
+        ConflictState::DestinationExists { path } => {
+            format!("Destination already exists: {}", path.display())
+        }
+        ConflictState::CaseOnlyRename { path } => {
+            format!(
+                "Destination differs only by letter case: {}",
+                path.display()
+            )
+        }
+        ConflictState::UnsafeDestination { reason } => {
+            format!("Destination was unsafe: {reason}")
+        }
+    }
+}
+
 fn normalized_destination_key(destination: &Path) -> String {
     destination
         .to_string_lossy()
@@ -652,7 +734,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
-    use crate::model::{BuiltInMode, ConflictState};
+    use crate::model::{BuiltInMode, ConflictState, UntouchedReason};
     use crate::planner::{
         generate_plan, generate_plan_to_store_with_progress, render_preview, render_preview_json,
         PlanOptions,
@@ -717,6 +799,11 @@ extensions = ["pdf"]
 
         assert_eq!(plan.operations.len(), 1);
         assert_eq!(plan.ambiguous_files, vec![PathBuf::from("photo.jpg")]);
+        assert_eq!(plan.untouched_records.len(), 1);
+        assert_eq!(
+            plan.untouched_records[0].reason,
+            UntouchedReason::NoMatchingRule
+        );
     }
 
     #[test]
@@ -748,6 +835,10 @@ extensions = ["pdf"]
             ConflictState::DestinationExists { .. }
         ));
         assert!(!operation.selected);
+        assert!(plan.untouched_records.iter().any(|record| {
+            record.path == PathBuf::from("report.pdf")
+                && record.reason == UntouchedReason::DestinationConflict
+        }));
     }
 
     #[test]
@@ -815,6 +906,12 @@ extensions = ["pdf"]
             .expect("operations load");
         assert_eq!(operations.len(), 1);
         assert!(operations[0].destination.ends_with("report.pdf"));
+        assert_eq!(
+            store
+                .untouched_count("session_plan_test")
+                .expect("untouched count loads"),
+            0
+        );
     }
 
     #[test]
@@ -859,6 +956,10 @@ extensions = ["pdf"]
             ConflictState::UnsafeDestination { .. }
         ));
         assert!(!plan.operations[0].selected);
+        assert_eq!(
+            plan.untouched_records[0].reason,
+            UntouchedReason::UnsafeDestination
+        );
     }
 
     fn fixture_dir() -> TempDir {

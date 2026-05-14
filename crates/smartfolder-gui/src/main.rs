@@ -5295,14 +5295,14 @@ fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
     ui.scope(|ui| {
         ui.set_max_width(aligned_width);
         ui.label(
-            RichText::new("Example change")
+            RichText::new("Planned changes sample")
                 .strong()
                 .size(ui::theme::typography::CARD_TITLE)
                 .color(ui::theme::colors::heading_text()),
         );
         ui.add(
             egui::Label::new(
-                RichText::new("One representative move from this preview.")
+                RichText::new("Representative ready moves from this preview.")
                     .color(ui::theme::colors::secondary_text()),
             )
             .wrap(),
@@ -5333,59 +5333,90 @@ fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
             return;
         }
 
-        if let Some(row) = result.preview_examples.first() {
-            render_preview_example_row(ui, row);
-            if result.preview_examples.len() > 1 {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} more example{} available in the detailed file list.",
-                        result.preview_examples.len() - 1,
-                        plural(result.preview_examples.len() - 1)
-                    ))
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::metadata_text()),
-                );
-            }
+        render_preview_sample_table(ui, &result.preview_examples);
+        let hidden_examples = result.preview_examples.len().saturating_sub(PREVIEW_SAMPLE_ROWS);
+        if hidden_examples > 0 {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{hidden_examples} more sample{} available in the detailed file list.",
+                    plural(hidden_examples)
+                ))
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+            );
         }
     });
 }
 
-fn render_preview_example_row(ui: &mut egui::Ui, row: &PreviewRow) {
+const PREVIEW_SAMPLE_ROWS: usize = 3;
+
+fn render_preview_sample_table(ui: &mut egui::Ui, rows: &[PreviewRow]) {
     egui::Frame::group(ui.style())
         .fill(ui::theme::colors::elevated_surface())
         .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
         .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(6.0))
+        .inner_margin(egui::Margin::same(8.0))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Before:")
-                        .size(ui::theme::typography::CAPTION)
-                        .color(ui::theme::colors::metadata_text()),
-                );
-                ui.label(
-                    RichText::new(format!("./{}", row.file_name))
-                        .monospace()
-                        .color(ui::theme::colors::primary_text()),
-                );
-            });
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("After:")
-                        .size(ui::theme::typography::CAPTION)
-                        .color(ui::theme::colors::metadata_text()),
-                );
-                render_preview_path_highlight(ui, &preview_example_destination_path(row));
-                ui.label(
-                    RichText::new(&row.file_name)
-                        .monospace()
-                        .color(ui::theme::colors::primary_text()),
-                );
-            });
+            let width = ui.available_width().max(520.0);
+            let file_width = (width * 0.26).max(120.0);
+            let destination_width = (width * 0.30).max(150.0);
+            let rule_width = (width * 0.26).max(130.0);
+            let status_width =
+                (width - file_width - destination_width - rule_width - 36.0).max(90.0);
+
+            egui::Grid::new("preview-sample-table")
+                .num_columns(4)
+                .spacing([12.0, 5.0])
+                .show(ui, |ui| {
+                    preview_sample_cell(ui, "File", file_width, true);
+                    preview_sample_cell(ui, "Destination", destination_width, true);
+                    preview_sample_cell(ui, "Rule", rule_width, true);
+                    preview_sample_cell(ui, "Status", status_width, true);
+                    ui.end_row();
+
+                    for row in rows.iter().take(PREVIEW_SAMPLE_ROWS) {
+                        preview_sample_cell(ui, &row.file_name, file_width, false);
+                        preview_sample_cell(
+                            ui,
+                            &preview_example_destination_path(row),
+                            destination_width,
+                            false,
+                        );
+                        preview_sample_cell(ui, &row.reason, rule_width, false);
+                        let (stroke, fill) = preview_status_colors(&row.status);
+                        ui.allocate_ui(egui::vec2(status_width, 22.0), |ui| {
+                            render_status_chip(ui, &row.status, stroke, fill);
+                        });
+                        ui.end_row();
+                    }
+                });
         });
+}
+
+fn preview_sample_cell(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) {
+    ui.allocate_ui(egui::vec2(width.max(40.0), 20.0), |ui| {
+        let color = if strong {
+            ui::theme::colors::metadata_text()
+        } else {
+            ui::theme::colors::primary_text()
+        };
+        ui.add(
+            egui::Label::new(
+                RichText::new(text)
+                    .monospace()
+                    .size(if strong {
+                        ui::theme::typography::CAPTION
+                    } else {
+                        ui::theme::typography::BODY
+                    })
+                    .color(color),
+            )
+            .truncate(),
+        )
+        .on_hover_text(text);
+    });
 }
 
 fn preview_example_destination_path(row: &PreviewRow) -> String {

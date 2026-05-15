@@ -86,9 +86,10 @@ use ui::screens::preview::{
 };
 use ui::screens::rules::{
     builtin_library_items, render_active_profile_panel, render_ai_draft_review,
-    render_ai_draft_summary_strip, render_builtin_rule_row, render_profile_editor,
-    render_profile_workspace_toolbar, render_profile_workspace_window, render_rules_ai_panel,
-    render_saved_profile_row, BuiltinRuleAction, ProfileWorkspaceAction, SavedProfileAction,
+    render_ai_draft_summary_strip, render_ai_rule_builder_panel, render_builtin_rule_row,
+    render_profile_editor, render_profile_workspace_toolbar, render_profile_workspace_window,
+    render_rules_ai_panel, render_saved_profile_row, AiRuleBuilderAction, BuiltinRuleAction,
+    ProfileWorkspaceAction, SavedProfileAction,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -2885,7 +2886,20 @@ impl SmartfolderApp {
             }
             if self.show_ai_draft_prompt && self.ai_is_available() {
                 ui.add_space(ui::theme::spacing::SM);
-                self.render_ai_rule_builder_panel(ui);
+                let running_ai_task = self.is_running_ai_task();
+                let drafting_profile = self.ai_task == Some(AiTaskKind::DraftProfile);
+                let refining_prompt = self.ai_task == Some(AiTaskKind::PromptRefinement);
+                let action = render_ai_rule_builder_panel(
+                    ui,
+                    &mut self.ai_draft_prompt,
+                    running_ai_task,
+                    drafting_profile,
+                    refining_prompt,
+                    self.ai_rule_explanation.as_ref(),
+                );
+                if let Some(action) = action {
+                    self.handle_ai_rule_builder_action(action);
+                }
             }
             if let Some(result) = self.ai_draft_result.clone() {
                 ui.add_space(ui::theme::spacing::SM);
@@ -2941,104 +2955,13 @@ impl SmartfolderApp {
         }
     }
 
-    fn render_ai_rule_builder_panel(&mut self, ui: &mut egui::Ui) {
-        settings_note_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Build rules with AI")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                render_status_chip(
-                    ui,
-                    "Requires scanned folder context",
-                    ui::theme::colors::info(),
-                    ui::theme::colors::info_bg(),
-                );
-            });
-            ui.add(
-                egui::Label::new(
-                    RichText::new(
-                        "Describe the organization you want. AI drafts deterministic rules, then smartfolder validates them before loading the editor.",
-                    )
-                    .color(ui::theme::colors::secondary_text()),
-                )
-                .wrap(),
-            );
-            ui.add_space(ui::theme::spacing::SM);
-            ui.horizontal(|ui| {
-                let refine_button_size = egui::vec2(42.0, 72.0);
-                let prompt_width = (ui.available_width()
-                    - refine_button_size.x
-                    - ui.spacing().item_spacing.x)
-                    .max(260.0);
-                ui.add_sized(
-                    [prompt_width, 72.0],
-                    egui::TextEdit::multiline(&mut self.ai_draft_prompt)
-                        .hint_text("e.g. Sort invoices into Documents/Invoices by year, and keep screenshots by month."),
-                );
-                let response = ui.add_enabled(
-                    !self.is_running_ai_task() && !self.ai_draft_prompt.trim().is_empty(),
-                    egui::Button::new(
-                        RichText::new(ui::icons::AI_REFINE)
-                            .size(20.0)
-                            .color(ui::theme::colors::primary_text()),
-                    )
-                    .fill(ui::theme::colors::soft_control())
-                    .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-                    .min_size(refine_button_size),
-                );
-                if response
-                    .on_hover_text("Refine this prompt with AI")
-                    .clicked()
-                {
-                    self.start_ai_prompt_refinement();
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        !self.is_running_ai_task(),
-                        ui::theme::widgets::primary_button("Draft profile"),
-                    )
-                    .clicked()
-                {
-                    self.start_ai_draft_profile();
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Hide"))
-                    .clicked()
-                {
-                    self.show_ai_draft_prompt = false;
-                }
-                if self.is_running_ai_task()
-                    && ui
-                        .add(ui::theme::widgets::secondary_button("Cancel AI"))
-                        .clicked()
-                {
-                    self.cancel_ai_task();
-                }
-                if self.ai_task == Some(AiTaskKind::DraftProfile) && self.is_running_ai_task() {
-                    ui.label(
-                        RichText::new("AI is drafting and validating rules.")
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                }
-                if self.ai_task == Some(AiTaskKind::PromptRefinement) && self.is_running_ai_task()
-                {
-                    ui.label(
-                        RichText::new("AI is refining the prompt.")
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                }
-            });
-
-            if let Some(explanation) = &self.ai_rule_explanation {
-                ui.add_space(ui::theme::spacing::SM);
-                render_ai_rule_explanation(ui, explanation);
-            }
-        });
+    fn handle_ai_rule_builder_action(&mut self, action: AiRuleBuilderAction) {
+        match action {
+            AiRuleBuilderAction::RefinePrompt => self.start_ai_prompt_refinement(),
+            AiRuleBuilderAction::DraftProfile => self.start_ai_draft_profile(),
+            AiRuleBuilderAction::Hide => self.show_ai_draft_prompt = false,
+            AiRuleBuilderAction::Cancel => self.cancel_ai_task(),
+        }
     }
 
     fn render_ai_draft_review_window(&mut self, ctx: &egui::Context) {
@@ -5434,43 +5357,6 @@ fn render_ai_finding(ui: &mut egui::Ui, finding: &AiFinding) {
                 );
             }
         });
-    }
-}
-
-fn render_ai_rule_explanation(ui: &mut egui::Ui, explanation: &AiRuleExplanation) {
-    ui.label(
-        RichText::new("AI rule explanation")
-            .strong()
-            .color(ui::theme::colors::heading_text()),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new(&explanation.summary).color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-    if !explanation.rule_order.is_empty() {
-        egui::CollapsingHeader::new("Rule order")
-            .default_open(false)
-            .show(ui, |ui| {
-                for rule in &explanation.rule_order {
-                    ui.label(
-                        RichText::new(&rule.rule_name)
-                            .strong()
-                            .color(ui::theme::colors::primary_text()),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&rule.explanation)
-                                .color(ui::theme::colors::secondary_text()),
-                        )
-                        .wrap(),
-                    );
-                }
-            });
-    }
-    for warning in &explanation.warnings {
-        ui.label(RichText::new(format!("Warning: {warning}")).color(ui::theme::colors::warning()));
     }
 }
 

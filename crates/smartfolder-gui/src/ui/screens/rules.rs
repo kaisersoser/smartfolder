@@ -10,8 +10,36 @@ use crate::{
         components::{status_chip as render_status_chip, truncated_label},
     },
     LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState, RuleSimulationResult,
-    PROFILE_WORKSPACE_FIELD_HEIGHT,
+    PROFILE_RULE_LIST_WIDTH, PROFILE_WORKSPACE_FIELD_HEIGHT,
 };
+
+pub(crate) fn render_profile_editor(
+    ui: &mut egui::Ui,
+    editor: &mut ProfileEditorState,
+    simulation: Option<&RuleSimulationResult>,
+) {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(PROFILE_RULE_LIST_WIDTH, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                render_rule_list_panel(ui, editor);
+            },
+        );
+
+        ui.separator();
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                if let Some(rule) = editor.selected_rule_mut() {
+                    render_rule_detail_editor(ui, rule, simulation);
+                }
+            },
+        );
+    });
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BuiltinRuleAction {

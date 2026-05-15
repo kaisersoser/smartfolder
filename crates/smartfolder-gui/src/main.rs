@@ -86,8 +86,8 @@ use ui::screens::preview::{
 };
 use ui::screens::rules::{
     builtin_library_items, render_active_profile_panel, render_builtin_rule_row,
-    render_profile_workspace_status, render_rule_detail_editor, render_rule_list_panel,
-    render_rules_ai_panel, render_saved_profile_row, BuiltinRuleAction, SavedProfileAction,
+    render_profile_editor, render_profile_workspace_status, render_rules_ai_panel,
+    render_saved_profile_row, BuiltinRuleAction, SavedProfileAction,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -111,7 +111,7 @@ const CARD_MIN_WIDTH: f32 = 188.0;
 const PREVIEW_EXAMPLE_LIMIT: usize = 3;
 const INSTRUCTION_PANEL_HEIGHT: f32 = 216.0;
 pub(crate) const PROFILE_WORKSPACE_FIELD_HEIGHT: f32 = 32.0;
-const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
+pub(crate) const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
 const MAX_AI_OPERATION_RECORDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2863,31 +2863,6 @@ impl SmartfolderApp {
             });
     }
 
-    fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(PROFILE_RULE_LIST_WIDTH, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    render_rule_list_panel(ui, &mut self.profile_editor);
-                },
-            );
-
-            ui.separator();
-
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    let rule_simulation = self.rule_simulation.clone();
-                    if let Some(rule) = self.profile_editor.selected_rule_mut() {
-                        render_rule_detail_editor(ui, rule, rule_simulation.as_ref());
-                    }
-                },
-            );
-        });
-    }
-
     fn render_rules_workspace_window(&mut self, ctx: &egui::Context) {
         if !self.show_rules_workspace {
             return;
@@ -2922,7 +2897,12 @@ impl SmartfolderApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        self.render_profile_editor(ui);
+                        let rule_simulation = self.rule_simulation.clone();
+                        render_profile_editor(
+                            ui,
+                            &mut self.profile_editor,
+                            rule_simulation.as_ref(),
+                        );
                     });
             });
 

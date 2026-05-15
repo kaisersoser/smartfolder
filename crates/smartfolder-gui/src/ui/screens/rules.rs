@@ -2,7 +2,407 @@
 
 use eframe::egui::{self, RichText};
 
-use crate::{ui, RuleEditorState, PROFILE_WORKSPACE_FIELD_HEIGHT};
+use crate::{
+    plural,
+    ui::{
+        self,
+        components::{status_chip as render_status_chip, truncated_label},
+    },
+    LoadedRuleProfile, ProfileEditorState, RuleEditorState, RuleSimulationResult,
+    PROFILE_WORKSPACE_FIELD_HEIGHT,
+};
+
+pub(crate) fn render_profile_workspace_status(
+    ui: &mut egui::Ui,
+    loaded_profile: Option<&LoadedRuleProfile>,
+) {
+    if let Some(profile) = loaded_profile {
+        ui.horizontal_wrapped(|ui| {
+            render_status_chip(
+                ui,
+                "Saved",
+                ui::theme::colors::success(),
+                ui::theme::colors::success_bg(),
+            );
+            ui.label(
+                RichText::new(format!("Editing {}", profile.profile.profile_id))
+                    .color(ui::theme::colors::primary_text()),
+            );
+        });
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            render_status_chip(
+                ui,
+                "Draft",
+                ui::theme::colors::warning(),
+                ui::theme::colors::warning_bg(),
+            );
+            ui.label(
+                RichText::new("Save this draft before using it for Custom Rules.")
+                    .color(ui::theme::colors::secondary_text()),
+            );
+        });
+    }
+}
+
+pub(crate) fn render_rule_list_panel(ui: &mut egui::Ui, editor: &mut ProfileEditorState) {
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("Rules")
+                .strong()
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_status_chip(
+            ui,
+            &format!("{} rule{}", editor.rules.len(), plural(editor.rules.len())),
+            ui::theme::colors::secondary_text(),
+            ui::theme::colors::elevated_surface(),
+        );
+    });
+    ui.add_space(ui::theme::spacing::XS);
+
+    let mut selected_rule = editor.selected_rule_index();
+    for (index, rule) in editor.rules.iter().enumerate() {
+        if render_rule_list_item(ui, rule, index, index == selected_rule).clicked() {
+            selected_rule = index;
+        }
+        ui.add_space(4.0);
+    }
+    editor.selected_rule = selected_rule;
+
+    ui.add_space(ui::theme::spacing::SM);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_sized(
+                [80.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                ui::theme::widgets::compact_secondary_button("Add"),
+            )
+            .clicked()
+        {
+            editor.add_rule();
+        }
+        if ui
+            .add_sized(
+                [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                ui::theme::widgets::compact_secondary_button("Duplicate"),
+            )
+            .clicked()
+        {
+            editor.duplicate_selected_rule();
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                editor.selected_rule_index() > 0,
+                ui::theme::widgets::compact_secondary_button("Up")
+                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
+            )
+            .clicked()
+        {
+            editor.move_selected_rule(-1);
+        }
+        if ui
+            .add_enabled(
+                editor.selected_rule_index() + 1 < editor.rules.len(),
+                ui::theme::widgets::compact_secondary_button("Down")
+                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
+            )
+            .clicked()
+        {
+            editor.move_selected_rule(1);
+        }
+        if ui
+            .add_enabled(
+                editor.rules.len() > 1,
+                ui::theme::widgets::compact_secondary_button("Delete")
+                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
+            )
+            .clicked()
+        {
+            editor.delete_selected_rule();
+        }
+    });
+}
+
+pub(crate) fn render_rule_detail_editor(
+    ui: &mut egui::Ui,
+    rule: &mut RuleEditorState,
+    simulation: Option<&RuleSimulationResult>,
+) {
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+    render_rule_editor_section(ui, "Rule", "Name this rule and set its order.", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            labeled_text_edit(ui, "Rule name", &mut rule.rule_name, 220.0, "");
+            labeled_text_edit(ui, "Priority", &mut rule.priority, 72.0, "10");
+        });
+    });
+
+    ui.add_space(ui::theme::spacing::SM);
+    render_rule_editor_section(
+        ui,
+        "Applies to",
+        "Leave fields blank when they should not constrain the match.",
+        |ui| render_rule_conditions_editor(ui, rule),
+    );
+
+    ui.add_space(ui::theme::spacing::SM);
+    render_rule_editor_section(
+        ui,
+        "Destination",
+        "Build the folder path for matched files.",
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                render_destination_mode_toggle(ui, rule);
+                ui.label(
+                    RichText::new(readable_destination_path(&rule.destination))
+                        .monospace()
+                        .color(ui::theme::colors::primary_text()),
+                );
+            });
+            ui.add_space(ui::theme::spacing::SM);
+            render_destination_builder(ui, rule);
+        },
+    );
+
+    ui.add_space(ui::theme::spacing::SM);
+    render_rule_editor_section(
+        ui,
+        "Simulation",
+        "Preview how this rule behaves against the latest analyzed folder.",
+        |ui| render_rule_simulation(ui, rule, simulation),
+    );
+
+    ui.add_space(ui::theme::spacing::SM);
+    render_rule_editor_section(
+        ui,
+        "Advanced",
+        "Use sparingly. These options can broaden matches.",
+        |ui| {
+            ui.checkbox(&mut rule.match_all, "Match all files");
+            if rule.match_all {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "This rule ignores all conditions and should usually be the final fallback rule.",
+                        )
+                        .color(ui::theme::colors::warning()),
+                    )
+                    .wrap(),
+                );
+            }
+        },
+    );
+}
+
+fn render_rule_list_item(
+    ui: &mut egui::Ui,
+    rule: &RuleEditorState,
+    index: usize,
+    selected: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(180.0), 52.0),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            ui::theme::colors::hover_control()
+        } else if response.hovered() {
+            ui::theme::colors::soft_control()
+        } else {
+            ui::theme::colors::elevated_surface()
+        };
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(6.0), fill);
+        ui.painter().rect_stroke(
+            rect,
+            egui::Rounding::same(6.0),
+            egui::Stroke::new(1.0, ui::theme::colors::border()),
+        );
+        if selected {
+            let accent = egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::pos2(rect.left() + 3.0, rect.bottom()),
+            );
+            ui.painter().rect_filled(
+                accent,
+                egui::Rounding::same(6.0),
+                ui::theme::colors::primary_blue(),
+            );
+        }
+        let text_x = rect.left() + 10.0;
+        ui.painter().text(
+            egui::pos2(text_x, rect.top() + 13.0),
+            egui::Align2::LEFT_CENTER,
+            format!("{}. {}", index + 1, rule.rule_name),
+            egui::TextStyle::Button.resolve(ui.style()),
+            ui::theme::colors::heading_text(),
+        );
+        ui.painter().text(
+            egui::pos2(text_x, rect.top() + 34.0),
+            egui::Align2::LEFT_CENTER,
+            rule_destination_summary(rule),
+            egui::TextStyle::Small.resolve(ui.style()),
+            ui::theme::colors::secondary_text(),
+        );
+    }
+    response.on_hover_text(rule_destination_summary(rule))
+}
+
+fn render_rule_editor_section(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    ui::theme::widgets::surface_frame().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new(title)
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.label(
+            RichText::new(detail)
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::metadata_text()),
+        );
+        ui.add_space(ui::theme::spacing::SM);
+        contents(ui);
+    });
+}
+
+fn render_rule_simulation(
+    ui: &mut egui::Ui,
+    rule: &RuleEditorState,
+    simulation: Option<&RuleSimulationResult>,
+) {
+    let Some(simulation) = simulation.filter(|simulation| simulation.rule_name == rule.rule_name)
+    else {
+        ui.add(
+            egui::Label::new(
+                RichText::new("Run Preview, then use Simulate in the toolbar.")
+                    .color(ui::theme::colors::secondary_text()),
+            )
+            .wrap(),
+        );
+        return;
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        render_status_chip(
+            ui,
+            &format!(
+                "{} match{}",
+                simulation.matched_files,
+                plural(simulation.matched_files)
+            ),
+            ui::theme::colors::info(),
+            ui::theme::colors::info_bg(),
+        );
+        ui.label(
+            RichText::new(format!(
+                "Checked {} file{} from the current preview.",
+                simulation.total_files,
+                plural(simulation.total_files)
+            ))
+            .color(ui::theme::colors::secondary_text()),
+        );
+    });
+
+    if simulation.sample_matches.is_empty() {
+        ui.label(
+            RichText::new("No sampled files matched this rule.")
+                .color(ui::theme::colors::metadata_text()),
+        );
+    } else {
+        ui.add_space(ui::theme::spacing::XS);
+        for sample in &simulation.sample_matches {
+            truncated_label(ui, &format!("Matched: {sample}"));
+        }
+    }
+}
+
+fn render_rule_conditions_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
+    if rule.match_all {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Match all files is enabled in Advanced, so these conditions are ignored.",
+                )
+                .color(ui::theme::colors::secondary_text()),
+            )
+            .wrap(),
+        );
+    }
+
+    egui::Grid::new("rule-condition-editor")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Extensions");
+            ui.add_sized(
+                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.extensions)
+                    .hint_text(example_hint("pdf, docx")),
+            );
+            ui.end_row();
+
+            ui.label("Filename contains");
+            ui.add_sized(
+                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.filename_contains)
+                    .hint_text(example_hint("invoice")),
+            );
+            ui.end_row();
+
+            ui.label("Path contains");
+            ui.add_sized(
+                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.path_contains)
+                    .hint_text(example_hint("downloads")),
+            );
+            ui.end_row();
+
+            ui.label("Year");
+            ui.add_sized(
+                [96.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                egui::TextEdit::singleline(&mut rule.year).hint_text(example_hint("2026")),
+            );
+            ui.end_row();
+
+            ui.label("Size range");
+            ui.horizontal(|ui| {
+                ui.add_sized(
+                    [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                    egui::TextEdit::singleline(&mut rule.min_size_bytes)
+                        .hint_text(example_hint("1000")),
+                );
+                ui.add_sized(
+                    [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                    egui::TextEdit::singleline(&mut rule.max_size_bytes)
+                        .hint_text(example_hint("200000")),
+                );
+            });
+            ui.end_row();
+        });
+}
+
+fn labeled_text_edit(ui: &mut egui::Ui, label: &str, value: &mut String, width: f32, hint: &str) {
+    ui.label(
+        RichText::new(label)
+            .size(ui::theme::typography::CAPTION)
+            .color(ui::theme::colors::metadata_text()),
+    );
+    let mut edit = egui::TextEdit::singleline(value);
+    if !hint.is_empty() {
+        edit = edit.hint_text(example_hint(hint));
+    }
+    ui.add_sized([width, PROFILE_WORKSPACE_FIELD_HEIGHT], edit);
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct DestinationDragPayload {

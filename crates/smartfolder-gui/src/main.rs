@@ -73,7 +73,11 @@ use ui::components::{
     panel_frame as settings_panel_frame, safety_line as render_safety_line,
     screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
 };
-use ui::screens::activity::{render_restore_confirmation, render_restore_result};
+use ui::screens::activity::{
+    activity_count_summary, activity_date_label, activity_detail, activity_detail_headline,
+    activity_event_title, activity_status_colors, activity_time_label, render_activity_count_chips,
+    render_restore_confirmation, render_restore_result,
+};
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
     render_explorer_integration_settings, render_privacy_preferences, render_settings_heading,
@@ -4332,42 +4336,42 @@ struct ApplyOutput {
 }
 
 #[derive(Debug, Clone)]
-struct TransactionRow {
-    transaction_id: String,
-    root: PathBuf,
-    root_label: String,
-    status: TransactionStatus,
-    started_at: String,
-    reason_summary: String,
-    completed: usize,
-    skipped: usize,
-    failed: usize,
-    rolled_back: usize,
-    pending: usize,
-    total_operations: usize,
+pub(crate) struct TransactionRow {
+    pub(crate) transaction_id: String,
+    pub(crate) root: PathBuf,
+    pub(crate) root_label: String,
+    pub(crate) status: TransactionStatus,
+    pub(crate) started_at: String,
+    pub(crate) reason_summary: String,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
+    pub(crate) rolled_back: usize,
+    pub(crate) pending: usize,
+    pub(crate) total_operations: usize,
 }
 
 #[derive(Debug, Clone)]
-struct TransactionDetail {
-    transaction_id: String,
-    plan_id: String,
-    root: String,
-    status: TransactionStatus,
-    started_at: String,
-    completed_at: String,
-    reason_summary: String,
-    operation_counts: TransactionOperationCounts,
-    operation_rows: Vec<TransactionOperationRow>,
-    total_operations: usize,
+pub(crate) struct TransactionDetail {
+    pub(crate) transaction_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) root: String,
+    pub(crate) status: TransactionStatus,
+    pub(crate) started_at: String,
+    pub(crate) completed_at: String,
+    pub(crate) reason_summary: String,
+    pub(crate) operation_counts: TransactionOperationCounts,
+    pub(crate) operation_rows: Vec<TransactionOperationRow>,
+    pub(crate) total_operations: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct TransactionOperationCounts {
-    pending: usize,
-    completed: usize,
-    skipped: usize,
-    failed: usize,
-    rolled_back: usize,
+pub(crate) struct TransactionOperationCounts {
+    pub(crate) pending: usize,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
+    pub(crate) rolled_back: usize,
 }
 
 impl TransactionOperationCounts {
@@ -6595,34 +6599,6 @@ fn render_activity_record_row(
         });
 }
 
-fn render_activity_count_chips(
-    ui: &mut egui::Ui,
-    completed: usize,
-    rolled_back: usize,
-    needs_review: usize,
-) {
-    ui.horizontal_wrapped(|ui| {
-        render_status_chip(
-            ui,
-            &format!("Moved {completed}"),
-            ui::theme::colors::success(),
-            ui::theme::colors::success_bg(),
-        );
-        render_status_chip(
-            ui,
-            &format!("Restored {rolled_back}"),
-            ui::theme::colors::info(),
-            ui::theme::colors::info_bg(),
-        );
-        render_status_chip(
-            ui,
-            &format!("Review {needs_review}"),
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        );
-    });
-}
-
 fn render_recovery_log(
     ui: &mut egui::Ui,
     rows: &[TransactionRow],
@@ -7502,26 +7478,6 @@ fn preview_row_explanation(row: &PreviewRow) -> String {
         _ => format!(
             "This row is marked '{}'. Review the source and destination before organizing.",
             row.status
-        ),
-    }
-}
-
-fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
-    match status {
-        TransactionStatus::Completed => (
-            ui::theme::colors::success(),
-            ui::theme::colors::success_bg(),
-        ),
-        TransactionStatus::RolledBack | TransactionStatus::PartiallyRolledBack => {
-            (ui::theme::colors::info(), ui::theme::colors::info_bg())
-        }
-        TransactionStatus::Failed | TransactionStatus::Interrupted => (
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        ),
-        TransactionStatus::InProgress => (
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
         ),
     }
 }
@@ -8940,126 +8896,6 @@ fn rule_destination_summary(rule: &RuleEditorState) -> String {
     } else {
         format!("-> {}", rule.destination.trim())
     }
-}
-
-fn activity_event_title(row: &TransactionRow) -> String {
-    let folder = folder_name_label(&row.root);
-    match row.status {
-        TransactionStatus::Completed => format!(
-            "Organized {} file{} in {folder}",
-            row.completed,
-            plural(row.completed)
-        ),
-        TransactionStatus::RolledBack => format!(
-            "Restored previous layout in {folder}: {} file{} restored",
-            row.rolled_back,
-            plural(row.rolled_back)
-        ),
-        TransactionStatus::PartiallyRolledBack => format!(
-            "Partially restored previous layout in {folder}: {} file{} restored",
-            row.rolled_back,
-            plural(row.rolled_back)
-        ),
-        TransactionStatus::Interrupted => format!(
-            "Organization interrupted in {folder} after {} recorded change{}",
-            row.total_operations,
-            plural(row.total_operations)
-        ),
-        TransactionStatus::InProgress => format!(
-            "Organization running in {folder}: {} recorded change{}",
-            row.total_operations,
-            plural(row.total_operations)
-        ),
-        TransactionStatus::Failed => format!(
-            "Organization needs review in {folder}: {} failed, {} organized",
-            row.failed, row.completed
-        ),
-    }
-}
-
-fn activity_date_label(row: &TransactionRow) -> &str {
-    row.started_at
-        .split_once(' ')
-        .map_or(row.started_at.as_str(), |(date, _)| date)
-}
-
-fn activity_time_label(row: &TransactionRow) -> &str {
-    row.started_at
-        .split_once(' ')
-        .map_or("", |(_, time)| time)
-        .get(0..5)
-        .unwrap_or("")
-}
-
-fn activity_detail_headline(detail: &TransactionDetail) -> String {
-    match detail.status {
-        TransactionStatus::Completed => format!(
-            "Organized {} file{} on {}.",
-            detail.operation_counts.completed,
-            plural(detail.operation_counts.completed),
-            detail.started_at
-        ),
-        TransactionStatus::RolledBack => format!(
-            "Restored {} file{} from this activity.",
-            detail.operation_counts.rolled_back,
-            plural(detail.operation_counts.rolled_back)
-        ),
-        TransactionStatus::PartiallyRolledBack => format!(
-            "Restored {} file{} with some changes still needing review.",
-            detail.operation_counts.rolled_back,
-            plural(detail.operation_counts.rolled_back)
-        ),
-        TransactionStatus::Interrupted => format!(
-            "Organization was interrupted after {} recorded change{}.",
-            detail.total_operations,
-            plural(detail.total_operations)
-        ),
-        TransactionStatus::InProgress => format!(
-            "Organization is still in progress with {} recorded change{}.",
-            detail.total_operations,
-            plural(detail.total_operations)
-        ),
-        TransactionStatus::Failed => format!(
-            "Organization needs review: {} failed, {} completed.",
-            detail.operation_counts.failed, detail.operation_counts.completed
-        ),
-    }
-}
-
-fn activity_detail(row: &TransactionRow) -> String {
-    match row.status {
-        TransactionStatus::Completed => format!(
-            "Why: {}. Completed {}. {} item{} skipped or failed.",
-            row.reason_summary,
-            row.started_at,
-            row.skipped + row.failed,
-            plural(row.skipped + row.failed)
-        ),
-        TransactionStatus::RolledBack => format!(
-            "Restore completed {}. Original file locations were restored where possible.",
-            row.started_at
-        ),
-        TransactionStatus::PartiallyRolledBack => {
-            "Restore completed with remaining issues. Review details before making more changes."
-                .to_string()
-        }
-        TransactionStatus::Interrupted | TransactionStatus::InProgress => format!(
-            "Why: {}. {} completed, {} pending. Resume or restore from the recovery controls.",
-            row.reason_summary, row.completed, row.pending
-        ),
-        TransactionStatus::Failed => {
-            "Some file moves failed. Review details before retrying or restoring.".to_string()
-        }
-    }
-}
-
-fn activity_count_summary(row: &TransactionRow) -> String {
-    format!(
-        "{} moved / {} restored / {} needs review",
-        row.completed,
-        row.rolled_back,
-        row.skipped + row.failed + row.pending
-    )
 }
 
 fn same_folder(left: &Path, right: &Path) -> bool {

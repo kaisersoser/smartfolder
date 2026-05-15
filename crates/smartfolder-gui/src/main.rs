@@ -73,6 +73,7 @@ use ui::components::{
     panel_frame as settings_panel_frame, safety_line as render_safety_line,
     screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
 };
+use ui::screens::activity::{render_restore_confirmation, render_restore_result};
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
     render_explorer_integration_settings, render_privacy_preferences, render_settings_heading,
@@ -1603,7 +1604,7 @@ impl SmartfolderApp {
             Err(TryRecvError::Disconnected) => {
                 self.undo_receiver = None;
                 self.error_message =
-                    Some("The background undo worker stopped unexpectedly.".to_string());
+                    Some("The background restore worker stopped unexpectedly.".to_string());
             }
         }
     }
@@ -3538,7 +3539,7 @@ impl eframe::App for SmartfolderApp {
         if let Some(transaction_id) = self.show_undo_confirmation.clone() {
             let mut confirmed = false;
             let mut dismissed = false;
-            render_undo_confirmation(ctx, &transaction_id, &mut confirmed, &mut dismissed);
+            render_restore_confirmation(ctx, &transaction_id, &mut confirmed, &mut dismissed);
             if confirmed {
                 self.start_undo(transaction_id);
             } else if dismissed {
@@ -6368,7 +6369,14 @@ fn render_transaction_history(
     ui.add_space(ui::theme::spacing::SM);
 
     if let Some(result) = undo_result {
-        render_undo_result(ui, result);
+        render_restore_result(
+            ui,
+            result.rolled_back,
+            result.skipped,
+            result.failed,
+            &result.transaction_id,
+            &result.journal_path,
+        );
         ui.add_space(6.0);
     }
 
@@ -6956,51 +6964,6 @@ fn render_path_detail_line(ui: &mut egui::Ui, label: &str, path: &str) {
         )
         .on_hover_text(path);
     });
-}
-
-fn render_undo_confirmation(
-    ctx: &egui::Context,
-    transaction_id: &str,
-    confirmed: &mut bool,
-    dismissed: &mut bool,
-) {
-    egui::Window::new("Restore previous layout")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(RichText::new("Restore previous layout?").strong());
-            ui.label("smartfolder will move completed files back to their original paths.");
-            ui.label("It will refuse to overwrite anything already at an original path.");
-            ui.add_space(6.0);
-            truncated_label(ui, &format!("Activity id: {transaction_id}"));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    *dismissed = true;
-                }
-                if ui.button("Restore previous layout").clicked() {
-                    *confirmed = true;
-                }
-            });
-        });
-}
-
-fn render_undo_result(ui: &mut egui::Ui, result: &UndoOutput) {
-    ui.label(RichText::new("Previous layout restored").strong());
-    egui::Grid::new("undo-result")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
-        .show(ui, |ui| {
-            summary_row(ui, "Rolled back", result.rolled_back);
-            summary_row(ui, "Skipped", result.skipped);
-            summary_row(ui, "Failed", result.failed);
-        });
-    ui.label(format!("Activity id: {}", result.transaction_id));
-    truncated_label(
-        ui,
-        &format!("Restore history: {}", result.journal_path.display()),
-    );
 }
 
 fn plan_summary_headline(result: &AnalysisOutput) -> String {
@@ -9263,12 +9226,6 @@ fn plural_y(value: usize) -> &'static str {
     } else {
         "ies"
     }
-}
-
-fn summary_row(ui: &mut egui::Ui, label: &str, value: usize) {
-    ui.label(label);
-    ui.label(value.to_string());
-    ui.end_row();
 }
 
 fn status_label(status: TransactionStatus) -> &'static str {

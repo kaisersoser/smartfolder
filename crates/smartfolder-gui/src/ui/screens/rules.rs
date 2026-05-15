@@ -53,6 +53,129 @@ pub(crate) enum SavedProfileAction {
     Edit,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProfileWorkspaceAction {
+    Save,
+    Use,
+    Validate,
+    Simulate,
+    ToggleAiDraftPrompt,
+    ExplainWithAi,
+    NewDraft,
+    ImportToml,
+    ExportToml,
+}
+
+pub(crate) fn render_profile_workspace_toolbar(
+    ui: &mut egui::Ui,
+    editor: &mut ProfileEditorState,
+    loaded_profile: Option<&LoadedRuleProfile>,
+    can_simulate: bool,
+    ai_available: bool,
+    running_ai_task: bool,
+) -> Option<ProfileWorkspaceAction> {
+    let mut action = None;
+    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(&editor.profile_id)
+                .strong()
+                .size(ui::theme::typography::SECTION_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_status_chip(
+            ui,
+            &format!("{} rule{}", editor.rules.len(), plural(editor.rules.len())),
+            ui::theme::colors::secondary_text(),
+            ui::theme::colors::subtle_surface(),
+        );
+        render_profile_workspace_status(ui, loaded_profile);
+    });
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add(ui::theme::widgets::compact_primary_button("Save"))
+            .clicked()
+        {
+            action = Some(ProfileWorkspaceAction::Save);
+        }
+        if ui
+            .add(ui::theme::widgets::compact_secondary_button("Use"))
+            .clicked()
+        {
+            action = Some(ProfileWorkspaceAction::Use);
+        }
+        if ui
+            .add(ui::theme::widgets::compact_secondary_button("Validate"))
+            .clicked()
+        {
+            action = Some(ProfileWorkspaceAction::Validate);
+        }
+        if ui
+            .add_enabled(
+                can_simulate,
+                ui::theme::widgets::compact_secondary_button("Simulate"),
+            )
+            .on_disabled_hover_text("Run Preview before simulating this rule")
+            .clicked()
+        {
+            action = Some(ProfileWorkspaceAction::Simulate);
+        }
+        if ai_available {
+            if ui
+                .add(ui::theme::widgets::compact_secondary_button(
+                    "Build with AI",
+                ))
+                .clicked()
+            {
+                action = Some(ProfileWorkspaceAction::ToggleAiDraftPrompt);
+            }
+            if ui
+                .add_enabled(
+                    !running_ai_task,
+                    ui::theme::widgets::compact_secondary_button("Explain"),
+                )
+                .clicked()
+            {
+                action = Some(ProfileWorkspaceAction::ExplainWithAi);
+            }
+        }
+    });
+    egui::CollapsingHeader::new("Advanced")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("Profile id")
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::metadata_text()),
+                );
+                ui.add_sized(
+                    [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
+                    egui::TextEdit::singleline(&mut editor.profile_id),
+                );
+                if ui
+                    .add(ui::theme::widgets::compact_secondary_button("New draft"))
+                    .clicked()
+                {
+                    action = Some(ProfileWorkspaceAction::NewDraft);
+                }
+                if ui
+                    .add(ui::theme::widgets::compact_secondary_button("Import TOML"))
+                    .clicked()
+                {
+                    action = Some(ProfileWorkspaceAction::ImportToml);
+                }
+                if ui
+                    .add(ui::theme::widgets::compact_secondary_button("Export TOML"))
+                    .clicked()
+                {
+                    action = Some(ProfileWorkspaceAction::ExportToml);
+                }
+            });
+        });
+    action
+}
+
 pub(crate) fn render_active_profile_panel(
     ui: &mut egui::Ui,
     planning_source: PlanningSource,

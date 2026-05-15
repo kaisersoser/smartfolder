@@ -86,8 +86,8 @@ use ui::screens::preview::{
 };
 use ui::screens::rules::{
     builtin_library_items, render_active_profile_panel, render_builtin_rule_row,
-    render_profile_editor, render_profile_workspace_status, render_rules_ai_panel,
-    render_saved_profile_row, BuiltinRuleAction, SavedProfileAction,
+    render_profile_editor, render_profile_workspace_toolbar, render_rules_ai_panel,
+    render_saved_profile_row, BuiltinRuleAction, ProfileWorkspaceAction, SavedProfileAction,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -2878,7 +2878,19 @@ impl SmartfolderApp {
             .min_width(760.0)
             .min_height(520.0)
             .show(ctx, |ui| {
-                self.render_profile_workspace_toolbar(ui);
+                let ai_available = self.ai_is_available();
+                let running_ai_task = self.is_running_ai_task();
+                let toolbar_action = render_profile_workspace_toolbar(
+                    ui,
+                    &mut self.profile_editor,
+                    self.loaded_profile.as_ref(),
+                    self.analysis_result.is_some(),
+                    ai_available,
+                    running_ai_task,
+                );
+                if let Some(action) = toolbar_action {
+                    self.handle_profile_workspace_action(action);
+                }
                 if self.show_ai_draft_prompt && self.ai_is_available() {
                     ui.add_space(ui::theme::spacing::SM);
                     self.render_ai_rule_builder_panel(ui);
@@ -2912,117 +2924,33 @@ impl SmartfolderApp {
         self.render_ai_draft_review_window(ctx);
     }
 
-    fn render_profile_workspace_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(&self.profile_editor.profile_id)
-                    .strong()
-                    .size(ui::theme::typography::SECTION_TITLE)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} rule{}",
-                    self.profile_editor.rules.len(),
-                    plural(self.profile_editor.rules.len())
-                ),
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::subtle_surface(),
-            );
-            render_profile_workspace_status(ui, self.loaded_profile.as_ref());
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(ui::theme::widgets::compact_primary_button("Save"))
-                .clicked()
-            {
-                self.save_profile_from_editor();
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Use"))
-                .clicked()
-            {
+    fn handle_profile_workspace_action(&mut self, action: ProfileWorkspaceAction) {
+        match action {
+            ProfileWorkspaceAction::Save => self.save_profile_from_editor(),
+            ProfileWorkspaceAction::Use => {
                 self.select_custom_rules_style();
                 self.active_section = AppSection::Organize;
                 self.show_rules_workspace = false;
             }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Validate"))
-                .clicked()
-            {
-                self.validate_profile_editor();
+            ProfileWorkspaceAction::Validate => self.validate_profile_editor(),
+            ProfileWorkspaceAction::Simulate => self.simulate_selected_rule(),
+            ProfileWorkspaceAction::ToggleAiDraftPrompt => {
+                self.show_ai_draft_prompt = !self.show_ai_draft_prompt;
             }
-            if ui
-                .add_enabled(
-                    self.analysis_result.is_some(),
-                    ui::theme::widgets::compact_secondary_button("Simulate"),
-                )
-                .on_disabled_hover_text("Run Preview before simulating this rule")
-                .clicked()
-            {
-                self.simulate_selected_rule();
+            ProfileWorkspaceAction::ExplainWithAi => {
+                self.show_ai_draft_prompt = true;
+                self.start_ai_rule_explanation();
             }
-            if self.ai_is_available() {
-                if ui
-                    .add(ui::theme::widgets::compact_secondary_button(
-                        "Build with AI",
-                    ))
-                    .clicked()
-                {
-                    self.show_ai_draft_prompt = !self.show_ai_draft_prompt;
-                }
-                if ui
-                    .add_enabled(
-                        !self.is_running_ai_task(),
-                        ui::theme::widgets::compact_secondary_button("Explain"),
-                    )
-                    .clicked()
-                {
-                    self.show_ai_draft_prompt = true;
-                    self.start_ai_rule_explanation();
-                }
+            ProfileWorkspaceAction::NewDraft => {
+                self.profile_editor = ProfileEditorState::default();
+                self.loaded_profile = None;
+                self.planning_source = PlanningSource::BuiltIn;
+                self.maintenance_message = Some("Started a new unsaved profile draft.".to_string());
+                self.error_message = None;
             }
-        });
-        egui::CollapsingHeader::new("Advanced")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new("Profile id")
-                            .size(ui::theme::typography::CAPTION)
-                            .color(ui::theme::colors::metadata_text()),
-                    );
-                    ui.add_sized(
-                        [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                        egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
-                    );
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("New draft"))
-                        .clicked()
-                    {
-                        self.profile_editor = ProfileEditorState::default();
-                        self.loaded_profile = None;
-                        self.planning_source = PlanningSource::BuiltIn;
-                        self.maintenance_message =
-                            Some("Started a new unsaved profile draft.".to_string());
-                        self.error_message = None;
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Import TOML"))
-                        .clicked()
-                    {
-                        self.import_rule_profile();
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Export TOML"))
-                        .clicked()
-                    {
-                        self.export_profile_from_editor();
-                    }
-                });
-            });
+            ProfileWorkspaceAction::ImportToml => self.import_rule_profile(),
+            ProfileWorkspaceAction::ExportToml => self.export_profile_from_editor(),
+        }
     }
 
     fn render_ai_rule_builder_panel(&mut self, ui: &mut egui::Ui) {

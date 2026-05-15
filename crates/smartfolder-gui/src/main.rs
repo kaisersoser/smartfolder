@@ -86,8 +86,9 @@ use ui::screens::preview::{
 };
 use ui::screens::rules::{
     builtin_library_items, render_active_profile_panel, render_builtin_rule_row,
-    render_profile_editor, render_profile_workspace_toolbar, render_rules_ai_panel,
-    render_saved_profile_row, BuiltinRuleAction, ProfileWorkspaceAction, SavedProfileAction,
+    render_profile_editor, render_profile_workspace_toolbar, render_profile_workspace_window,
+    render_rules_ai_panel, render_saved_profile_row, BuiltinRuleAction, ProfileWorkspaceAction,
+    SavedProfileAction,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -2868,55 +2869,42 @@ impl SmartfolderApp {
             return;
         }
 
-        let mut open = true;
-        egui::Window::new("Profile workspace")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(980.0)
-            .default_height(680.0)
-            .min_width(760.0)
-            .min_height(520.0)
-            .show(ctx, |ui| {
-                let ai_available = self.ai_is_available();
-                let running_ai_task = self.is_running_ai_task();
-                let toolbar_action = render_profile_workspace_toolbar(
-                    ui,
-                    &mut self.profile_editor,
-                    self.loaded_profile.as_ref(),
-                    self.analysis_result.is_some(),
-                    ai_available,
-                    running_ai_task,
-                );
-                if let Some(action) = toolbar_action {
-                    self.handle_profile_workspace_action(action);
-                }
-                if self.show_ai_draft_prompt && self.ai_is_available() {
-                    ui.add_space(ui::theme::spacing::SM);
-                    self.render_ai_rule_builder_panel(ui);
-                }
-                if let Some(result) = self.ai_draft_result.clone() {
-                    ui.add_space(ui::theme::spacing::SM);
-                    render_ai_draft_summary_strip(
-                        ui,
-                        &result,
-                        &mut self.show_ai_draft_review,
-                        &mut self.show_ai_draft_prompt,
-                    );
-                }
-
+        let open = render_profile_workspace_window(ctx, |ui| {
+            let ai_available = self.ai_is_available();
+            let running_ai_task = self.is_running_ai_task();
+            let toolbar_action = render_profile_workspace_toolbar(
+                ui,
+                &mut self.profile_editor,
+                self.loaded_profile.as_ref(),
+                self.analysis_result.is_some(),
+                ai_available,
+                running_ai_task,
+            );
+            if let Some(action) = toolbar_action {
+                self.handle_profile_workspace_action(action);
+            }
+            if self.show_ai_draft_prompt && self.ai_is_available() {
                 ui.add_space(ui::theme::spacing::SM);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let rule_simulation = self.rule_simulation.clone();
-                        render_profile_editor(
-                            ui,
-                            &mut self.profile_editor,
-                            rule_simulation.as_ref(),
-                        );
-                    });
-            });
+                self.render_ai_rule_builder_panel(ui);
+            }
+            if let Some(result) = self.ai_draft_result.clone() {
+                ui.add_space(ui::theme::spacing::SM);
+                render_ai_draft_summary_strip(
+                    ui,
+                    &result,
+                    &mut self.show_ai_draft_review,
+                    &mut self.show_ai_draft_prompt,
+                );
+            }
+
+            ui.add_space(ui::theme::spacing::SM);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let rule_simulation = self.rule_simulation.clone();
+                    render_profile_editor(ui, &mut self.profile_editor, rule_simulation.as_ref());
+                });
+        });
 
         if !open {
             self.show_rules_workspace = false;

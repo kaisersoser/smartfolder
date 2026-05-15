@@ -13,6 +13,23 @@ use crate::{
     PROFILE_RULE_LIST_WIDTH, PROFILE_WORKSPACE_FIELD_HEIGHT,
 };
 
+pub(crate) fn render_profile_workspace_window(
+    ctx: &egui::Context,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let mut open = true;
+    egui::Window::new("Profile workspace")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(980.0)
+        .default_height(680.0)
+        .min_width(760.0)
+        .min_height(520.0)
+        .show(ctx, contents);
+    open
+}
+
 pub(crate) fn render_profile_editor(
     ui: &mut egui::Ui,
     editor: &mut ProfileEditorState,

@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use eframe::egui::{self, Color32, RichText};
-use smartfolder_core::model::TransactionStatus;
+use smartfolder_core::model::{OperationStatus, TransactionStatus};
 
 use crate::ui;
 use crate::ui::components::{
     note_frame as settings_note_frame, status_chip as render_status_chip, truncated_label,
 };
-use crate::{HistoryAction, TransactionDetail, TransactionRow};
+use crate::{HistoryAction, TransactionDetail, TransactionOperationRow, TransactionRow};
 
 /// Return restrained status colors for Activity chips.
 pub(crate) fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
@@ -342,6 +342,55 @@ pub(crate) fn render_recovery_log(
     }
 }
 
+/// Render an Activity detail loading/error window.
+pub(crate) fn render_activity_detail_error_window(
+    ctx: &egui::Context,
+    message: &str,
+    action: &mut Option<HistoryAction>,
+) {
+    let mut open = true;
+    egui::Window::new("Activity details")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            ui.colored_label(ui::theme::colors::error(), message);
+            ui.add_space(ui::theme::spacing::SM);
+            if ui
+                .add(ui::theme::widgets::secondary_button("Close"))
+                .clicked()
+            {
+                *action = Some(HistoryAction::CloseDetails);
+            }
+        });
+    if !open {
+        *action = Some(HistoryAction::CloseDetails);
+    }
+}
+
+/// Render the detailed Activity window.
+pub(crate) fn render_activity_detail_window(
+    ctx: &egui::Context,
+    detail: &TransactionDetail,
+    action: &mut Option<HistoryAction>,
+) {
+    let mut open = true;
+    egui::Window::new("Activity details")
+        .open(&mut open)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(760.0)
+        .default_height(560.0)
+        .show(ctx, |ui| {
+            render_activity_detail_content(ui, detail, action);
+        });
+    if !open {
+        *action = Some(HistoryAction::CloseDetails);
+    }
+}
+
 /// Render the restore confirmation dialog for a completed activity.
 pub(crate) fn render_restore_confirmation(
     ctx: &egui::Context,
@@ -554,6 +603,184 @@ fn render_recovery_log_row(
         });
 }
 
+fn render_activity_detail_content(
+    ui: &mut egui::Ui,
+    detail: &TransactionDetail,
+    action: &mut Option<HistoryAction>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Activity details")
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        let (stroke, fill) = activity_status_colors(detail.status);
+        render_status_chip(ui, activity_status_label(detail.status), stroke, fill);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(ui::theme::widgets::secondary_button("Close"))
+                .clicked()
+            {
+                *action = Some(HistoryAction::CloseDetails);
+            }
+        });
+    });
+    ui.add_space(ui::theme::spacing::SM);
+
+    ui.add(
+        egui::Label::new(
+            RichText::new(activity_detail_headline(detail))
+                .color(ui::theme::colors::primary_text()),
+        )
+        .wrap(),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("Why: {}", detail.reason_summary))
+                .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("Folder: {}", detail.root))
+                .color(ui::theme::colors::metadata_text()),
+        )
+        .truncate(),
+    )
+    .on_hover_text(&detail.root);
+
+    ui.add_space(ui::theme::spacing::SM);
+    render_activity_count_chips(
+        ui,
+        detail.operation_counts.completed,
+        detail.operation_counts.rolled_back,
+        detail.operation_counts.skipped
+            + detail.operation_counts.failed
+            + detail.operation_counts.pending,
+    );
+
+    ui.add_space(ui::theme::spacing::MD);
+    egui::CollapsingHeader::new("Technical restore details")
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::Grid::new("transaction-detail-summary")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Activity id");
+                    ui.label(&detail.transaction_id);
+                    ui.end_row();
+                    ui.label("Plan id");
+                    ui.label(&detail.plan_id);
+                    ui.end_row();
+                    ui.label("Started");
+                    ui.label(&detail.started_at);
+                    ui.end_row();
+                    ui.label("Completed");
+                    ui.label(&detail.completed_at);
+                    ui.end_row();
+                    ui.label("Recorded changes");
+                    ui.label(detail.total_operations.to_string());
+                    ui.end_row();
+                });
+            ui.add_space(ui::theme::spacing::SM);
+            render_transaction_operation_rows(ui, detail);
+        });
+}
+
+fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDetail) {
+    if detail.operation_rows.is_empty() {
+        ui.label("No operation rows recorded in this journal.");
+        return;
+    }
+
+    ui.label(RichText::new("Recorded changes").strong());
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .max_height(260.0)
+        .show(ui, |ui| {
+            for row in &detail.operation_rows {
+                render_transaction_operation_row(ui, row);
+                ui.add_space(ui::theme::spacing::XS);
+            }
+        });
+
+    if detail.total_operations > detail.operation_rows.len() {
+        ui.label(format!(
+            "Showing {} of {} recorded operations.",
+            detail.operation_rows.len(),
+            detail.total_operations
+        ));
+    }
+}
+
+fn render_transaction_operation_row(ui: &mut egui::Ui, row: &TransactionOperationRow) {
+    egui::Frame::group(ui.style())
+        .fill(ui::theme::colors::surface())
+        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(&row.operation_id)
+                        .monospace()
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                render_status_chip(
+                    ui,
+                    operation_status_label(row.status),
+                    ui::theme::colors::secondary_text(),
+                    ui::theme::colors::elevated_surface(),
+                );
+                ui.label(
+                    RichText::new(&row.reason)
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            });
+            render_path_detail_line(ui, "From", &row.source);
+            render_path_detail_line(ui, "To", &row.destination);
+            if !row.error.trim().is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Error: {}", row.error))
+                            .color(ui::theme::colors::error()),
+                    )
+                    .wrap(),
+                );
+            }
+        });
+}
+
+fn render_path_detail_line(ui: &mut egui::Ui, label: &str, path: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [44.0, 20.0],
+            egui::Label::new(
+                RichText::new(label)
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            ),
+        );
+        let width = ui.available_width().max(120.0);
+        ui.add_sized(
+            [width, 20.0],
+            egui::Label::new(
+                RichText::new(path)
+                    .monospace()
+                    .color(ui::theme::colors::primary_text()),
+            )
+            .truncate(),
+        )
+        .on_hover_text(path);
+    });
+}
+
 /// Render the result summary for a completed restore operation.
 pub(crate) fn render_restore_result(
     ui: &mut egui::Ui,
@@ -626,4 +853,14 @@ fn can_restore_status(status: TransactionStatus) -> bool {
             | TransactionStatus::Failed
             | TransactionStatus::PartiallyRolledBack
     )
+}
+
+fn operation_status_label(status: OperationStatus) -> &'static str {
+    match status {
+        OperationStatus::Pending => "pending",
+        OperationStatus::Completed => "completed",
+        OperationStatus::Skipped => "skipped",
+        OperationStatus::Failed => "failed",
+        OperationStatus::RolledBack => "rolled back",
+    }
 }

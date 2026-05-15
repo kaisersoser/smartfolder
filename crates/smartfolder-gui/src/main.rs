@@ -50,8 +50,8 @@ use smartfolder_core::apply::{
     apply_stored_plan_with_progress, ApplyOptions, ApplySummary, StoredApplyProgress,
 };
 use smartfolder_core::model::{
-    BuiltInMode, ConflictState, FileInventoryRecord, OperationStatus, PlanMode, PlanOperation,
-    PlanSummary, TransactionStatus, UntouchedReason, UntouchedRecord,
+    BuiltInMode, FileInventoryRecord, OperationStatus, PlanMode, PlanSummary, TransactionStatus,
+    UntouchedReason,
 };
 use smartfolder_core::planner::{
     generate_plan_to_store_with_progress_and_cancellation, PlanGenerationProgress, PlanOptions,
@@ -77,6 +77,10 @@ use ui::screens::activity::{
     render_activity_detail_error_window, render_activity_detail_window, render_activity_scope_bar,
     render_current_folder_activity, render_recovery_log, render_restore_confirmation,
     render_restore_result,
+};
+use ui::screens::preview::{
+    preview_example_destination_path, preview_row_explanation, preview_rows, preview_status_colors,
+    untouched_preview_rows, untouched_reason_label,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -4267,14 +4271,14 @@ struct PreviewPage {
 }
 
 #[derive(Debug, Clone)]
-struct PreviewRow {
-    file_name: String,
-    original_folder: String,
-    target_folder: String,
-    source_full_path: String,
-    destination_full_path: Option<String>,
-    reason: String,
-    status: String,
+pub(crate) struct PreviewRow {
+    pub(crate) file_name: String,
+    pub(crate) original_folder: String,
+    pub(crate) target_folder: String,
+    pub(crate) source_full_path: String,
+    pub(crate) destination_full_path: Option<String>,
+    pub(crate) reason: String,
+    pub(crate) status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -5956,17 +5960,6 @@ fn preview_sample_cell(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) 
     });
 }
 
-fn preview_example_destination_path(row: &PreviewRow) -> String {
-    if row.destination_full_path.is_none() {
-        return "Stays in place".to_string();
-    }
-    if row.target_folder == "Selected folder" {
-        "./".to_string()
-    } else {
-        format!("./{}/", row.target_folder.replace(" / ", "/"))
-    }
-}
-
 fn render_preview_path_highlight(ui: &mut egui::Ui, path: &str) -> egui::Response {
     let frame = egui::Frame::none()
         .fill(ui::theme::colors::hover_control())
@@ -6428,17 +6421,6 @@ fn plan_summary_detail(ready: usize, needs_attention: usize, left_in_place: usiz
     )
 }
 
-fn untouched_reason_label(reason: UntouchedReason) -> &'static str {
-    match reason {
-        UntouchedReason::NoMatchingRule => "no matching rule",
-        UntouchedReason::AlreadyOrganized => "already organized",
-        UntouchedReason::UnsupportedMetadata => "unsupported metadata",
-        UntouchedReason::UnsafeDestination => "unsafe destination",
-        UntouchedReason::DestinationConflict => "destination conflict",
-        UntouchedReason::ExcludedByPolicy => "excluded by policy",
-    }
-}
-
 fn render_preview_controls(
     ui: &mut egui::Ui,
     result: &AnalysisOutput,
@@ -6507,68 +6489,6 @@ fn render_preview_controls(
             *action = Some(PreviewAction::Next);
         }
     });
-}
-
-fn preview_rows(operations: &[PlanOperation], root: &Path) -> Vec<PreviewRow> {
-    operations
-        .iter()
-        .map(|operation| PreviewRow {
-            file_name: file_name_label(&operation.source),
-            original_folder: relative_folder_label(&operation.source, root),
-            target_folder: relative_folder_label(&operation.destination, root),
-            source_full_path: operation.source.display().to_string(),
-            destination_full_path: Some(operation.destination.display().to_string()),
-            reason: operation.reason.clone(),
-            status: operation_status(operation).to_string(),
-        })
-        .collect()
-}
-
-fn untouched_preview_rows(records: &[UntouchedRecord], root: &Path) -> Vec<PreviewRow> {
-    records
-        .iter()
-        .map(|record| PreviewRow {
-            file_name: file_name_label(&record.path),
-            original_folder: relative_folder_label(&record.path, root),
-            target_folder: "Stays in place".to_string(),
-            source_full_path: record.path.display().to_string(),
-            destination_full_path: None,
-            reason: untouched_detail(record),
-            status: "Untouched".to_string(),
-        })
-        .collect()
-}
-
-fn untouched_detail(record: &UntouchedRecord) -> String {
-    if record.detail.trim().is_empty() {
-        untouched_reason_label(record.reason).to_string()
-    } else {
-        record.detail.clone()
-    }
-}
-
-fn file_name_label(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn relative_folder_label(path: &Path, root: &Path) -> String {
-    let Some(parent) = path.parent() else {
-        return "Selected folder".to_string();
-    };
-    let Ok(relative) = parent.strip_prefix(root) else {
-        return parent.display().to_string();
-    };
-    if relative.as_os_str().is_empty() {
-        "Selected folder".to_string()
-    } else {
-        relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" / ")
-    }
 }
 
 fn render_preview_rows(
@@ -6805,15 +6725,6 @@ fn preview_destination_cell_with_tooltip(
     response.on_hover_text(tooltip);
 }
 
-fn operation_status(operation: &PlanOperation) -> &'static str {
-    match operation.conflict {
-        ConflictState::None => "Ready",
-        ConflictState::DestinationExists { .. } => "Needs Review",
-        ConflictState::CaseOnlyRename { .. } => "Needs Review",
-        ConflictState::UnsafeDestination { .. } => "Left Untouched",
-    }
-}
-
 fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_row: Option<usize>) {
     let Some(index) = selected_row else {
         return;
@@ -6889,44 +6800,6 @@ fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_ro
                 truncated_label(ui, "Destination: Stays in original folder");
             }
         });
-}
-
-fn preview_status_colors(status: &str) -> (Color32, Color32) {
-    match status {
-        "Ready" => (
-            ui::theme::colors::success(),
-            ui::theme::colors::success_bg(),
-        ),
-        "Needs Review" => (
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        ),
-        _ => (
-            ui::theme::colors::metadata_text(),
-            ui::theme::colors::subtle_surface(),
-        ),
-    }
-}
-
-fn preview_row_explanation(row: &PreviewRow) -> String {
-    match row.status.as_str() {
-        "Ready" => format!(
-            "This file matched '{}'. smartfolder found a destination inside the selected folder and no conflict was detected, so it can be organized after confirmation.",
-            row.reason
-        ),
-        "Needs Review" => format!(
-            "This file matched '{}', but the destination needs attention before smartfolder will move it. It stays untouched unless the conflict is resolved.",
-            row.reason
-        ),
-        "Untouched" => format!(
-            "This file stays in place because {}. It will not be moved by the current plan.",
-            row.reason
-        ),
-        _ => format!(
-            "This row is marked '{}'. Review the source and destination before organizing.",
-            row.status
-        ),
-    }
 }
 
 fn section_max_width(section: AppSection) -> f32 {
@@ -8573,14 +8446,15 @@ mod tests {
     use crate::ui::screens::activity::{
         activity_count_summary, activity_date_label, activity_event_title, activity_time_label,
     };
+    use crate::ui::screens::preview::{preview_rows, untouched_preview_rows};
 
     use super::{
         apply_destination_drop, build_destination_from_segments, can_undo_status,
         is_cloud_synced_path, operation_status_label, parse_destination_segments,
-        preloaded_root_from_args, preview_rows, profile_file_stem, same_folder, status_label,
-        transaction_operation_counts, untouched_preview_rows, AnalysisPlanSource,
-        DestinationDragPayload, DestinationDragSource, DestinationSegment, LoadedRuleProfile,
-        PlanningSource, ProfileEditorState, RuleEditorState, SmartfolderApp, TransactionRow,
+        preloaded_root_from_args, profile_file_stem, same_folder, status_label,
+        transaction_operation_counts, AnalysisPlanSource, DestinationDragPayload,
+        DestinationDragSource, DestinationSegment, LoadedRuleProfile, PlanningSource,
+        ProfileEditorState, RuleEditorState, SmartfolderApp, TransactionRow,
     };
 
     #[test]

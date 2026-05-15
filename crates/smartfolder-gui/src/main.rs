@@ -85,10 +85,10 @@ use ui::screens::preview::{
     untouched_preview_rows, untouched_reason_label,
 };
 use ui::screens::rules::{
-    builtin_library_items, render_active_profile_panel, render_builtin_rule_row,
-    render_profile_editor, render_profile_workspace_toolbar, render_profile_workspace_window,
-    render_rules_ai_panel, render_saved_profile_row, BuiltinRuleAction, ProfileWorkspaceAction,
-    SavedProfileAction,
+    builtin_library_items, render_active_profile_panel, render_ai_draft_review,
+    render_ai_draft_summary_strip, render_builtin_rule_row, render_profile_editor,
+    render_profile_workspace_toolbar, render_profile_workspace_window, render_rules_ai_panel,
+    render_saved_profile_row, BuiltinRuleAction, ProfileWorkspaceAction, SavedProfileAction,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -4140,10 +4140,10 @@ enum AiPreviewAction {
 }
 
 #[derive(Debug, Clone)]
-struct AiDraftProfileResult {
-    draft: AiRuleProfileDraft,
-    validation: AiProfileValidation,
-    raw_json: String,
+pub(crate) struct AiDraftProfileResult {
+    pub(crate) draft: AiRuleProfileDraft,
+    pub(crate) validation: AiProfileValidation,
+    pub(crate) raw_json: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -5435,214 +5435,6 @@ fn render_ai_finding(ui: &mut egui::Ui, finding: &AiFinding) {
             }
         });
     }
-}
-
-fn render_ai_draft_summary_strip(
-    ui: &mut egui::Ui,
-    result: &AiDraftProfileResult,
-    show_review: &mut bool,
-    show_prompt: &mut bool,
-) {
-    settings_note_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            if result.validation.is_usable() {
-                render_status_chip(
-                    ui,
-                    "Draft loaded",
-                    ui::theme::colors::success(),
-                    ui::theme::colors::success_bg(),
-                );
-            } else {
-                render_status_chip(
-                    ui,
-                    "Validation failed",
-                    ui::theme::colors::error(),
-                    ui::theme::colors::error_bg(),
-                );
-            }
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} rule{}",
-                    result.draft.rules.len(),
-                    plural(result.draft.rules.len())
-                ),
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::elevated_surface(),
-            );
-            if !result.validation.warnings.is_empty() {
-                render_status_chip(
-                    ui,
-                    &format!(
-                        "{} warning{}",
-                        result.validation.warnings.len(),
-                        plural(result.validation.warnings.len())
-                    ),
-                    ui::theme::colors::warning(),
-                    ui::theme::colors::warning_bg(),
-                );
-            }
-            if !result.validation.errors.is_empty() {
-                render_status_chip(
-                    ui,
-                    &format!(
-                        "{} error{}",
-                        result.validation.errors.len(),
-                        plural(result.validation.errors.len())
-                    ),
-                    ui::theme::colors::error(),
-                    ui::theme::colors::error_bg(),
-                );
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Review draft"))
-                .clicked()
-            {
-                *show_review = true;
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Edit prompt"))
-                .clicked()
-            {
-                *show_prompt = true;
-            }
-        });
-        if let Some(rationale) = &result.draft.rationale {
-            ui.add_space(ui::theme::spacing::XS);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(elide_text(rationale, 150))
-                        .color(ui::theme::colors::secondary_text()),
-                )
-                .truncate(),
-            )
-            .on_hover_text(rationale);
-        }
-    });
-}
-
-fn render_ai_draft_review(
-    ui: &mut egui::Ui,
-    result: &AiDraftProfileResult,
-    edit_prompt_requested: &mut bool,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("AI draft review")
-                .strong()
-                .size(ui::theme::typography::SECTION_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        render_status_chip(
-            ui,
-            &format!(
-                "{} rule{}",
-                result.draft.rules.len(),
-                plural(result.draft.rules.len())
-            ),
-            ui::theme::colors::secondary_text(),
-            ui::theme::colors::elevated_surface(),
-        );
-        if !result.validation.warnings.is_empty() {
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} warning{}",
-                    result.validation.warnings.len(),
-                    plural(result.validation.warnings.len())
-                ),
-                ui::theme::colors::warning(),
-                ui::theme::colors::warning_bg(),
-            );
-        }
-        if ui
-            .add(ui::theme::widgets::compact_secondary_button("Edit prompt"))
-            .clicked()
-        {
-            *edit_prompt_requested = true;
-        }
-    });
-    ui.add_space(ui::theme::spacing::SM);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height((ui.available_height() - 8.0).max(260.0))
-        .show(ui, |ui| {
-            if let Some(rationale) = &result.draft.rationale {
-                ui.label(
-                    RichText::new("Rationale")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(rationale).color(ui::theme::colors::secondary_text()),
-                    )
-                    .wrap(),
-                );
-                ui.add_space(ui::theme::spacing::SM);
-            }
-
-            if !result.validation.warnings.is_empty() {
-                ui.label(
-                    RichText::new("Warnings")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for warning in &result.validation.warnings {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("- {warning}"))
-                                .color(ui::theme::colors::warning()),
-                        )
-                        .wrap(),
-                    );
-                }
-                ui.add_space(ui::theme::spacing::SM);
-            }
-
-            if !result.validation.errors.is_empty() {
-                ui.label(
-                    RichText::new("Errors")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for error in &result.validation.errors {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("- {error}")).color(ui::theme::colors::error()),
-                        )
-                        .wrap(),
-                    );
-                }
-                ui.add_space(ui::theme::spacing::SM);
-            }
-
-            egui::CollapsingHeader::new("Raw AI draft JSON")
-                .default_open(false)
-                .show(ui, |ui| {
-                    let mut raw = result.raw_json.clone();
-                    ui.add_sized(
-                        [ui.available_width(), 180.0],
-                        egui::TextEdit::multiline(&mut raw)
-                            .font(egui::TextStyle::Monospace)
-                            .interactive(false),
-                    );
-                });
-        });
-}
-
-fn elide_text(text: &str, max_chars: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-    let mut shortened = trimmed
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>();
-    shortened.push_str("...");
-    shortened
 }
 
 fn render_ai_rule_explanation(ui: &mut egui::Ui, explanation: &AiRuleExplanation) {

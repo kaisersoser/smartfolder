@@ -74,8 +74,8 @@ use ui::components::{
     screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
 };
 use ui::screens::activity::{
-    activity_count_summary, activity_date_label, activity_detail, activity_detail_headline,
-    activity_event_title, activity_status_colors, activity_time_label, render_activity_count_chips,
+    activity_detail_headline, activity_status_colors, render_activity_count_chips,
+    render_activity_scope_bar, render_current_folder_activity, render_recovery_log,
     render_restore_confirmation, render_restore_result,
 };
 use ui::screens::settings::{
@@ -4045,7 +4045,7 @@ fn comma_separated_values(value: &str) -> Vec<String> {
 }
 
 #[derive(Debug, Clone)]
-enum HistoryAction {
+pub(crate) enum HistoryAction {
     Refresh,
     ViewDetails(String),
     CloseDetails,
@@ -4391,12 +4391,12 @@ struct TransactionOperationRow {
 }
 
 #[derive(Debug, Clone)]
-struct UndoOutput {
-    transaction_id: String,
-    journal_path: PathBuf,
-    rolled_back: usize,
-    skipped: usize,
-    failed: usize,
+pub(crate) struct UndoOutput {
+    pub(crate) transaction_id: String,
+    pub(crate) journal_path: PathBuf,
+    pub(crate) rolled_back: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
 }
 
 fn analyze_root(
@@ -6302,37 +6302,6 @@ fn render_undo_progress(ui: &mut egui::Ui) {
     });
 }
 
-fn render_activity_scope_bar(
-    ui: &mut egui::Ui,
-    scope: &str,
-    status: &str,
-    action: &mut Option<HistoryAction>,
-) {
-    settings_note_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(scope)
-                    .strong()
-                    .size(ui::theme::typography::CARD_TITLE)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            render_status_chip(
-                ui,
-                status,
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::surface(),
-            );
-            if ui
-                .add(ui::theme::widgets::tertiary_button("Change folder"))
-                .clicked()
-            {
-                *action = Some(HistoryAction::ChangeFolder);
-            }
-        });
-    });
-}
-
 fn render_transaction_history(
     ui: &mut egui::Ui,
     rows: &[TransactionRow],
@@ -6418,303 +6387,6 @@ fn render_transaction_history(
     } else if let Some(message) = detail_message {
         render_transaction_detail_error_window(ui.ctx(), message, action);
     }
-}
-
-fn render_current_folder_activity(
-    ui: &mut egui::Ui,
-    rows: &[&TransactionRow],
-    hidden_count: usize,
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    if rows.is_empty() {
-        ui.add(
-            egui::Label::new(
-                RichText::new("No activity has been recorded for this folder yet.")
-                    .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-        if hidden_count > 0 {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "{} activit{} from other folders hidden.",
-                        hidden_count,
-                        plural_y(hidden_count)
-                    ))
-                    .color(ui::theme::colors::metadata_text()),
-                )
-                .wrap(),
-            );
-        }
-        return;
-    }
-
-    ui.label(
-        RichText::new("Latest activity")
-            .strong()
-            .size(ui::theme::typography::CARD_TITLE)
-            .color(ui::theme::colors::heading_text()),
-    );
-    render_activity_record_row(ui, rows[0], busy, true, action);
-
-    if rows.len() > 1 {
-        ui.add_space(ui::theme::spacing::MD);
-        let mut current_date = "";
-        for row in rows.iter().skip(1).take(8) {
-            let date = activity_date_label(row);
-            if date != current_date {
-                current_date = date;
-                ui.add_space(ui::theme::spacing::XS);
-                ui.label(
-                    RichText::new(date)
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-            }
-            render_activity_record_row(ui, row, busy, false, action);
-            ui.add_space(ui::theme::spacing::XS);
-        }
-    }
-
-    if hidden_count > 0 {
-        ui.add_space(ui::theme::spacing::SM);
-        ui.add(
-            egui::Label::new(
-                RichText::new(format!(
-                    "{} activit{} from other folders hidden from this overview.",
-                    hidden_count,
-                    plural_y(hidden_count)
-                ))
-                .color(ui::theme::colors::metadata_text()),
-            )
-            .wrap(),
-        );
-    }
-}
-
-fn render_activity_record_row(
-    ui: &mut egui::Ui,
-    row: &TransactionRow,
-    busy: bool,
-    featured: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    let can_restore = can_undo_status(row.status);
-    let row_fill = ui::theme::colors::elevated_surface();
-    egui::Frame::group(ui.style())
-        .fill(row_fill)
-        .stroke(egui::Stroke::new(
-            1.0,
-            if featured && can_restore {
-                ui::theme::colors::success()
-            } else {
-                ui::theme::colors::border()
-            },
-        ))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let actions_width = 220.0_f32.min(ui.available_width() * 0.34);
-            let time_width = 64.0;
-            let text_width = (ui.available_width()
-                - actions_width
-                - time_width
-                - (ui::theme::spacing::MD * 2.0))
-                .max(280.0);
-
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(time_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(
-                            RichText::new(activity_time_label(row))
-                                .monospace()
-                                .color(ui::theme::colors::metadata_text()),
-                        );
-                        if featured && can_restore {
-                            ui.label(
-                                RichText::new("Restore ready")
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::success()),
-                            );
-                        }
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    egui::vec2(text_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let (stroke, fill) = activity_status_colors(row.status);
-                            ui::theme::widgets::status_dot(ui, stroke);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(activity_event_title(row))
-                                        .strong()
-                                        .color(ui::theme::colors::heading_text()),
-                                )
-                                .wrap(),
-                            );
-                            render_status_chip(ui, status_label(row.status), stroke, fill);
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(activity_detail(row))
-                                    .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                        ui.add_space(ui::theme::spacing::XS);
-                        render_activity_count_chips(
-                            ui,
-                            row.completed,
-                            row.rolled_back,
-                            row.skipped + row.failed + row.pending,
-                        );
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!busy, ui::theme::widgets::secondary_button("Details"))
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
-                    }
-                    let can_undo = can_restore && !busy;
-                    if ui
-                        .add_enabled(can_undo, ui::theme::widgets::secondary_button("Restore"))
-                        .on_disabled_hover_text(
-                            "Only completed or failed activities can be restored",
-                        )
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ConfirmUndo(row.transaction_id.clone()));
-                    }
-                });
-            });
-        });
-}
-
-fn render_recovery_log(
-    ui: &mut egui::Ui,
-    rows: &[TransactionRow],
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("Restore history")
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.label(
-            RichText::new("Recent recovery journals")
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-        );
-    });
-    if rows.is_empty() {
-        ui.add(
-            egui::Label::new(
-                RichText::new("No restore history has been recorded yet.")
-                    .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-        return;
-    }
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height(420.0)
-        .show(ui, |ui| {
-            for row in rows.iter().take(10) {
-                render_recovery_log_row(ui, row, busy, action);
-                ui.add_space(ui::theme::spacing::XS);
-            }
-        });
-
-    if rows.len() > 10 {
-        ui.label(
-            RichText::new(format!("Showing 10 of {} recovery journals.", rows.len()))
-                .color(ui::theme::colors::metadata_text()),
-        );
-    }
-}
-
-fn render_recovery_log_row(
-    ui: &mut egui::Ui,
-    row: &TransactionRow,
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let available = ui.available_width();
-            let action_width = 132.0_f32.min(available * 0.28);
-            let content_width = (available - action_width - ui::theme::spacing::MD).max(200.0);
-
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(content_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(activity_event_title(row))
-                                        .strong()
-                                        .color(ui::theme::colors::heading_text()),
-                                )
-                                .wrap(),
-                            )
-                            .on_hover_text(format!("Activity id: {}", row.transaction_id));
-
-                            let (stroke, fill) = activity_status_colors(row.status);
-                            render_status_chip(ui, status_label(row.status), stroke, fill);
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(activity_count_summary(row))
-                                    .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!("Root: {}", row.root_label))
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::metadata_text()),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(row.root.display().to_string());
-                    },
-                );
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(action_width, 0.0),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        if ui
-                            .add_enabled(!busy, ui::theme::widgets::secondary_button("Details"))
-                            .clicked()
-                        {
-                            *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
-                        }
-                    },
-                );
-            });
-        });
 }
 
 fn render_transaction_detail_error_window(
@@ -9056,14 +8728,6 @@ fn sample_destination_template(template: &str) -> String {
     rendered
 }
 
-fn plural_y(value: usize) -> &'static str {
-    if value == 1 {
-        "y"
-    } else {
-        "ies"
-    }
-}
-
 fn status_label(status: TransactionStatus) -> &'static str {
     match status {
         TransactionStatus::InProgress => "in progress",
@@ -9129,8 +8793,11 @@ mod tests {
     };
     use smartfolder_core::rules::{CustomRule, RuleProfile};
 
-    use super::{
+    use crate::ui::screens::activity::{
         activity_count_summary, activity_date_label, activity_event_title, activity_time_label,
+    };
+
+    use super::{
         apply_destination_drop, build_destination_from_segments, can_undo_status,
         is_cloud_synced_path, operation_status_label, parse_destination_segments,
         preloaded_root_from_args, preview_rows, profile_file_stem, same_folder, status_label,

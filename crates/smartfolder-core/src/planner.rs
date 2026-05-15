@@ -951,7 +951,7 @@ extensions = ["pdf"]
         ));
         assert!(!operation.selected);
         assert!(plan.untouched_records.iter().any(|record| {
-            record.path == PathBuf::from("report.pdf")
+            record.path == std::path::Path::new("report.pdf")
                 && record.reason == UntouchedReason::DestinationConflict
         }));
     }

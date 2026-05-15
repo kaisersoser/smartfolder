@@ -1,12 +1,21 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$OutputRoot = (Join-Path $PSScriptRoot "..\dist"),
+    [string]$OutputRoot = "",
     [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
 
-$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$scriptRoot = if ($PSScriptRoot) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $PSCommandPath
+}
+if (-not $OutputRoot) {
+    $OutputRoot = Join-Path $scriptRoot "..\dist"
+}
+
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot ".."))
 $releaseDir = Join-Path $repoRoot "target\release"
 $guiExe = Join-Path $releaseDir "smartfolder-gui.exe"
 $cliExe = Join-Path $releaseDir "smartfolder.exe"

@@ -11,7 +11,7 @@ This document captures the strategic direction for `smartfolder` across release 
 | v1 MVP (CLI) | ✅ Released |
 | v2.0 UX rewrite (GUI-first) | ✅ Released |
 | v2.1 installer and distribution | ✅ Released |
-| v2.2 AI-assisted organization | 🧪 Implementation complete; Ollama E2E verification pending |
+| v2.2 AI-assisted organization | ✅ Released |
 | v2.3 CLI AI parity | 📋 Planned |
 | v2.x cross-platform tracks | 📋 Planned |
 
@@ -203,7 +203,7 @@ select or preload folder → analyze → preview → organize → undo → origi
 10. ✅ Add contextual AI actions to Organize and Rules/Profile workspace behind the availability gate.
 11. ✅ Add cancellation, timeout, one-shot JSON repair, and validation-error surfaces.
 12. ✅ Add tests for model selection, schema prompt coverage, safety validation, applicability warnings, content sampling, and no absolute-path leakage.
-13. 🧪 Run release verification:
+13. ✅ Run release verification:
    - AI unavailable behavior matches v2.1 except Settings.
    - Ollama available path works end to end.
    - Existing deterministic organize/undo tests still pass.

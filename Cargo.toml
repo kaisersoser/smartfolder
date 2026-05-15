@@ -12,7 +12,7 @@ edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/kaisersoser/smartfolder"
 rust-version = "1.80"
-version = "2.1.0"
+version = "2.2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

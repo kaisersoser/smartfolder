@@ -7,12 +7,37 @@ Version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased] — v2.2 development
+## [Unreleased]
 
 ### Planned
 
-- AI-assisted organization research remains opt-in and preview-first.
+- v2.25 UX refinement and trust pass for the desktop workflow.
 - Cross-platform GUI packaging research.
+
+---
+
+## [2.2.0] — 2026-05-16
+
+### Added
+
+- **Optional Ollama-backed AI assistance** in the GUI, gated behind provider readiness and explicit user enablement.
+- **AI-assisted folder analysis** with summary, detected patterns, risks, recommended deterministic strategy, confidence, and evidence examples.
+- **AI rule drafting workflow** for building deterministic custom profiles from prompts, including draft review and raw JSON inspection.
+- **AI prompt refinement** to rewrite user prompts before generating draft rule profiles.
+- **AI rule explanation** for existing deterministic profiles against the selected folder context.
+- **AI settings and diagnostics** including endpoint, model selection, timeout, content-inspection preference, connection testing, and diagnostic export.
+- **Bounded content sampling** for text-like files when content inspection is explicitly enabled.
+- **Validation and repair path** for AI drafts, including schema validation, safety checks, applicability warnings, and one-shot JSON repair.
+
+### Changed
+
+- AI-assisted flows remain advisory only and preserve the existing preview, confirmation, conflict, journal, and undo safety model.
+- Portable packaging script now resolves its default output path reliably when invoked directly in PowerShell.
+
+### Verified
+
+- Automated quality gates pass: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --release`.
+- Manual verification completed with AI enabled and disabled, including Ollama-backed end-to-end checks and deterministic organize/undo regression coverage.
 
 ---
 

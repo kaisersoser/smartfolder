@@ -458,7 +458,9 @@ impl SmartfolderApp {
             error_message: None,
             maintenance_message: preferences_message,
         };
-        app.startup_ai_status_check();
+        if Self::should_startup_ai_status_check(&app.preferences) {
+            app.start_ai_status_check(AiStatusCheckSource::Startup);
+        }
         app
     }
 
@@ -804,15 +806,16 @@ impl SmartfolderApp {
         }
     }
 
-    fn startup_ai_status_check(&mut self) {
+    fn should_startup_ai_status_check(preferences: &GuiPreferences) -> bool {
         #[cfg(test)]
         {
-            return;
+            let _ = preferences;
+            false
         }
 
         #[cfg(not(test))]
-        if self.preferences.ai.enabled {
-            self.start_ai_status_check(AiStatusCheckSource::Startup);
+        {
+            preferences.ai.enabled
         }
     }
 
@@ -7899,8 +7902,8 @@ fn active_profile_summary(
     mode: BuiltInMode,
     loaded_profile: Option<&LoadedRuleProfile>,
 ) -> (String, String, String, bool) {
-    match (planning_source, loaded_profile) {
-        (PlanningSource::RuleProfile, Some(profile)) => (
+    if let (PlanningSource::RuleProfile, Some(profile)) = (planning_source, loaded_profile) {
+        (
             profile.profile.profile_id.clone(),
             format!(
                 "{} rule{}",
@@ -7909,24 +7912,23 @@ fn active_profile_summary(
             ),
             profile_destination_example(&profile.profile),
             true,
-        ),
-        _ => {
-            let (_, title, pattern, _) = builtin_library_items()
-                .into_iter()
-                .find(|(candidate, _, _, _)| *candidate == mode)
-                .unwrap_or((
-                    BuiltInMode::TypeYear,
-                    "Type + Date",
-                    "{type}/{year}/{month}/{day}",
-                    "",
-                ));
-            (
-                title.to_string(),
-                "Read-only built-in".to_string(),
-                format!("Destination: {}", sample_destination_template(pattern)),
-                false,
-            )
-        }
+        )
+    } else {
+        let (_, title, pattern, _) = builtin_library_items()
+            .into_iter()
+            .find(|(candidate, _, _, _)| *candidate == mode)
+            .unwrap_or((
+                BuiltInMode::TypeYear,
+                "Type + Date",
+                "{type}/{year}/{month}/{day}",
+                "",
+            ));
+        (
+            title.to_string(),
+            "Read-only built-in".to_string(),
+            format!("Destination: {}", sample_destination_template(pattern)),
+            false,
+        )
     }
 }
 

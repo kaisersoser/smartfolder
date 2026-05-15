@@ -1,4 +1,5 @@
 /target/
+/dist/
 
 # Local/editor state
 .idea/

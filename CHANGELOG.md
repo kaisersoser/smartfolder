@@ -11,8 +11,33 @@ Version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Planned
 
-- v2.25 UX refinement and trust pass for the desktop workflow.
 - Cross-platform GUI packaging research.
+
+---
+
+## [2.25.0] - 2026-05-16
+
+The v2.25 release completes the desktop UX refinement and trust pass for the existing scan, preview, organize, restore, activity, rules, settings, and AI-assist workflow.
+
+### Added
+
+- Real untouched-file reason records in the core planner, SQLite session store, paged preview data, and GUI summary.
+- Preview tree mode and command palette actions for faster navigation through the organize workflow.
+- Richer preview explanations for ready, review, and untouched rows.
+- Refined rule workspace surfaces, including visual destination building, profile simulation, AI draft review, and AI rule-builder presentation.
+
+### Changed
+
+- Organize, Preview, Completion, Activity, Rules, Rule Builder, and Settings now share the v2.25 design foundation.
+- User-facing undo copy is consistently presented as restore-oriented language.
+- Completion and activity technical details are collapsed by default.
+- GUI rendering code is split into screen modules for activity, organize, preview, rules, and settings.
+
+### Verified
+
+- Automated quality gates pass: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build -p smartfolder-gui --release`.
+- Disposable-folder proof passed: analyze -> apply -> undo restored files to original locations.
+- Human GUI click-through passed for the v2.25 workflow.
 
 ---
 

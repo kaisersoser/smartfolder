@@ -69,9 +69,9 @@ use smartfolder_core::storage::ensure_profiles_dir;
 
 use preferences::{GuiPreferences, StylePreference};
 use ui::components::{
-    constrained_page as render_constrained_page, note_frame as settings_note_frame,
-    panel_frame as settings_panel_frame, safety_line as render_safety_line,
-    screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
+    constrained_page as render_constrained_page, panel_frame as settings_panel_frame,
+    safety_line as render_safety_line, screen_heading as render_screen_heading,
+    status_chip as render_status_chip, truncated_label,
 };
 use ui::screens::activity::{
     render_activity_detail_error_window, render_activity_detail_window, render_activity_scope_bar,
@@ -1008,7 +1008,7 @@ impl SmartfolderApp {
 
     fn start_ai_folder_analysis(&mut self) {
         let Some(result) = &self.analysis_result else {
-            self.error_message = Some("Run Analyze Folder before using AI Assist.".to_string());
+            self.error_message = Some("Run Analyze Folder before using AI insights.".to_string());
             return;
         };
         let model = match self.ai_model_for_task() {
@@ -1816,6 +1816,10 @@ impl SmartfolderApp {
         }
 
         if let Some(message) = &self.maintenance_message {
+            if self.active_section != AppSection::Settings && is_ai_provider_status_message(message)
+            {
+                return;
+            }
             ui.add_space(6.0);
             ui.colored_label(ui::theme::colors::success(), message);
         }
@@ -2543,7 +2547,7 @@ impl SmartfolderApp {
 
         let mut open = true;
         let mut draft_rules_requested = false;
-        egui::Window::new("AI notes")
+        egui::Window::new("AI insights")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -4857,107 +4861,114 @@ fn render_ai_assist_strip(
     let aligned_width = preview_aligned_content_width(ui);
     ui.scope(|ui| {
         ui.set_max_width(aligned_width);
-        settings_note_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if active_task == Some(AiTaskKind::FolderAnalysis) && busy {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new("AI Assist")
-                            .strong()
-                            .color(ui::theme::colors::heading_text()),
-                    );
-                    ui.label(
-                        RichText::new("Reviewing scanned folder context...")
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Cancel"))
-                        .clicked()
-                    {
-                        action = Some(AiPreviewAction::Cancel);
-                    }
-                });
-                return;
-            }
+        egui::Frame::group(ui.style())
+            .fill(ui::theme::colors::surface())
+            .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if active_task == Some(AiTaskKind::FolderAnalysis) && busy {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("AI insights")
+                                .strong()
+                                .color(ui::theme::colors::heading_text()),
+                        );
+                        ui.label(
+                            RichText::new("Reviewing the scanned folder context...")
+                                .color(ui::theme::colors::secondary_text()),
+                        );
+                        if ui
+                            .add(ui::theme::widgets::compact_secondary_button("Cancel"))
+                            .clicked()
+                        {
+                            action = Some(AiPreviewAction::Cancel);
+                        }
+                    });
+                    return;
+                }
 
-            ui.horizontal_wrapped(|ui| {
                 if let Some(analysis) = analysis {
-                    ui.label(
-                        RichText::new("AI reviewed this folder")
-                            .strong()
-                            .color(ui::theme::colors::heading_text()),
-                    );
-                    render_status_chip(
-                        ui,
-                        ai_confidence_label(analysis.confidence),
-                        ui::theme::colors::info(),
-                        ui::theme::colors::info_bg(),
-                    );
-                    render_status_chip(
-                        ui,
-                        &format!(
-                            "{} pattern{}",
-                            analysis.patterns.len(),
-                            plural(analysis.patterns.len())
-                        ),
-                        ui::theme::colors::success(),
-                        ui::theme::colors::success_bg(),
-                    );
-                    render_status_chip(
-                        ui,
-                        &format!(
-                            "{} risk{}",
-                            analysis.risks.len(),
-                            plural(analysis.risks.len())
-                        ),
-                        ui::theme::colors::warning(),
-                        ui::theme::colors::warning_bg(),
-                    );
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button(
-                            "View AI notes",
-                        ))
-                        .clicked()
-                    {
-                        action = Some(AiPreviewAction::ViewNotes);
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button(
-                            "Create draft rules",
-                        ))
-                        .clicked()
-                    {
-                        action = Some(AiPreviewAction::DraftRules);
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("AI insights ready")
+                                .strong()
+                                .color(ui::theme::colors::heading_text()),
+                        );
+                        render_status_chip(
+                            ui,
+                            ai_confidence_label(analysis.confidence),
+                            ui::theme::colors::info(),
+                            ui::theme::colors::info_bg(),
+                        );
+                        render_status_chip(
+                            ui,
+                            &format!(
+                                "{} pattern{}",
+                                analysis.patterns.len(),
+                                plural(analysis.patterns.len())
+                            ),
+                            ui::theme::colors::success(),
+                            ui::theme::colors::success_bg(),
+                        );
+                        render_status_chip(
+                            ui,
+                            &format!(
+                                "{} risk{}",
+                                analysis.risks.len(),
+                                plural(analysis.risks.len())
+                            ),
+                            ui::theme::colors::warning(),
+                            ui::theme::colors::warning_bg(),
+                        );
+                        if ui
+                            .add(ui::theme::widgets::compact_secondary_button(
+                                "View insights",
+                            ))
+                            .clicked()
+                        {
+                            action = Some(AiPreviewAction::ViewNotes);
+                        }
+                        if ui
+                            .add(ui::theme::widgets::compact_secondary_button(
+                                "Create draft rules",
+                            ))
+                            .clicked()
+                        {
+                            action = Some(AiPreviewAction::DraftRules);
+                        }
+                    });
                 } else {
-                    ui.label(
-                        RichText::new("AI Assist")
-                            .strong()
-                            .color(ui::theme::colors::heading_text()),
-                    );
-                    render_ai_mode_chip(ui, content_inspection_enabled);
-                    ui.label(
-                        RichText::new(
-                            "Optional context review. Rules preview remains authoritative.",
-                        )
-                        .color(ui::theme::colors::secondary_text()),
-                    );
-                    if ui
-                        .add_enabled(
-                            !busy,
-                            ui::theme::widgets::compact_secondary_button(if untouched_count > 0 {
-                                "Explain untouched files"
-                            } else {
-                                "Analyze with AI"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        action = Some(AiPreviewAction::Analyze);
-                    }
+                    ui.vertical(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("AI insights")
+                                    .strong()
+                                    .color(ui::theme::colors::heading_text()),
+                            );
+                            render_ai_mode_chip(ui, content_inspection_enabled);
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    ui::theme::widgets::compact_secondary_button(
+                                        "Analyze folder with AI",
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                action = Some(AiPreviewAction::Analyze);
+                            }
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(ai_preview_context_copy(untouched_count))
+                                    .color(ui::theme::colors::secondary_text()),
+                            )
+                            .wrap(),
+                        );
+                    });
                 }
             });
-        });
     });
     action
 }
@@ -4966,21 +4977,26 @@ fn render_ai_mode_chip(ui: &mut egui::Ui, content_inspection_enabled: bool) {
     render_status_chip(
         ui,
         if content_inspection_enabled {
-            "Content inspection on"
+            "Content-aware"
         } else {
             "Metadata only"
         },
-        if content_inspection_enabled {
-            ui::theme::colors::warning()
-        } else {
-            ui::theme::colors::info()
-        },
-        if content_inspection_enabled {
-            ui::theme::colors::warning_bg()
-        } else {
-            ui::theme::colors::info_bg()
-        },
+        ui::theme::colors::info(),
+        ui::theme::colors::info_bg(),
     );
+}
+
+fn ai_preview_context_copy(untouched_count: usize) -> String {
+    let base =
+        "Optional folder-wide review of scanned items. The deterministic preview remains authoritative.";
+    if untouched_count == 0 {
+        base.to_string()
+    } else {
+        format!(
+            "{base} It can also explain why {untouched_count} item{} did not match a rule.",
+            plural(untouched_count)
+        )
+    }
 }
 
 fn render_ai_notes_content(
@@ -4990,7 +5006,7 @@ fn render_ai_notes_content(
 ) {
     ui.horizontal_wrapped(|ui| {
         ui.label(
-            RichText::new("AI notes")
+            RichText::new("AI insights")
                 .strong()
                 .size(ui::theme::typography::SECTION_TITLE)
                 .color(ui::theme::colors::heading_text()),
@@ -5671,6 +5687,14 @@ pub(crate) fn is_cloud_synced_path(path: &Path) -> bool {
             || value.contains("google drive")
             || value.contains("icloud")
     })
+}
+
+fn is_ai_provider_status_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("ollama")
+        || message.contains("ai assistance")
+        || message.contains("ai status")
+        || message.contains("model")
 }
 
 fn plural(value: usize) -> &'static str {

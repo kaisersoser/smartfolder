@@ -23,3 +23,4 @@ This folder captures the project-level design and implementation planning histor
 - v1 MVP: implemented and published
 - v2.0 UX rewrite: released
 - v2.1: released installer and distribution track
+- v2.25 UX refinement and trust pass: released

@@ -50,8 +50,8 @@ use smartfolder_core::apply::{
     apply_stored_plan_with_progress, ApplyOptions, ApplySummary, StoredApplyProgress,
 };
 use smartfolder_core::model::{
-    BuiltInMode, ConflictState, FileInventoryRecord, OperationStatus, PlanMode, PlanOperation,
-    PlanSummary, TransactionStatus, UntouchedReason, UntouchedRecord,
+    BuiltInMode, FileInventoryRecord, OperationStatus, PlanMode, PlanSummary, TransactionStatus,
+    UntouchedReason,
 };
 use smartfolder_core::planner::{
     generate_plan_to_store_with_progress_and_cancellation, PlanGenerationProgress, PlanOptions,
@@ -72,6 +72,27 @@ use ui::components::{
     constrained_page as render_constrained_page, note_frame as settings_note_frame,
     panel_frame as settings_panel_frame, safety_line as render_safety_line,
     screen_heading as render_screen_heading, status_chip as render_status_chip, truncated_label,
+};
+use ui::screens::activity::{
+    render_activity_detail_error_window, render_activity_detail_window, render_activity_scope_bar,
+    render_current_folder_activity, render_recovery_log, render_restore_confirmation,
+    render_restore_result,
+};
+use ui::screens::organize::{
+    organize_files_label, render_analysis_progress, render_apply_confirmation, render_apply_entry,
+    render_apply_progress, render_apply_result, render_plan_summary,
+};
+use ui::screens::preview::{
+    preview_aligned_content_width, preview_rows, render_preview_controls, render_preview_detail,
+    render_preview_examples, render_preview_rows, render_preview_table_header, render_preview_tree,
+    untouched_preview_rows,
+};
+use ui::screens::rules::{
+    builtin_library_items, render_active_profile_panel, render_ai_draft_review,
+    render_ai_draft_summary_strip, render_ai_rule_builder_panel, render_builtin_rule_row,
+    render_profile_editor, render_profile_workspace_toolbar, render_profile_workspace_window,
+    render_rules_ai_panel, render_saved_profile_row, AiRuleBuilderAction, BuiltinRuleAction,
+    ProfileWorkspaceAction, SavedProfileAction,
 };
 use ui::screens::settings::{
     render_advanced_ai_preferences, render_ai_preferences, render_appearance_preferences,
@@ -94,8 +115,8 @@ const SHELL_NAV_COLLAPSED_WIDTH: f32 = ui::theme::spacing::SIDEBAR_COLLAPSED_WID
 const CARD_MIN_WIDTH: f32 = 188.0;
 const PREVIEW_EXAMPLE_LIMIT: usize = 3;
 const INSTRUCTION_PANEL_HEIGHT: f32 = 216.0;
-const PROFILE_WORKSPACE_FIELD_HEIGHT: f32 = 32.0;
-const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
+pub(crate) const PROFILE_WORKSPACE_FIELD_HEIGHT: f32 = 32.0;
+pub(crate) const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
 const MAX_AI_OPERATION_RECORDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1603,7 +1624,7 @@ impl SmartfolderApp {
             Err(TryRecvError::Disconnected) => {
                 self.undo_receiver = None;
                 self.error_message =
-                    Some("The background undo worker stopped unexpectedly.".to_string());
+                    Some("The background restore worker stopped unexpectedly.".to_string());
             }
         }
     }
@@ -2847,68 +2868,60 @@ impl SmartfolderApp {
             });
     }
 
-    fn render_profile_editor(&mut self, ui: &mut egui::Ui) {
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(PROFILE_RULE_LIST_WIDTH, 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    render_rule_list_panel(ui, &mut self.profile_editor);
-                },
-            );
-
-            ui.separator();
-
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 0.0),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    let rule_simulation = self.rule_simulation.clone();
-                    if let Some(rule) = self.profile_editor.selected_rule_mut() {
-                        render_rule_detail_editor(ui, rule, rule_simulation.as_ref());
-                    }
-                },
-            );
-        });
-    }
-
     fn render_rules_workspace_window(&mut self, ctx: &egui::Context) {
         if !self.show_rules_workspace {
             return;
         }
 
-        let mut open = true;
-        egui::Window::new("Profile workspace")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(980.0)
-            .default_height(680.0)
-            .min_width(760.0)
-            .min_height(520.0)
-            .show(ctx, |ui| {
-                self.render_profile_workspace_toolbar(ui);
-                if self.show_ai_draft_prompt && self.ai_is_available() {
-                    ui.add_space(ui::theme::spacing::SM);
-                    self.render_ai_rule_builder_panel(ui);
-                }
-                if let Some(result) = self.ai_draft_result.clone() {
-                    ui.add_space(ui::theme::spacing::SM);
-                    render_ai_draft_summary_strip(
-                        ui,
-                        &result,
-                        &mut self.show_ai_draft_review,
-                        &mut self.show_ai_draft_prompt,
-                    );
-                }
-
+        let open = render_profile_workspace_window(ctx, |ui| {
+            let ai_available = self.ai_is_available();
+            let running_ai_task = self.is_running_ai_task();
+            let toolbar_action = render_profile_workspace_toolbar(
+                ui,
+                &mut self.profile_editor,
+                self.loaded_profile.as_ref(),
+                self.analysis_result.is_some(),
+                ai_available,
+                running_ai_task,
+            );
+            if let Some(action) = toolbar_action {
+                self.handle_profile_workspace_action(action);
+            }
+            if self.show_ai_draft_prompt && self.ai_is_available() {
                 ui.add_space(ui::theme::spacing::SM);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        self.render_profile_editor(ui);
-                    });
-            });
+                let running_ai_task = self.is_running_ai_task();
+                let drafting_profile = self.ai_task == Some(AiTaskKind::DraftProfile);
+                let refining_prompt = self.ai_task == Some(AiTaskKind::PromptRefinement);
+                let action = render_ai_rule_builder_panel(
+                    ui,
+                    &mut self.ai_draft_prompt,
+                    running_ai_task,
+                    drafting_profile,
+                    refining_prompt,
+                    self.ai_rule_explanation.as_ref(),
+                );
+                if let Some(action) = action {
+                    self.handle_ai_rule_builder_action(action);
+                }
+            }
+            if let Some(result) = self.ai_draft_result.clone() {
+                ui.add_space(ui::theme::spacing::SM);
+                render_ai_draft_summary_strip(
+                    ui,
+                    &result,
+                    &mut self.show_ai_draft_review,
+                    &mut self.show_ai_draft_prompt,
+                );
+            }
+
+            ui.add_space(ui::theme::spacing::SM);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let rule_simulation = self.rule_simulation.clone();
+                    render_profile_editor(ui, &mut self.profile_editor, rule_simulation.as_ref());
+                });
+        });
 
         if !open {
             self.show_rules_workspace = false;
@@ -2916,217 +2929,42 @@ impl SmartfolderApp {
         self.render_ai_draft_review_window(ctx);
     }
 
-    fn render_profile_workspace_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(&self.profile_editor.profile_id)
-                    .strong()
-                    .size(ui::theme::typography::SECTION_TITLE)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} rule{}",
-                    self.profile_editor.rules.len(),
-                    plural(self.profile_editor.rules.len())
-                ),
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::subtle_surface(),
-            );
-            render_profile_workspace_status(ui, self.loaded_profile.as_ref());
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(ui::theme::widgets::compact_primary_button("Save"))
-                .clicked()
-            {
-                self.save_profile_from_editor();
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Use"))
-                .clicked()
-            {
+    fn handle_profile_workspace_action(&mut self, action: ProfileWorkspaceAction) {
+        match action {
+            ProfileWorkspaceAction::Save => self.save_profile_from_editor(),
+            ProfileWorkspaceAction::Use => {
                 self.select_custom_rules_style();
                 self.active_section = AppSection::Organize;
                 self.show_rules_workspace = false;
             }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Validate"))
-                .clicked()
-            {
-                self.validate_profile_editor();
+            ProfileWorkspaceAction::Validate => self.validate_profile_editor(),
+            ProfileWorkspaceAction::Simulate => self.simulate_selected_rule(),
+            ProfileWorkspaceAction::ToggleAiDraftPrompt => {
+                self.show_ai_draft_prompt = !self.show_ai_draft_prompt;
             }
-            if ui
-                .add_enabled(
-                    self.analysis_result.is_some(),
-                    ui::theme::widgets::compact_secondary_button("Simulate"),
-                )
-                .on_disabled_hover_text("Run Preview before simulating this rule")
-                .clicked()
-            {
-                self.simulate_selected_rule();
+            ProfileWorkspaceAction::ExplainWithAi => {
+                self.show_ai_draft_prompt = true;
+                self.start_ai_rule_explanation();
             }
-            if self.ai_is_available() {
-                if ui
-                    .add(ui::theme::widgets::compact_secondary_button(
-                        "Build with AI",
-                    ))
-                    .clicked()
-                {
-                    self.show_ai_draft_prompt = !self.show_ai_draft_prompt;
-                }
-                if ui
-                    .add_enabled(
-                        !self.is_running_ai_task(),
-                        ui::theme::widgets::compact_secondary_button("Explain"),
-                    )
-                    .clicked()
-                {
-                    self.show_ai_draft_prompt = true;
-                    self.start_ai_rule_explanation();
-                }
+            ProfileWorkspaceAction::NewDraft => {
+                self.profile_editor = ProfileEditorState::default();
+                self.loaded_profile = None;
+                self.planning_source = PlanningSource::BuiltIn;
+                self.maintenance_message = Some("Started a new unsaved profile draft.".to_string());
+                self.error_message = None;
             }
-        });
-        egui::CollapsingHeader::new("Advanced")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        RichText::new("Profile id")
-                            .size(ui::theme::typography::CAPTION)
-                            .color(ui::theme::colors::metadata_text()),
-                    );
-                    ui.add_sized(
-                        [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                        egui::TextEdit::singleline(&mut self.profile_editor.profile_id),
-                    );
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("New draft"))
-                        .clicked()
-                    {
-                        self.profile_editor = ProfileEditorState::default();
-                        self.loaded_profile = None;
-                        self.planning_source = PlanningSource::BuiltIn;
-                        self.maintenance_message =
-                            Some("Started a new unsaved profile draft.".to_string());
-                        self.error_message = None;
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Import TOML"))
-                        .clicked()
-                    {
-                        self.import_rule_profile();
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Export TOML"))
-                        .clicked()
-                    {
-                        self.export_profile_from_editor();
-                    }
-                });
-            });
+            ProfileWorkspaceAction::ImportToml => self.import_rule_profile(),
+            ProfileWorkspaceAction::ExportToml => self.export_profile_from_editor(),
+        }
     }
 
-    fn render_ai_rule_builder_panel(&mut self, ui: &mut egui::Ui) {
-        settings_note_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Build rules with AI")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                render_status_chip(
-                    ui,
-                    "Requires scanned folder context",
-                    ui::theme::colors::info(),
-                    ui::theme::colors::info_bg(),
-                );
-            });
-            ui.add(
-                egui::Label::new(
-                    RichText::new(
-                        "Describe the organization you want. AI drafts deterministic rules, then smartfolder validates them before loading the editor.",
-                    )
-                    .color(ui::theme::colors::secondary_text()),
-                )
-                .wrap(),
-            );
-            ui.add_space(ui::theme::spacing::SM);
-            ui.horizontal(|ui| {
-                let refine_button_size = egui::vec2(42.0, 72.0);
-                let prompt_width = (ui.available_width()
-                    - refine_button_size.x
-                    - ui.spacing().item_spacing.x)
-                    .max(260.0);
-                ui.add_sized(
-                    [prompt_width, 72.0],
-                    egui::TextEdit::multiline(&mut self.ai_draft_prompt)
-                        .hint_text("e.g. Sort invoices into Documents/Invoices by year, and keep screenshots by month."),
-                );
-                let response = ui.add_enabled(
-                    !self.is_running_ai_task() && !self.ai_draft_prompt.trim().is_empty(),
-                    egui::Button::new(
-                        RichText::new(ui::icons::AI_REFINE)
-                            .size(20.0)
-                            .color(ui::theme::colors::primary_text()),
-                    )
-                    .fill(ui::theme::colors::soft_control())
-                    .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-                    .min_size(refine_button_size),
-                );
-                if response
-                    .on_hover_text("Refine this prompt with AI")
-                    .clicked()
-                {
-                    self.start_ai_prompt_refinement();
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        !self.is_running_ai_task(),
-                        ui::theme::widgets::primary_button("Draft profile"),
-                    )
-                    .clicked()
-                {
-                    self.start_ai_draft_profile();
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Hide"))
-                    .clicked()
-                {
-                    self.show_ai_draft_prompt = false;
-                }
-                if self.is_running_ai_task()
-                    && ui
-                        .add(ui::theme::widgets::secondary_button("Cancel AI"))
-                        .clicked()
-                {
-                    self.cancel_ai_task();
-                }
-                if self.ai_task == Some(AiTaskKind::DraftProfile) && self.is_running_ai_task() {
-                    ui.label(
-                        RichText::new("AI is drafting and validating rules.")
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                }
-                if self.ai_task == Some(AiTaskKind::PromptRefinement) && self.is_running_ai_task()
-                {
-                    ui.label(
-                        RichText::new("AI is refining the prompt.")
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                }
-            });
-
-            if let Some(explanation) = &self.ai_rule_explanation {
-                ui.add_space(ui::theme::spacing::SM);
-                render_ai_rule_explanation(ui, explanation);
-            }
-        });
+    fn handle_ai_rule_builder_action(&mut self, action: AiRuleBuilderAction) {
+        match action {
+            AiRuleBuilderAction::RefinePrompt => self.start_ai_prompt_refinement(),
+            AiRuleBuilderAction::DraftProfile => self.start_ai_draft_profile(),
+            AiRuleBuilderAction::Hide => self.show_ai_draft_prompt = false,
+            AiRuleBuilderAction::Cancel => self.cancel_ai_task(),
+        }
     }
 
     fn render_ai_draft_review_window(&mut self, ctx: &egui::Context) {
@@ -3538,7 +3376,7 @@ impl eframe::App for SmartfolderApp {
         if let Some(transaction_id) = self.show_undo_confirmation.clone() {
             let mut confirmed = false;
             let mut dismissed = false;
-            render_undo_confirmation(ctx, &transaction_id, &mut confirmed, &mut dismissed);
+            render_restore_confirmation(ctx, &transaction_id, &mut confirmed, &mut dismissed);
             if confirmed {
                 self.start_undo(transaction_id);
             } else if dismissed {
@@ -3599,7 +3437,7 @@ impl CommandPaletteItem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreviewFilter {
+pub(crate) enum PreviewFilter {
     All,
     Ready,
     Untouched,
@@ -3607,7 +3445,7 @@ enum PreviewFilter {
 }
 
 impl PreviewFilter {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::Ready => "Ready",
@@ -3624,7 +3462,7 @@ impl PreviewFilter {
         }
     }
 
-    fn count(self, counts: &PreviewCounts) -> usize {
+    pub(crate) fn count(self, counts: &PreviewCounts) -> usize {
         match self {
             Self::All => counts.all,
             Self::Ready => counts.ready,
@@ -3635,14 +3473,14 @@ impl PreviewFilter {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum PreviewAction {
+pub(crate) enum PreviewAction {
     Filter(PreviewFilter),
     Previous,
     Next,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlanningSource {
+pub(crate) enum PlanningSource {
     BuiltIn,
     RuleProfile,
 }
@@ -3678,9 +3516,9 @@ impl AnalysisPlanSource {
 }
 
 #[derive(Debug, Clone)]
-struct LoadedRuleProfile {
-    path: PathBuf,
-    profile: RuleProfile,
+pub(crate) struct LoadedRuleProfile {
+    pub(crate) path: PathBuf,
+    pub(crate) profile: RuleProfile,
 }
 
 impl LoadedRuleProfile {
@@ -3789,26 +3627,26 @@ fn profile_file_stem(profile_id: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
-struct ProfileEditorState {
-    profile_id: String,
-    rules: Vec<RuleEditorState>,
-    selected_rule: usize,
+pub(crate) struct ProfileEditorState {
+    pub(crate) profile_id: String,
+    pub(crate) rules: Vec<RuleEditorState>,
+    pub(crate) selected_rule: usize,
 }
 
 #[derive(Debug, Clone)]
-struct RuleEditorState {
-    rule_name: String,
-    destination: String,
-    destination_text_mode: bool,
-    new_destination_segment: String,
-    priority: String,
-    match_all: bool,
-    extensions: String,
-    filename_contains: String,
-    path_contains: String,
-    min_size_bytes: String,
-    max_size_bytes: String,
-    year: String,
+pub(crate) struct RuleEditorState {
+    pub(crate) rule_name: String,
+    pub(crate) destination: String,
+    pub(crate) destination_text_mode: bool,
+    pub(crate) new_destination_segment: String,
+    pub(crate) priority: String,
+    pub(crate) match_all: bool,
+    pub(crate) extensions: String,
+    pub(crate) filename_contains: String,
+    pub(crate) path_contains: String,
+    pub(crate) min_size_bytes: String,
+    pub(crate) max_size_bytes: String,
+    pub(crate) year: String,
 }
 
 impl Default for ProfileEditorState {
@@ -3879,7 +3717,7 @@ impl ProfileEditorState {
         }
     }
 
-    fn selected_rule_index(&self) -> usize {
+    pub(crate) fn selected_rule_index(&self) -> usize {
         self.selected_rule.min(self.rules.len().saturating_sub(1))
     }
 
@@ -3892,7 +3730,7 @@ impl ProfileEditorState {
         self.rules.get_mut(index)
     }
 
-    fn add_rule(&mut self) {
+    pub(crate) fn add_rule(&mut self) {
         self.rules.push(RuleEditorState {
             rule_name: format!("Rule {}", self.rules.len() + 1),
             destination: "Other".to_string(),
@@ -3905,7 +3743,7 @@ impl ProfileEditorState {
         self.selected_rule = self.rules.len().saturating_sub(1);
     }
 
-    fn duplicate_selected_rule(&mut self) {
+    pub(crate) fn duplicate_selected_rule(&mut self) {
         let index = self.selected_rule_index();
         if let Some(rule) = self.rules.get(index).cloned() {
             let mut duplicate = rule;
@@ -3915,7 +3753,7 @@ impl ProfileEditorState {
         }
     }
 
-    fn delete_selected_rule(&mut self) {
+    pub(crate) fn delete_selected_rule(&mut self) {
         if self.rules.len() <= 1 {
             return;
         }
@@ -3924,7 +3762,7 @@ impl ProfileEditorState {
         self.selected_rule = index.min(self.rules.len().saturating_sub(1));
     }
 
-    fn move_selected_rule(&mut self, direction: isize) {
+    pub(crate) fn move_selected_rule(&mut self, direction: isize) {
         let index = self.selected_rule_index();
         let next_index = if direction < 0 {
             index.saturating_sub(1)
@@ -4040,7 +3878,7 @@ fn comma_separated_values(value: &str) -> Vec<String> {
 }
 
 #[derive(Debug, Clone)]
-enum HistoryAction {
+pub(crate) enum HistoryAction {
     Refresh,
     ViewDetails(String),
     CloseDetails,
@@ -4051,21 +3889,21 @@ enum HistoryAction {
 }
 
 #[derive(Debug, Clone)]
-struct AnalysisProgress {
-    headline: String,
-    detail: String,
-    fraction: Option<f32>,
-    entries_seen: usize,
-    records_collected: usize,
-    folders_scanned: usize,
-    entries_skipped: usize,
-    warnings: usize,
-    plan_processed: usize,
-    plan_total: usize,
-    moves_proposed: usize,
-    ambiguous_files: usize,
-    conflicts: usize,
-    skipped: usize,
+pub(crate) struct AnalysisProgress {
+    pub(crate) headline: String,
+    pub(crate) detail: String,
+    pub(crate) fraction: Option<f32>,
+    pub(crate) entries_seen: usize,
+    pub(crate) records_collected: usize,
+    pub(crate) folders_scanned: usize,
+    pub(crate) entries_skipped: usize,
+    pub(crate) warnings: usize,
+    pub(crate) plan_processed: usize,
+    pub(crate) plan_total: usize,
+    pub(crate) moves_proposed: usize,
+    pub(crate) ambiguous_files: usize,
+    pub(crate) conflicts: usize,
+    pub(crate) skipped: usize,
 }
 
 impl AnalysisProgress {
@@ -4179,17 +4017,17 @@ impl AnalysisProgress {
 }
 
 #[derive(Debug, Clone)]
-struct AnalysisOutput {
-    session_id: String,
-    plan_id: String,
-    root: PathBuf,
-    summary: PlanSummary,
-    warning_messages: Vec<String>,
-    preview_counts: PreviewCounts,
-    untouched_reason_counts: BTreeMap<UntouchedReason, usize>,
-    preview_examples: Vec<PreviewRow>,
-    preview_total_rows: usize,
-    preview_rows: Vec<PreviewRow>,
+pub(crate) struct AnalysisOutput {
+    pub(crate) session_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) root: PathBuf,
+    pub(crate) summary: PlanSummary,
+    pub(crate) warning_messages: Vec<String>,
+    pub(crate) preview_counts: PreviewCounts,
+    pub(crate) untouched_reason_counts: BTreeMap<UntouchedReason, usize>,
+    pub(crate) preview_examples: Vec<PreviewRow>,
+    pub(crate) preview_total_rows: usize,
+    pub(crate) preview_rows: Vec<PreviewRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4228,10 +4066,10 @@ enum AiPreviewAction {
 }
 
 #[derive(Debug, Clone)]
-struct AiDraftProfileResult {
-    draft: AiRuleProfileDraft,
-    validation: AiProfileValidation,
-    raw_json: String,
+pub(crate) struct AiDraftProfileResult {
+    pub(crate) draft: AiRuleProfileDraft,
+    pub(crate) validation: AiProfileValidation,
+    pub(crate) raw_json: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4248,11 +4086,11 @@ struct AiOperationRecord {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct PreviewCounts {
-    all: usize,
-    ready: usize,
-    needs_attention: usize,
-    untouched: usize,
+pub(crate) struct PreviewCounts {
+    pub(crate) all: usize,
+    pub(crate) ready: usize,
+    pub(crate) needs_attention: usize,
+    pub(crate) untouched: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -4262,33 +4100,33 @@ struct PreviewPage {
 }
 
 #[derive(Debug, Clone)]
-struct PreviewRow {
-    file_name: String,
-    original_folder: String,
-    target_folder: String,
-    source_full_path: String,
-    destination_full_path: Option<String>,
-    reason: String,
-    status: String,
+pub(crate) struct PreviewRow {
+    pub(crate) file_name: String,
+    pub(crate) original_folder: String,
+    pub(crate) target_folder: String,
+    pub(crate) source_full_path: String,
+    pub(crate) destination_full_path: Option<String>,
+    pub(crate) reason: String,
+    pub(crate) status: String,
 }
 
 #[derive(Debug, Clone)]
-struct RuleSimulationResult {
-    rule_name: String,
-    matched_files: usize,
-    total_files: usize,
-    sample_matches: Vec<String>,
+pub(crate) struct RuleSimulationResult {
+    pub(crate) rule_name: String,
+    pub(crate) matched_files: usize,
+    pub(crate) total_files: usize,
+    pub(crate) sample_matches: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ApplyProgress {
-    headline: String,
-    detail: String,
-    processed: usize,
-    total: usize,
-    completed: usize,
-    skipped: usize,
-    failed: usize,
+pub(crate) struct ApplyProgress {
+    pub(crate) headline: String,
+    pub(crate) detail: String,
+    pub(crate) processed: usize,
+    pub(crate) total: usize,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
 }
 
 impl ApplyProgress {
@@ -4322,51 +4160,51 @@ impl ApplyProgress {
 }
 
 #[derive(Debug, Clone)]
-struct ApplyOutput {
-    transaction_id: String,
-    journal_path: PathBuf,
-    completed: usize,
-    skipped: usize,
-    failed: usize,
+pub(crate) struct ApplyOutput {
+    pub(crate) transaction_id: String,
+    pub(crate) journal_path: PathBuf,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
 }
 
 #[derive(Debug, Clone)]
-struct TransactionRow {
-    transaction_id: String,
-    root: PathBuf,
-    root_label: String,
-    status: TransactionStatus,
-    started_at: String,
-    reason_summary: String,
-    completed: usize,
-    skipped: usize,
-    failed: usize,
-    rolled_back: usize,
-    pending: usize,
-    total_operations: usize,
+pub(crate) struct TransactionRow {
+    pub(crate) transaction_id: String,
+    pub(crate) root: PathBuf,
+    pub(crate) root_label: String,
+    pub(crate) status: TransactionStatus,
+    pub(crate) started_at: String,
+    pub(crate) reason_summary: String,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
+    pub(crate) rolled_back: usize,
+    pub(crate) pending: usize,
+    pub(crate) total_operations: usize,
 }
 
 #[derive(Debug, Clone)]
-struct TransactionDetail {
-    transaction_id: String,
-    plan_id: String,
-    root: String,
-    status: TransactionStatus,
-    started_at: String,
-    completed_at: String,
-    reason_summary: String,
-    operation_counts: TransactionOperationCounts,
-    operation_rows: Vec<TransactionOperationRow>,
-    total_operations: usize,
+pub(crate) struct TransactionDetail {
+    pub(crate) transaction_id: String,
+    pub(crate) plan_id: String,
+    pub(crate) root: String,
+    pub(crate) status: TransactionStatus,
+    pub(crate) started_at: String,
+    pub(crate) completed_at: String,
+    pub(crate) reason_summary: String,
+    pub(crate) operation_counts: TransactionOperationCounts,
+    pub(crate) operation_rows: Vec<TransactionOperationRow>,
+    pub(crate) total_operations: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct TransactionOperationCounts {
-    pending: usize,
-    completed: usize,
-    skipped: usize,
-    failed: usize,
-    rolled_back: usize,
+pub(crate) struct TransactionOperationCounts {
+    pub(crate) pending: usize,
+    pub(crate) completed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
+    pub(crate) rolled_back: usize,
 }
 
 impl TransactionOperationCounts {
@@ -4376,22 +4214,22 @@ impl TransactionOperationCounts {
 }
 
 #[derive(Debug, Clone)]
-struct TransactionOperationRow {
-    operation_id: String,
-    source: String,
-    destination: String,
-    reason: String,
-    status: OperationStatus,
-    error: String,
+pub(crate) struct TransactionOperationRow {
+    pub(crate) operation_id: String,
+    pub(crate) source: String,
+    pub(crate) destination: String,
+    pub(crate) reason: String,
+    pub(crate) status: OperationStatus,
+    pub(crate) error: String,
 }
 
 #[derive(Debug, Clone)]
-struct UndoOutput {
-    transaction_id: String,
-    journal_path: PathBuf,
-    rolled_back: usize,
-    skipped: usize,
-    failed: usize,
+pub(crate) struct UndoOutput {
+    pub(crate) transaction_id: String,
+    pub(crate) journal_path: PathBuf,
+    pub(crate) rolled_back: usize,
+    pub(crate) skipped: usize,
+    pub(crate) failed: usize,
 }
 
 fn analyze_root(
@@ -4992,103 +4830,6 @@ fn send_progress(sender: &Sender<AnalysisEvent>, progress: AnalysisProgress) {
     let _ = sender.send(AnalysisEvent::Progress(progress));
 }
 
-fn render_analysis_progress(ui: &mut egui::Ui, ctx: &egui::Context, progress: &AnalysisProgress) {
-    ui.label(RichText::new(&progress.headline).strong());
-    let fraction = progress
-        .fraction
-        .unwrap_or_else(|| ((ctx.input(|input| input.time) * 0.35) as f32).fract());
-    let progress_width = ui.available_width().max(120.0);
-    ui.add(
-        egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
-            .desired_width(progress_width)
-            .text(progress_text(progress)),
-    );
-    truncated_label(ui, &progress.detail);
-    ui.add_space(6.0);
-    egui::CollapsingHeader::new("Analysis details")
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Grid::new("analysis-progress-grid")
-                .num_columns(4)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    progress_stat(ui, "Entries", progress.entries_seen);
-                    progress_stat(ui, "Records", progress.records_collected);
-                    ui.end_row();
-                    progress_stat(ui, "Folders", progress.folders_scanned);
-                    progress_stat(ui, "Warnings", progress.warnings);
-                    ui.end_row();
-                    progress_stat(ui, "Skipped entries", progress.entries_skipped);
-                    progress_stat(ui, "Planned", progress.moves_proposed);
-                    ui.end_row();
-                    progress_stat(ui, "Needs review", progress.ambiguous_files);
-                    progress_stat(ui, "Conflicts", progress.conflicts);
-                    ui.end_row();
-                    progress_stat(ui, "Skipped plan items", progress.skipped);
-                    ui.end_row();
-                });
-        });
-}
-
-fn progress_text(progress: &AnalysisProgress) -> String {
-    match progress.fraction {
-        Some(fraction) if progress.plan_total > 0 => format!(
-            "{} of {} records ({:.0}%)",
-            progress.plan_processed,
-            progress.plan_total,
-            fraction * 100.0
-        ),
-        Some(fraction) => format!("{:.0}%", fraction * 100.0),
-        None => "Scanning, total unknown".to_string(),
-    }
-}
-
-fn progress_stat(ui: &mut egui::Ui, label: &str, value: usize) {
-    ui.label(label);
-    ui.label(value.to_string());
-}
-
-fn render_apply_progress(ui: &mut egui::Ui, progress: &ApplyProgress) {
-    ui.label(RichText::new(&progress.headline).strong());
-    let fraction = if progress.total == 0 {
-        0.0
-    } else {
-        progress.processed as f32 / progress.total as f32
-    };
-    let progress_width = ui.available_width().max(120.0);
-    ui.add(
-        egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
-            .desired_width(progress_width)
-            .text(format!(
-                "{} of {} moves ({:.0}%)",
-                progress.processed,
-                progress.total,
-                fraction * 100.0
-            )),
-    );
-    truncated_label(ui, &progress.detail);
-    ui.add_space(6.0);
-    egui::CollapsingHeader::new("Progress details")
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Grid::new("apply-progress-grid")
-                .num_columns(4)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    progress_stat(ui, "Completed", progress.completed);
-                    progress_stat(ui, "Skipped", progress.skipped);
-                    ui.end_row();
-                    progress_stat(ui, "Failed", progress.failed);
-                    progress_stat(
-                        ui,
-                        "Remaining",
-                        progress.total.saturating_sub(progress.processed),
-                    );
-                    ui.end_row();
-                });
-        });
-}
-
 fn cleanup_old_session_data() -> std::result::Result<usize, String> {
     let mut store = SqliteSessionStore::open_default()
         .map_err(|error| format!("Failed to open session store: {error}"))?;
@@ -5102,158 +4843,6 @@ fn cleanup_old_session_data() -> std::result::Result<usize, String> {
             .map_err(|error| format!("Failed to compact session database: {error}"))?;
     }
     Ok(removed)
-}
-
-fn render_plan_summary(ui: &mut egui::Ui, result: &AnalysisOutput, compact: bool) {
-    let ready = result.preview_counts.ready;
-    let needs_attention = result.preview_counts.needs_attention;
-    let left_in_place = if result.preview_counts.untouched > 0 {
-        result.preview_counts.untouched
-    } else {
-        result.summary.ambiguous_files + result.summary.skipped
-    };
-    let aligned_width = preview_aligned_content_width(ui);
-
-    ui.scope(|ui| {
-        ui.set_max_width(aligned_width);
-        ui.label(
-            RichText::new("Analysis summary")
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        if !compact {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(plan_summary_headline(result))
-                        .color(ui::theme::colors::primary_text()),
-                )
-                .wrap(),
-            );
-            ui.add(
-                egui::Label::new(
-                    RichText::new(plan_summary_detail(ready, needs_attention, left_in_place))
-                        .color(ui::theme::colors::primary_text()),
-                )
-                .wrap(),
-            );
-            ui.add_space(8.0);
-        } else {
-            ui.add_space(6.0);
-        }
-
-        render_preview_summary_panel(ui, result, ready, needs_attention, left_in_place);
-
-        if !compact {
-            ui.add_space(8.0);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "Scanned {} files. {} warning{} recorded.",
-                        result.summary.files_scanned,
-                        result.warning_messages.len(),
-                        plural(result.warning_messages.len())
-                    ))
-                    .color(ui::theme::colors::primary_text()),
-                )
-                .wrap(),
-            );
-
-            if needs_attention == 0 && result.warning_messages.is_empty() {
-                ui.colored_label(
-                    ui::theme::colors::success(),
-                    "No conflicts or warnings found.",
-                );
-                if left_in_place > 0 {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!(
-                                "{left_in_place} untouched item{} will stay put unless reviewed in the detailed file list.",
-                                plural(left_in_place)
-                            ))
-                            .color(ui::theme::colors::secondary_text()),
-                        )
-                        .wrap(),
-                    );
-                }
-            } else if needs_attention > 0 || !result.warning_messages.is_empty() {
-                ui.colored_label(
-                    ui::theme::colors::warning(),
-                    "Review the attention and warnings views before organizing these files.",
-                );
-            }
-        }
-    });
-}
-
-fn render_preview_summary_panel(
-    ui: &mut egui::Ui,
-    result: &AnalysisOutput,
-    ready: usize,
-    needs_attention: usize,
-    left_in_place: usize,
-) {
-    ui::theme::widgets::surface_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        render_preview_summary_line(
-            ui,
-            ui::theme::colors::success(),
-            &format!("{ready} file{} ready to move", plural(ready)),
-        );
-        let review_line = if needs_attention == 0 {
-            "No planned moves need review".to_string()
-        } else {
-            format!(
-                "{needs_attention} planned move{} need review",
-                plural(needs_attention)
-            )
-        };
-        render_preview_summary_line(
-            ui,
-            if needs_attention == 0 {
-                ui::theme::colors::success()
-            } else {
-                ui::theme::colors::warning()
-            },
-            &review_line,
-        );
-        render_preview_summary_line(
-            ui,
-            ui::theme::colors::metadata_text(),
-            &format!(
-                "{left_in_place} item{} will stay untouched",
-                plural(left_in_place)
-            ),
-        );
-
-        if !result.untouched_reason_counts.is_empty() {
-            ui.add_space(ui::theme::spacing::SM);
-            ui.label(
-                RichText::new("Untouched reasons")
-                    .size(ui::theme::typography::CAPTION)
-                    .strong()
-                    .color(ui::theme::colors::metadata_text()),
-            );
-            for (reason, count) in &result.untouched_reason_counts {
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_space(ui::theme::spacing::MD);
-                    ui::theme::widgets::status_dot(ui, ui::theme::colors::metadata_text());
-                    ui.label(
-                        RichText::new(format!("{} {}", count, untouched_reason_label(*reason)))
-                            .size(ui::theme::typography::CAPTION)
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                });
-            }
-        }
-    });
-}
-
-fn render_preview_summary_line(ui: &mut egui::Ui, color: Color32, text: &str) {
-    ui.horizontal_wrapped(|ui| {
-        ui::theme::widgets::status_dot(ui, color);
-        ui.label(RichText::new(text).color(ui::theme::colors::primary_text()));
-    });
 }
 
 fn render_ai_assist_strip(
@@ -5532,799 +5121,10 @@ fn render_ai_finding(ui: &mut egui::Ui, finding: &AiFinding) {
     }
 }
 
-fn render_ai_draft_summary_strip(
-    ui: &mut egui::Ui,
-    result: &AiDraftProfileResult,
-    show_review: &mut bool,
-    show_prompt: &mut bool,
-) {
-    settings_note_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            if result.validation.is_usable() {
-                render_status_chip(
-                    ui,
-                    "Draft loaded",
-                    ui::theme::colors::success(),
-                    ui::theme::colors::success_bg(),
-                );
-            } else {
-                render_status_chip(
-                    ui,
-                    "Validation failed",
-                    ui::theme::colors::error(),
-                    ui::theme::colors::error_bg(),
-                );
-            }
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} rule{}",
-                    result.draft.rules.len(),
-                    plural(result.draft.rules.len())
-                ),
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::elevated_surface(),
-            );
-            if !result.validation.warnings.is_empty() {
-                render_status_chip(
-                    ui,
-                    &format!(
-                        "{} warning{}",
-                        result.validation.warnings.len(),
-                        plural(result.validation.warnings.len())
-                    ),
-                    ui::theme::colors::warning(),
-                    ui::theme::colors::warning_bg(),
-                );
-            }
-            if !result.validation.errors.is_empty() {
-                render_status_chip(
-                    ui,
-                    &format!(
-                        "{} error{}",
-                        result.validation.errors.len(),
-                        plural(result.validation.errors.len())
-                    ),
-                    ui::theme::colors::error(),
-                    ui::theme::colors::error_bg(),
-                );
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Review draft"))
-                .clicked()
-            {
-                *show_review = true;
-            }
-            if ui
-                .add(ui::theme::widgets::compact_secondary_button("Edit prompt"))
-                .clicked()
-            {
-                *show_prompt = true;
-            }
-        });
-        if let Some(rationale) = &result.draft.rationale {
-            ui.add_space(ui::theme::spacing::XS);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(elide_text(rationale, 150))
-                        .color(ui::theme::colors::secondary_text()),
-                )
-                .truncate(),
-            )
-            .on_hover_text(rationale);
-        }
-    });
-}
-
-fn render_ai_draft_review(
-    ui: &mut egui::Ui,
-    result: &AiDraftProfileResult,
-    edit_prompt_requested: &mut bool,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("AI draft review")
-                .strong()
-                .size(ui::theme::typography::SECTION_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        render_status_chip(
-            ui,
-            &format!(
-                "{} rule{}",
-                result.draft.rules.len(),
-                plural(result.draft.rules.len())
-            ),
-            ui::theme::colors::secondary_text(),
-            ui::theme::colors::elevated_surface(),
-        );
-        if !result.validation.warnings.is_empty() {
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} warning{}",
-                    result.validation.warnings.len(),
-                    plural(result.validation.warnings.len())
-                ),
-                ui::theme::colors::warning(),
-                ui::theme::colors::warning_bg(),
-            );
-        }
-        if ui
-            .add(ui::theme::widgets::compact_secondary_button("Edit prompt"))
-            .clicked()
-        {
-            *edit_prompt_requested = true;
-        }
-    });
-    ui.add_space(ui::theme::spacing::SM);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height((ui.available_height() - 8.0).max(260.0))
-        .show(ui, |ui| {
-            if let Some(rationale) = &result.draft.rationale {
-                ui.label(
-                    RichText::new("Rationale")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(rationale).color(ui::theme::colors::secondary_text()),
-                    )
-                    .wrap(),
-                );
-                ui.add_space(ui::theme::spacing::SM);
-            }
-
-            if !result.validation.warnings.is_empty() {
-                ui.label(
-                    RichText::new("Warnings")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for warning in &result.validation.warnings {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("- {warning}"))
-                                .color(ui::theme::colors::warning()),
-                        )
-                        .wrap(),
-                    );
-                }
-                ui.add_space(ui::theme::spacing::SM);
-            }
-
-            if !result.validation.errors.is_empty() {
-                ui.label(
-                    RichText::new("Errors")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for error in &result.validation.errors {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("- {error}")).color(ui::theme::colors::error()),
-                        )
-                        .wrap(),
-                    );
-                }
-                ui.add_space(ui::theme::spacing::SM);
-            }
-
-            egui::CollapsingHeader::new("Raw AI draft JSON")
-                .default_open(false)
-                .show(ui, |ui| {
-                    let mut raw = result.raw_json.clone();
-                    ui.add_sized(
-                        [ui.available_width(), 180.0],
-                        egui::TextEdit::multiline(&mut raw)
-                            .font(egui::TextStyle::Monospace)
-                            .interactive(false),
-                    );
-                });
-        });
-}
-
-fn elide_text(text: &str, max_chars: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= max_chars {
-        return trimmed.to_string();
-    }
-    let mut shortened = trimmed
-        .chars()
-        .take(max_chars.saturating_sub(3))
-        .collect::<String>();
-    shortened.push_str("...");
-    shortened
-}
-
-fn render_ai_rule_explanation(ui: &mut egui::Ui, explanation: &AiRuleExplanation) {
-    ui.label(
-        RichText::new("AI rule explanation")
-            .strong()
-            .color(ui::theme::colors::heading_text()),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new(&explanation.summary).color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-    if !explanation.rule_order.is_empty() {
-        egui::CollapsingHeader::new("Rule order")
-            .default_open(false)
-            .show(ui, |ui| {
-                for rule in &explanation.rule_order {
-                    ui.label(
-                        RichText::new(&rule.rule_name)
-                            .strong()
-                            .color(ui::theme::colors::primary_text()),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&rule.explanation)
-                                .color(ui::theme::colors::secondary_text()),
-                        )
-                        .wrap(),
-                    );
-                }
-            });
-    }
-    for warning in &explanation.warnings {
-        ui.label(RichText::new(format!("Warning: {warning}")).color(ui::theme::colors::warning()));
-    }
-}
-
-fn render_preview_metric_card(
-    ui: &mut egui::Ui,
-    width: f32,
-    title: &str,
-    value: usize,
-    detail: &str,
-    fill: Color32,
-    stroke: Color32,
-) {
-    ui.allocate_ui(egui::vec2(width, 76.0), |ui| {
-        egui::Frame::group(ui.style())
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, stroke))
-            .inner_margin(egui::Margin::same(8.0))
-            .show(ui, |ui| {
-                ui.set_width(width - 16.0);
-                ui.label(
-                    RichText::new(title)
-                        .strong()
-                        .size(ui::theme::typography::BODY)
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(value.to_string())
-                            .size(18.0)
-                            .strong()
-                            .color(stroke),
-                    );
-                    ui.label(
-                        RichText::new(detail)
-                            .size(ui::theme::typography::CAPTION)
-                            .color(ui::theme::colors::secondary_text()),
-                    );
-                });
-            });
-    });
-}
-
-fn preview_aligned_content_width(ui: &egui::Ui) -> f32 {
-    ui.available_width().min(ui::theme::spacing::FLOW_MAX_WIDTH)
-}
-
-fn render_preview_examples(ui: &mut egui::Ui, result: &AnalysisOutput) {
-    let aligned_width = preview_aligned_content_width(ui);
-
-    ui.scope(|ui| {
-        ui.set_max_width(aligned_width);
-        ui.label(
-            RichText::new("Planned changes sample")
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.add(
-            egui::Label::new(
-                RichText::new("Representative ready moves from this preview.")
-                    .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-        ui.add_space(6.0);
-
-        if result.preview_examples.is_empty() {
-            egui::Frame::group(ui.style())
-                .fill(ui::theme::colors::surface())
-                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-                .inner_margin(egui::Margin::same(14.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("No ready examples yet")
-                            .strong()
-                            .color(ui::theme::colors::heading_text()),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(
-                                "Files with unclear destinations were left untouched. Open the detailed list to inspect them.",
-                            )
-                            .color(ui::theme::colors::secondary_text()),
-                        )
-                        .wrap(),
-                    );
-                });
-            return;
-        }
-
-        render_preview_sample_table(ui, &result.preview_examples);
-        let hidden_examples = result.preview_examples.len().saturating_sub(PREVIEW_SAMPLE_ROWS);
-        if hidden_examples > 0 {
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new(format!(
-                    "{hidden_examples} more sample{} available in the detailed file list.",
-                    plural(hidden_examples)
-                ))
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-            );
-        }
-    });
-}
-
-const PREVIEW_SAMPLE_ROWS: usize = 3;
-
-fn render_preview_sample_table(ui: &mut egui::Ui, rows: &[PreviewRow]) {
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::elevated_surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(8.0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let width = ui.available_width().max(520.0);
-            let file_width = (width * 0.26).max(120.0);
-            let destination_width = (width * 0.30).max(150.0);
-            let rule_width = (width * 0.26).max(130.0);
-            let status_width =
-                (width - file_width - destination_width - rule_width - 36.0).max(90.0);
-
-            egui::Grid::new("preview-sample-table")
-                .num_columns(4)
-                .spacing([12.0, 5.0])
-                .show(ui, |ui| {
-                    preview_sample_cell(ui, "File", file_width, true);
-                    preview_sample_cell(ui, "Destination", destination_width, true);
-                    preview_sample_cell(ui, "Rule", rule_width, true);
-                    preview_sample_cell(ui, "Status", status_width, true);
-                    ui.end_row();
-
-                    for row in rows.iter().take(PREVIEW_SAMPLE_ROWS) {
-                        preview_sample_cell(ui, &row.file_name, file_width, false);
-                        preview_sample_cell(
-                            ui,
-                            &preview_example_destination_path(row),
-                            destination_width,
-                            false,
-                        );
-                        preview_sample_cell(ui, &row.reason, rule_width, false);
-                        let (stroke, fill) = preview_status_colors(&row.status);
-                        ui.allocate_ui(egui::vec2(status_width, 22.0), |ui| {
-                            render_status_chip(ui, &row.status, stroke, fill);
-                        });
-                        ui.end_row();
-                    }
-                });
-        });
-}
-
-fn preview_sample_cell(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) {
-    ui.allocate_ui(egui::vec2(width.max(40.0), 20.0), |ui| {
-        let color = if strong {
-            ui::theme::colors::metadata_text()
-        } else {
-            ui::theme::colors::primary_text()
-        };
-        ui.add(
-            egui::Label::new(
-                RichText::new(text)
-                    .monospace()
-                    .size(if strong {
-                        ui::theme::typography::CAPTION
-                    } else {
-                        ui::theme::typography::BODY
-                    })
-                    .color(color),
-            )
-            .truncate(),
-        )
-        .on_hover_text(text);
-    });
-}
-
-fn preview_example_destination_path(row: &PreviewRow) -> String {
-    if row.destination_full_path.is_none() {
-        return "Stays in place".to_string();
-    }
-    if row.target_folder == "Selected folder" {
-        "./".to_string()
-    } else {
-        format!("./{}/", row.target_folder.replace(" / ", "/"))
-    }
-}
-
-fn render_preview_path_highlight(ui: &mut egui::Ui, path: &str) -> egui::Response {
-    let frame = egui::Frame::none()
-        .fill(ui::theme::colors::hover_control())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::primary_blue()))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-        .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(path)
-                        .monospace()
-                        .color(ui::theme::colors::primary_blue()),
-                )
-                .sense(egui::Sense::hover()),
-            )
-        });
-    frame.response.union(frame.inner)
-}
-
-fn render_apply_entry(
-    ui: &mut egui::Ui,
-    result: &AnalysisOutput,
-    is_applying: bool,
-    already_applied: bool,
-    show_confirmation: &mut bool,
-) {
-    let ready = result.preview_counts.ready;
-    let can_apply = ready > 0 && !is_applying && !already_applied;
-    let aligned_width = preview_aligned_content_width(ui);
-    ui.scope(|ui| {
-        ui.set_max_width(aligned_width);
-        egui::Frame::group(ui.style())
-            .fill(ui::theme::colors::elevated_surface())
-            .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-            .inner_margin(egui::Margin::same(14.0))
-            .show(ui, |ui| {
-                let button_label = organize_files_label(ready);
-                let button_width = 180.0;
-                let column_gap = 12.0;
-                let text_width = (ui.available_width() - button_width - column_gap).max(220.0);
-
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(text_width, 0.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                        ui.label(
-                            RichText::new("Ready to organize")
-                                .strong()
-                                .size(ui::theme::typography::CARD_TITLE)
-                                .color(ui::theme::colors::heading_text()),
-                        );
-                        if already_applied {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(
-                                        "This preview has already been organized. Run Analyze Folder again for a fresh preview.",
-                                    )
-                                    .color(ui::theme::colors::secondary_text()),
-                                )
-                                .wrap(),
-                            );
-                        } else if ready == 0 {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new("No safe moves are ready to organize.")
-                                        .color(ui::theme::colors::secondary_text()),
-                                )
-                                .wrap(),
-                            );
-                        } else {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(
-                                        "smartfolder moves the ready items and leaves review or untouched items in place.",
-                                    )
-                                    .color(ui::theme::colors::primary_text()),
-                                )
-                                .wrap(),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(
-                                        "Restore history is recorded before any files move.",
-                                    )
-                                    .color(ui::theme::colors::secondary_text()),
-                                )
-                                .wrap(),
-                            );
-                        }
-                        },
-                    );
-                    ui.add_space(column_gap);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(button_width, 0.0),
-                        egui::Layout::top_down(egui::Align::Max),
-                        |ui| {
-                            let response = ui.add_enabled(
-                                can_apply,
-                                egui::Button::new(
-                                    RichText::new(button_label)
-                                        .strong()
-                                        .color(ui::theme::colors::on_primary()),
-                                )
-                                .fill(ui::theme::colors::primary_blue())
-                                .min_size(egui::vec2(
-                                    button_width,
-                                    ui::theme::spacing::MIN_TARGET,
-                                )),
-                            );
-                            if response.clicked() {
-                                *show_confirmation = true;
-                            }
-                        },
-                    );
-                });
-            });
-    });
-}
-
-fn organize_files_label(ready: usize) -> String {
-    format!("Organize {ready} file{}", plural(ready))
-}
-
-fn render_apply_confirmation(
-    ctx: &egui::Context,
-    result: &AnalysisOutput,
-    confirmed: &mut bool,
-    dismissed: &mut bool,
-) {
-    egui::Window::new(
-        RichText::new("Confirm organization")
-            .strong()
-            .color(ui::theme::colors::heading_text()),
-    )
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .default_width(560.0)
-        .show(ctx, |ui| {
-            let content_width = 520.0;
-            ui.set_min_width(content_width);
-            ui.set_max_width(content_width);
-
-            ui.label(
-                RichText::new("Ready to organize these files")
-                    .strong()
-                    .size(ui::theme::typography::SECTION_TITLE)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "smartfolder will move {} ready file{} into organized folders and leave review items untouched.",
-                        result.preview_counts.ready,
-                        plural(result.preview_counts.ready)
-                    ))
-                    .color(ui::theme::colors::primary_text()),
-                )
-                .wrap(),
-            );
-            ui.add_space(10.0);
-
-            let card_gap = ui.spacing().item_spacing.x;
-            let card_width = ((content_width - card_gap) / 2.0).max(220.0);
-            ui.horizontal(|ui| {
-                render_preview_metric_card(
-                    ui,
-                    card_width,
-                    "Ready",
-                    result.preview_counts.ready,
-                    "Moves now",
-                    ui::theme::colors::success_bg(),
-                    ui::theme::colors::success(),
-                );
-                render_preview_metric_card(
-                    ui,
-                    card_width,
-                    "Review",
-                    result.preview_counts.needs_attention,
-                    "Stays put",
-                    ui::theme::colors::warning_bg(),
-                    ui::theme::colors::warning(),
-                );
-            });
-
-            ui.add_space(10.0);
-            render_safety_line(ui, "Existing files will not be overwritten.");
-            render_safety_line(ui, "Restore history is recorded before files move.");
-            render_safety_line(
-                ui,
-                "Restore previous layout will be available after completion.",
-            );
-
-            if is_cloud_synced_path(&result.root) {
-                ui.add_space(6.0);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "This folder appears to be cloud-synced. Let sync settle before organizing and review the completion summary afterward.",
-                        )
-                        .color(ui::theme::colors::warning()),
-                    )
-                    .wrap(),
-                );
-            }
-
-            ui.add_space(12.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(ui::theme::widgets::primary_button(organize_files_label(
-                        result.preview_counts.ready,
-                    )))
-                    .clicked()
-                {
-                    *confirmed = true;
-                }
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Cancel"))
-                    .clicked()
-                {
-                    *dismissed = true;
-                }
-            });
-        });
-}
-
-fn render_apply_result(
-    ui: &mut egui::Ui,
-    result: &ApplyOutput,
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    let aligned_width = preview_aligned_content_width(ui);
-    ui.scope(|ui| {
-        ui.set_max_width(aligned_width);
-        egui::Frame::group(ui.style())
-            .fill(ui::theme::colors::elevated_surface())
-            .stroke(egui::Stroke::new(1.0, ui::theme::colors::success()))
-            .inner_margin(egui::Margin::same(14.0))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Organization complete")
-                        .strong()
-                        .size(ui::theme::typography::SECTION_TITLE)
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!(
-                            "{} file{} moved successfully.",
-                            result.completed,
-                            plural(result.completed)
-                        ))
-                        .color(ui::theme::colors::primary_text()),
-                    )
-                    .wrap(),
-                );
-                ui.add_space(10.0);
-
-                ui::theme::widgets::surface_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    render_preview_summary_line(
-                        ui,
-                        ui::theme::colors::success(),
-                        &format!(
-                            "{} file{} moved successfully",
-                            result.completed,
-                            plural(result.completed)
-                        ),
-                    );
-                    render_preview_summary_line(
-                        ui,
-                        if result.skipped == 0 && result.failed == 0 {
-                            ui::theme::colors::success()
-                        } else {
-                            ui::theme::colors::warning()
-                        },
-                        &format!("{} skipped · {} failed", result.skipped, result.failed),
-                    );
-                    render_preview_summary_line(
-                        ui,
-                        ui::theme::colors::success(),
-                        "Restore point saved",
-                    );
-                });
-
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!busy, ui::theme::widgets::primary_button("Done"))
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::CompleteApply);
-                    }
-                    if ui
-                        .add_enabled(
-                            !busy,
-                            ui::theme::widgets::secondary_button("Restore previous layout"),
-                        )
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ConfirmUndo(result.transaction_id.clone()));
-                    }
-                    if ui
-                        .add_enabled(!busy, ui::theme::widgets::tertiary_button("View details"))
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ViewDetails(result.transaction_id.clone()));
-                    }
-                });
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new("Technical details")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(format!("Activity id: {}", result.transaction_id))
-                                .color(ui::theme::colors::primary_text()),
-                        );
-                        truncated_label(
-                            ui,
-                            &format!("Restore history: {}", result.journal_path.display()),
-                        );
-                    });
-            });
-    });
-}
-
 fn render_undo_progress(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spinner();
         ui.label("Restoring files to their previous locations...");
-    });
-}
-
-fn render_activity_scope_bar(
-    ui: &mut egui::Ui,
-    scope: &str,
-    status: &str,
-    action: &mut Option<HistoryAction>,
-) {
-    settings_note_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(scope)
-                    .strong()
-                    .size(ui::theme::typography::CARD_TITLE)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            render_status_chip(
-                ui,
-                status,
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::surface(),
-            );
-            if ui
-                .add(ui::theme::widgets::tertiary_button("Change folder"))
-                .clicked()
-            {
-                *action = Some(HistoryAction::ChangeFolder);
-            }
-        });
     });
 }
 
@@ -6368,7 +5168,14 @@ fn render_transaction_history(
     ui.add_space(ui::theme::spacing::SM);
 
     if let Some(result) = undo_result {
-        render_undo_result(ui, result);
+        render_restore_result(
+            ui,
+            result.rolled_back,
+            result.skipped,
+            result.failed,
+            &result.transaction_id,
+            &result.journal_path,
+        );
         ui.add_space(6.0);
     }
 
@@ -6402,1164 +5209,9 @@ fn render_transaction_history(
     }
 
     if let Some(detail) = detail {
-        render_transaction_detail_window(ui.ctx(), detail, action);
+        render_activity_detail_window(ui.ctx(), detail, action);
     } else if let Some(message) = detail_message {
-        render_transaction_detail_error_window(ui.ctx(), message, action);
-    }
-}
-
-fn render_current_folder_activity(
-    ui: &mut egui::Ui,
-    rows: &[&TransactionRow],
-    hidden_count: usize,
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    if rows.is_empty() {
-        ui.add(
-            egui::Label::new(
-                RichText::new("No activity has been recorded for this folder yet.")
-                    .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-        if hidden_count > 0 {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "{} activit{} from other folders hidden.",
-                        hidden_count,
-                        plural_y(hidden_count)
-                    ))
-                    .color(ui::theme::colors::metadata_text()),
-                )
-                .wrap(),
-            );
-        }
-        return;
-    }
-
-    ui.label(
-        RichText::new("Latest activity")
-            .strong()
-            .size(ui::theme::typography::CARD_TITLE)
-            .color(ui::theme::colors::heading_text()),
-    );
-    render_activity_record_row(ui, rows[0], busy, true, action);
-
-    if rows.len() > 1 {
-        ui.add_space(ui::theme::spacing::MD);
-        let mut current_date = "";
-        for row in rows.iter().skip(1).take(8) {
-            let date = activity_date_label(row);
-            if date != current_date {
-                current_date = date;
-                ui.add_space(ui::theme::spacing::XS);
-                ui.label(
-                    RichText::new(date)
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-            }
-            render_activity_record_row(ui, row, busy, false, action);
-            ui.add_space(ui::theme::spacing::XS);
-        }
-    }
-
-    if hidden_count > 0 {
-        ui.add_space(ui::theme::spacing::SM);
-        ui.add(
-            egui::Label::new(
-                RichText::new(format!(
-                    "{} activit{} from other folders hidden from this overview.",
-                    hidden_count,
-                    plural_y(hidden_count)
-                ))
-                .color(ui::theme::colors::metadata_text()),
-            )
-            .wrap(),
-        );
-    }
-}
-
-fn render_activity_record_row(
-    ui: &mut egui::Ui,
-    row: &TransactionRow,
-    busy: bool,
-    featured: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    let can_restore = can_undo_status(row.status);
-    let row_fill = ui::theme::colors::elevated_surface();
-    egui::Frame::group(ui.style())
-        .fill(row_fill)
-        .stroke(egui::Stroke::new(
-            1.0,
-            if featured && can_restore {
-                ui::theme::colors::success()
-            } else {
-                ui::theme::colors::border()
-            },
-        ))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let actions_width = 220.0_f32.min(ui.available_width() * 0.34);
-            let time_width = 64.0;
-            let text_width = (ui.available_width()
-                - actions_width
-                - time_width
-                - (ui::theme::spacing::MD * 2.0))
-                .max(280.0);
-
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(time_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(
-                            RichText::new(activity_time_label(row))
-                                .monospace()
-                                .color(ui::theme::colors::metadata_text()),
-                        );
-                        if featured && can_restore {
-                            ui.label(
-                                RichText::new("Restore ready")
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::success()),
-                            );
-                        }
-                    },
-                );
-                ui.allocate_ui_with_layout(
-                    egui::vec2(text_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let (stroke, fill) = activity_status_colors(row.status);
-                            ui::theme::widgets::status_dot(ui, stroke);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(activity_event_title(row))
-                                        .strong()
-                                        .color(ui::theme::colors::heading_text()),
-                                )
-                                .wrap(),
-                            );
-                            render_status_chip(ui, status_label(row.status), stroke, fill);
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(activity_detail(row))
-                                    .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                        ui.add_space(ui::theme::spacing::XS);
-                        render_activity_count_chips(
-                            ui,
-                            row.completed,
-                            row.rolled_back,
-                            row.skipped + row.failed + row.pending,
-                        );
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!busy, ui::theme::widgets::secondary_button("Details"))
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
-                    }
-                    let can_undo = can_restore && !busy;
-                    if ui
-                        .add_enabled(can_undo, ui::theme::widgets::secondary_button("Restore"))
-                        .on_disabled_hover_text(
-                            "Only completed or failed activities can be restored",
-                        )
-                        .clicked()
-                    {
-                        *action = Some(HistoryAction::ConfirmUndo(row.transaction_id.clone()));
-                    }
-                });
-            });
-        });
-}
-
-fn render_activity_count_chips(
-    ui: &mut egui::Ui,
-    completed: usize,
-    rolled_back: usize,
-    needs_review: usize,
-) {
-    ui.horizontal_wrapped(|ui| {
-        render_status_chip(
-            ui,
-            &format!("Moved {completed}"),
-            ui::theme::colors::success(),
-            ui::theme::colors::success_bg(),
-        );
-        render_status_chip(
-            ui,
-            &format!("Restored {rolled_back}"),
-            ui::theme::colors::info(),
-            ui::theme::colors::info_bg(),
-        );
-        render_status_chip(
-            ui,
-            &format!("Review {needs_review}"),
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        );
-    });
-}
-
-fn render_recovery_log(
-    ui: &mut egui::Ui,
-    rows: &[TransactionRow],
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("Restore history")
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.label(
-            RichText::new("Recent recovery journals")
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-        );
-    });
-    if rows.is_empty() {
-        ui.add(
-            egui::Label::new(
-                RichText::new("No restore history has been recorded yet.")
-                    .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-        return;
-    }
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height(420.0)
-        .show(ui, |ui| {
-            for row in rows.iter().take(10) {
-                render_recovery_log_row(ui, row, busy, action);
-                ui.add_space(ui::theme::spacing::XS);
-            }
-        });
-
-    if rows.len() > 10 {
-        ui.label(
-            RichText::new(format!("Showing 10 of {} recovery journals.", rows.len()))
-                .color(ui::theme::colors::metadata_text()),
-        );
-    }
-}
-
-fn render_recovery_log_row(
-    ui: &mut egui::Ui,
-    row: &TransactionRow,
-    busy: bool,
-    action: &mut Option<HistoryAction>,
-) {
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let available = ui.available_width();
-            let action_width = 132.0_f32.min(available * 0.28);
-            let content_width = (available - action_width - ui::theme::spacing::MD).max(200.0);
-
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(content_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(activity_event_title(row))
-                                        .strong()
-                                        .color(ui::theme::colors::heading_text()),
-                                )
-                                .wrap(),
-                            )
-                            .on_hover_text(format!("Activity id: {}", row.transaction_id));
-
-                            let (stroke, fill) = activity_status_colors(row.status);
-                            render_status_chip(ui, status_label(row.status), stroke, fill);
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(activity_count_summary(row))
-                                    .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(format!("Root: {}", row.root_label))
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::metadata_text()),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(row.root.display().to_string());
-                    },
-                );
-
-                ui.allocate_ui_with_layout(
-                    egui::vec2(action_width, 0.0),
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| {
-                        if ui
-                            .add_enabled(!busy, ui::theme::widgets::secondary_button("Details"))
-                            .clicked()
-                        {
-                            *action = Some(HistoryAction::ViewDetails(row.transaction_id.clone()));
-                        }
-                    },
-                );
-            });
-        });
-}
-
-fn render_transaction_detail_error_window(
-    ctx: &egui::Context,
-    message: &str,
-    action: &mut Option<HistoryAction>,
-) {
-    let mut open = true;
-    egui::Window::new("Activity details")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(420.0)
-        .show(ctx, |ui| {
-            ui.colored_label(ui::theme::colors::error(), message);
-            ui.add_space(ui::theme::spacing::SM);
-            if ui
-                .add(ui::theme::widgets::secondary_button("Close"))
-                .clicked()
-            {
-                *action = Some(HistoryAction::CloseDetails);
-            }
-        });
-    if !open {
-        *action = Some(HistoryAction::CloseDetails);
-    }
-}
-
-fn render_transaction_detail_window(
-    ctx: &egui::Context,
-    detail: &TransactionDetail,
-    action: &mut Option<HistoryAction>,
-) {
-    let mut open = true;
-    egui::Window::new("Activity details")
-        .open(&mut open)
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(760.0)
-        .default_height(560.0)
-        .show(ctx, |ui| {
-            render_transaction_detail(ui, detail, action);
-        });
-    if !open {
-        *action = Some(HistoryAction::CloseDetails);
-    }
-}
-
-fn render_transaction_detail(
-    ui: &mut egui::Ui,
-    detail: &TransactionDetail,
-    action: &mut Option<HistoryAction>,
-) {
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Activity details")
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        let (stroke, fill) = activity_status_colors(detail.status);
-        render_status_chip(ui, status_label(detail.status), stroke, fill);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(ui::theme::widgets::secondary_button("Close"))
-                .clicked()
-            {
-                *action = Some(HistoryAction::CloseDetails);
-            }
-        });
-    });
-    ui.add_space(ui::theme::spacing::SM);
-
-    ui.add(
-        egui::Label::new(
-            RichText::new(activity_detail_headline(detail))
-                .color(ui::theme::colors::primary_text()),
-        )
-        .wrap(),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new(format!("Why: {}", detail.reason_summary))
-                .color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new(format!("Folder: {}", detail.root))
-                .color(ui::theme::colors::metadata_text()),
-        )
-        .truncate(),
-    )
-    .on_hover_text(&detail.root);
-
-    ui.add_space(ui::theme::spacing::SM);
-    render_activity_count_chips(
-        ui,
-        detail.operation_counts.completed,
-        detail.operation_counts.rolled_back,
-        detail.operation_counts.skipped
-            + detail.operation_counts.failed
-            + detail.operation_counts.pending,
-    );
-
-    ui.add_space(ui::theme::spacing::MD);
-    egui::CollapsingHeader::new("Technical restore details")
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Grid::new("transaction-detail-summary")
-                .num_columns(2)
-                .spacing([16.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Activity id");
-                    ui.label(&detail.transaction_id);
-                    ui.end_row();
-                    ui.label("Plan id");
-                    ui.label(&detail.plan_id);
-                    ui.end_row();
-                    ui.label("Started");
-                    ui.label(&detail.started_at);
-                    ui.end_row();
-                    ui.label("Completed");
-                    ui.label(&detail.completed_at);
-                    ui.end_row();
-                    ui.label("Recorded changes");
-                    ui.label(detail.total_operations.to_string());
-                    ui.end_row();
-                });
-            ui.add_space(ui::theme::spacing::SM);
-            render_transaction_operation_rows(ui, detail);
-        });
-}
-
-fn render_transaction_operation_rows(ui: &mut egui::Ui, detail: &TransactionDetail) {
-    if detail.operation_rows.is_empty() {
-        ui.label("No operation rows recorded in this journal.");
-        return;
-    }
-
-    ui.label(RichText::new("Recorded changes").strong());
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height(260.0)
-        .show(ui, |ui| {
-            for row in &detail.operation_rows {
-                render_transaction_operation_row(ui, row);
-                ui.add_space(ui::theme::spacing::XS);
-            }
-        });
-
-    if detail.total_operations > detail.operation_rows.len() {
-        ui.label(format!(
-            "Showing {} of {} recorded operations.",
-            detail.operation_rows.len(),
-            detail.total_operations
-        ));
-    }
-}
-
-fn render_transaction_operation_row(ui: &mut egui::Ui, row: &TransactionOperationRow) {
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(&row.operation_id)
-                        .monospace()
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                render_status_chip(
-                    ui,
-                    operation_status_label(row.status),
-                    ui::theme::colors::secondary_text(),
-                    ui::theme::colors::elevated_surface(),
-                );
-                ui.label(
-                    RichText::new(&row.reason)
-                        .size(ui::theme::typography::CAPTION)
-                        .color(ui::theme::colors::metadata_text()),
-                );
-            });
-            render_path_detail_line(ui, "From", &row.source);
-            render_path_detail_line(ui, "To", &row.destination);
-            if !row.error.trim().is_empty() {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(format!("Error: {}", row.error))
-                            .color(ui::theme::colors::error()),
-                    )
-                    .wrap(),
-                );
-            }
-        });
-}
-
-fn render_path_detail_line(ui: &mut egui::Ui, label: &str, path: &str) {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [44.0, 20.0],
-            egui::Label::new(
-                RichText::new(label)
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::metadata_text()),
-            ),
-        );
-        let width = ui.available_width().max(120.0);
-        ui.add_sized(
-            [width, 20.0],
-            egui::Label::new(
-                RichText::new(path)
-                    .monospace()
-                    .color(ui::theme::colors::primary_text()),
-            )
-            .truncate(),
-        )
-        .on_hover_text(path);
-    });
-}
-
-fn render_undo_confirmation(
-    ctx: &egui::Context,
-    transaction_id: &str,
-    confirmed: &mut bool,
-    dismissed: &mut bool,
-) {
-    egui::Window::new("Restore previous layout")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.label(RichText::new("Restore previous layout?").strong());
-            ui.label("smartfolder will move completed files back to their original paths.");
-            ui.label("It will refuse to overwrite anything already at an original path.");
-            ui.add_space(6.0);
-            truncated_label(ui, &format!("Activity id: {transaction_id}"));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    *dismissed = true;
-                }
-                if ui.button("Restore previous layout").clicked() {
-                    *confirmed = true;
-                }
-            });
-        });
-}
-
-fn render_undo_result(ui: &mut egui::Ui, result: &UndoOutput) {
-    ui.label(RichText::new("Previous layout restored").strong());
-    egui::Grid::new("undo-result")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
-        .show(ui, |ui| {
-            summary_row(ui, "Rolled back", result.rolled_back);
-            summary_row(ui, "Skipped", result.skipped);
-            summary_row(ui, "Failed", result.failed);
-        });
-    ui.label(format!("Activity id: {}", result.transaction_id));
-    truncated_label(
-        ui,
-        &format!("Restore history: {}", result.journal_path.display()),
-    );
-}
-
-fn plan_summary_headline(result: &AnalysisOutput) -> String {
-    if result.preview_counts.ready == 0 {
-        return "No safe moves are ready to organize.".to_string();
-    }
-
-    if result.preview_counts.needs_attention == 0 && result.preview_counts.untouched == 0 {
-        format!(
-            "{} safe file{} ready to organize.",
-            result.preview_counts.ready,
-            plural(result.preview_counts.ready)
-        )
-    } else if result.preview_counts.needs_attention == 0 {
-        format!(
-            "{} safe file{} ready, with {} item{} left untouched.",
-            result.preview_counts.ready,
-            plural(result.preview_counts.ready),
-            result.preview_counts.untouched,
-            plural(result.preview_counts.untouched)
-        )
-    } else {
-        format!(
-            "{} safe file{} ready, with {} planned move{} needing review.",
-            result.preview_counts.ready,
-            plural(result.preview_counts.ready),
-            result.preview_counts.needs_attention,
-            plural(result.preview_counts.needs_attention)
-        )
-    }
-}
-
-fn plan_summary_detail(ready: usize, needs_attention: usize, left_in_place: usize) -> String {
-    format!(
-        "smartfolder can organize {ready} item{} automatically. {needs_attention} planned move{} and {left_in_place} unplanned item{} will stay put unless reviewed.",
-        plural(ready),
-        plural(needs_attention),
-        plural(left_in_place)
-    )
-}
-
-fn untouched_reason_label(reason: UntouchedReason) -> &'static str {
-    match reason {
-        UntouchedReason::NoMatchingRule => "no matching rule",
-        UntouchedReason::AlreadyOrganized => "already organized",
-        UntouchedReason::UnsupportedMetadata => "unsupported metadata",
-        UntouchedReason::UnsafeDestination => "unsafe destination",
-        UntouchedReason::DestinationConflict => "destination conflict",
-        UntouchedReason::ExcludedByPolicy => "excluded by policy",
-    }
-}
-
-fn render_preview_controls(
-    ui: &mut egui::Ui,
-    result: &AnalysisOutput,
-    active_filter: PreviewFilter,
-    offset: usize,
-    action: &mut Option<PreviewAction>,
-) {
-    ui.label(
-        RichText::new("File list")
-            .strong()
-            .size(ui::theme::typography::CARD_TITLE)
-            .color(ui::theme::colors::heading_text()),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new(
-                "Click a file to inspect its original folder, exact destination, and rule details below.",
-            )
-            .color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-    ui.horizontal(|ui| {
-        for filter in [
-            PreviewFilter::All,
-            PreviewFilter::Ready,
-            PreviewFilter::Untouched,
-            PreviewFilter::NeedsAttention,
-        ] {
-            let label = format!(
-                "{} ({})",
-                filter.label(),
-                filter.count(&result.preview_counts)
-            );
-            if ui
-                .selectable_label(active_filter == filter, label)
-                .clicked()
-                && active_filter != filter
-            {
-                *action = Some(PreviewAction::Filter(filter));
-            }
-        }
-    });
-
-    let total_rows = active_filter.count(&result.preview_counts);
-    let current_end = (offset + result.preview_rows.len()).min(total_rows);
-    ui.horizontal(|ui| {
-        let range_text = if total_rows == 0 {
-            "No files in this view".to_string()
-        } else {
-            format!("Showing {}-{} of {}", offset + 1, current_end, total_rows)
-        };
-        ui.label(RichText::new(range_text).color(ui::theme::colors::primary_text()));
-
-        if ui
-            .add_enabled(offset > 0, egui::Button::new("Previous"))
-            .clicked()
-        {
-            *action = Some(PreviewAction::Previous);
-        }
-
-        if ui
-            .add_enabled(current_end < total_rows, egui::Button::new("Next"))
-            .clicked()
-        {
-            *action = Some(PreviewAction::Next);
-        }
-    });
-}
-
-fn preview_rows(operations: &[PlanOperation], root: &Path) -> Vec<PreviewRow> {
-    operations
-        .iter()
-        .map(|operation| PreviewRow {
-            file_name: file_name_label(&operation.source),
-            original_folder: relative_folder_label(&operation.source, root),
-            target_folder: relative_folder_label(&operation.destination, root),
-            source_full_path: operation.source.display().to_string(),
-            destination_full_path: Some(operation.destination.display().to_string()),
-            reason: operation.reason.clone(),
-            status: operation_status(operation).to_string(),
-        })
-        .collect()
-}
-
-fn untouched_preview_rows(records: &[UntouchedRecord], root: &Path) -> Vec<PreviewRow> {
-    records
-        .iter()
-        .map(|record| PreviewRow {
-            file_name: file_name_label(&record.path),
-            original_folder: relative_folder_label(&record.path, root),
-            target_folder: "Stays in place".to_string(),
-            source_full_path: record.path.display().to_string(),
-            destination_full_path: None,
-            reason: untouched_detail(record),
-            status: "Untouched".to_string(),
-        })
-        .collect()
-}
-
-fn untouched_detail(record: &UntouchedRecord) -> String {
-    if record.detail.trim().is_empty() {
-        untouched_reason_label(record.reason).to_string()
-    } else {
-        record.detail.clone()
-    }
-}
-
-fn file_name_label(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-fn relative_folder_label(path: &Path, root: &Path) -> String {
-    let Some(parent) = path.parent() else {
-        return "Selected folder".to_string();
-    };
-    let Ok(relative) = parent.strip_prefix(root) else {
-        return parent.display().to_string();
-    };
-    if relative.as_os_str().is_empty() {
-        "Selected folder".to_string()
-    } else {
-        relative
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" / ")
-    }
-}
-
-fn render_preview_rows(
-    ui: &mut egui::Ui,
-    result: &AnalysisOutput,
-    selected_row: &mut Option<usize>,
-) {
-    if result.preview_rows.is_empty() {
-        *selected_row = None;
-        ui.label("No files match this view.");
-        return;
-    }
-
-    if selected_row
-        .map(|index| index >= result.preview_rows.len())
-        .unwrap_or(true)
-    {
-        *selected_row = Some(0);
-    }
-
-    let width = ui.available_width().max(360.0);
-    let (file_width, target_width) = preview_table_column_widths(width);
-
-    egui::Grid::new("preview-rows")
-        .num_columns(2)
-        .striped(true)
-        .spacing([12.0, 4.0])
-        .show(ui, |ui| {
-            for (index, row) in result.preview_rows.iter().enumerate() {
-                let is_selected = *selected_row == Some(index);
-                let file_response = preview_selectable_cell_with_tooltip(
-                    ui,
-                    if is_selected {
-                        format!("> {}", row.file_name)
-                    } else {
-                        row.file_name.clone()
-                    },
-                    file_width,
-                    is_selected,
-                    format!(
-                        "From: {}\nTo: {}",
-                        row.source_full_path,
-                        row.destination_full_path
-                            .as_deref()
-                            .unwrap_or("Stays in place")
-                    ),
-                );
-                if file_response.clicked() {
-                    *selected_row = Some(index);
-                }
-                preview_destination_cell_with_tooltip(
-                    ui,
-                    row,
-                    target_width,
-                    row.destination_full_path.as_ref().map_or_else(
-                        || "This file stays in its original folder".to_string(),
-                        |destination| format!("Full destination: {destination}"),
-                    ),
-                );
-                ui.end_row();
-            }
-        });
-
-    if result.preview_rows.len() < result.preview_total_rows {
-        ui.add_space(8.0);
-        ui.label(format!(
-            "Showing {} of {} matching files. More rows are stored on disk for paged retrieval.",
-            result.preview_rows.len(),
-            result.preview_total_rows
-        ));
-    }
-}
-
-fn render_preview_tree(ui: &mut egui::Ui, result: &AnalysisOutput) {
-    if result.preview_rows.is_empty() {
-        ui.label("No files match this view.");
-        return;
-    }
-
-    ui.add(
-        egui::Label::new(
-            RichText::new(
-                "Tree view groups the current page by destination folder while preserving paged loading for large folders.",
-            )
-            .color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-    ui.add_space(ui::theme::spacing::SM);
-
-    let mut folders: BTreeMap<&str, Vec<&PreviewRow>> = BTreeMap::new();
-    for row in &result.preview_rows {
-        folders
-            .entry(row.target_folder.as_str())
-            .or_default()
-            .push(row);
-    }
-
-    for (folder, rows) in folders {
-        let header = format!("{folder} ({})", rows.len());
-        egui::CollapsingHeader::new(header)
-            .default_open(true)
-            .show(ui, |ui| {
-                for row in rows {
-                    ui.horizontal_wrapped(|ui| {
-                        let (stroke, fill) = preview_status_colors(&row.status);
-                        render_status_chip(ui, &row.status, stroke, fill);
-                        ui.label(
-                            RichText::new(&row.file_name)
-                                .strong()
-                                .color(ui::theme::colors::heading_text()),
-                        );
-                        ui.label(
-                            RichText::new(format!("from {}", row.original_folder))
-                                .size(ui::theme::typography::CAPTION)
-                                .color(ui::theme::colors::metadata_text()),
-                        );
-                    });
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&row.reason)
-                                .size(ui::theme::typography::CAPTION)
-                                .color(ui::theme::colors::secondary_text()),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(ui::theme::spacing::XS);
-                }
-            });
-        ui.add_space(ui::theme::spacing::XS);
-    }
-}
-
-fn render_preview_table_header(ui: &mut egui::Ui) {
-    let width = ui.available_width().max(360.0);
-    let (file_width, target_width) = preview_table_column_widths(width);
-
-    egui::Frame::none()
-        .fill(ui::theme::colors::soft_control())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                preview_cell(ui, "File name", file_width, true);
-                preview_cell(ui, "Target folder", target_width, true);
-            });
-        });
-}
-
-fn preview_table_column_widths(width: f32) -> (f32, f32) {
-    let file_width = (width * 0.44).max(220.0);
-    let target_width = (width - file_width - 18.0).max(260.0);
-    (file_width, target_width)
-}
-
-fn preview_cell(ui: &mut egui::Ui, text: &str, width: f32, strong: bool) {
-    let _ = preview_cell_response(ui, text, width, strong);
-}
-
-fn preview_selectable_cell_with_tooltip(
-    ui: &mut egui::Ui,
-    text: impl Into<String>,
-    width: f32,
-    selected: bool,
-    tooltip: impl Into<egui::WidgetText>,
-) -> egui::Response {
-    let text = text.into();
-    let text_color = if selected {
-        ui::theme::colors::on_primary()
-    } else {
-        ui::theme::colors::primary_text()
-    };
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width.max(40.0), 20.0), egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let fill = if selected {
-            ui::theme::colors::primary_blue()
-        } else if response.hovered() {
-            ui::theme::colors::hover_control()
-        } else {
-            Color32::TRANSPARENT
-        };
-        ui.painter()
-            .rect_filled(rect, egui::Rounding::same(2.0), fill);
-        ui.painter().text(
-            rect.left_center() + egui::vec2(6.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            text,
-            egui::TextStyle::Monospace.resolve(ui.style()),
-            text_color,
-        );
-    }
-    response.on_hover_text(tooltip)
-}
-
-fn preview_cell_response(
-    ui: &mut egui::Ui,
-    text: &str,
-    width: f32,
-    strong: bool,
-) -> egui::Response {
-    let text_color = if strong {
-        ui::theme::colors::heading_text()
-    } else {
-        ui::theme::colors::primary_text()
-    };
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width.max(40.0), 18.0), egui::Sense::hover());
-    if ui.is_rect_visible(rect) {
-        ui.painter().text(
-            rect.left_center() + egui::vec2(6.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            text,
-            egui::TextStyle::Monospace.resolve(ui.style()),
-            text_color,
-        );
-    }
-    response
-}
-
-fn preview_destination_cell_with_tooltip(
-    ui: &mut egui::Ui,
-    row: &PreviewRow,
-    width: f32,
-    tooltip: impl Into<egui::WidgetText>,
-) {
-    let path = preview_example_destination_path(row);
-    let response = ui
-        .allocate_ui(egui::vec2(width.max(40.0), 22.0), |ui| {
-            render_preview_path_highlight(ui, &path)
-        })
-        .inner;
-    response.on_hover_text(tooltip);
-}
-
-fn operation_status(operation: &PlanOperation) -> &'static str {
-    match operation.conflict {
-        ConflictState::None => "Ready",
-        ConflictState::DestinationExists { .. } => "Needs Review",
-        ConflictState::CaseOnlyRename { .. } => "Needs Review",
-        ConflictState::UnsafeDestination { .. } => "Left Untouched",
-    }
-}
-
-fn render_preview_detail(ui: &mut egui::Ui, result: &AnalysisOutput, selected_row: Option<usize>) {
-    let Some(index) = selected_row else {
-        return;
-    };
-    let Some(row) = result.preview_rows.get(index) else {
-        return;
-    };
-
-    ui.label(
-        RichText::new("Selected change")
-            .strong()
-            .size(ui::theme::typography::CARD_TITLE)
-            .color(ui::theme::colors::heading_text()),
-    );
-    egui::Frame::group(ui.style())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .inner_margin(egui::Margin::same(14.0))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(&row.file_name)
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                let (stroke, fill) = preview_status_colors(&row.status);
-                render_status_chip(ui, &row.status, stroke, fill);
-            });
-            ui.add_space(8.0);
-            egui::Grid::new("preview-detail-grid")
-                .num_columns(2)
-                .spacing([16.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Original folder").color(ui::theme::colors::metadata_text()),
-                    );
-                    ui.label(
-                        RichText::new(&row.original_folder)
-                            .color(ui::theme::colors::primary_text()),
-                    );
-                    ui.end_row();
-                    ui.label(
-                        RichText::new("Destination").color(ui::theme::colors::metadata_text()),
-                    );
-                    render_preview_path_highlight(ui, &preview_example_destination_path(row));
-                    ui.end_row();
-                    ui.label(RichText::new("Why").color(ui::theme::colors::metadata_text()));
-                    ui.label(RichText::new(&row.reason).color(ui::theme::colors::primary_text()));
-                    ui.end_row();
-                });
-            ui.add_space(8.0);
-            ui::theme::widgets::surface_frame().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    RichText::new("Explanation")
-                        .strong()
-                        .size(ui::theme::typography::CAPTION)
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(preview_row_explanation(row))
-                            .color(ui::theme::colors::secondary_text()),
-                    )
-                    .wrap(),
-                );
-            });
-            ui.add_space(6.0);
-            truncated_label(ui, &format!("Full source: {}", row.source_full_path));
-            if let Some(destination) = &row.destination_full_path {
-                truncated_label(ui, &format!("Full destination: {destination}"));
-            } else {
-                truncated_label(ui, "Destination: Stays in original folder");
-            }
-        });
-}
-
-fn preview_status_colors(status: &str) -> (Color32, Color32) {
-    match status {
-        "Ready" => (
-            ui::theme::colors::success(),
-            ui::theme::colors::success_bg(),
-        ),
-        "Needs Review" => (
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        ),
-        _ => (
-            ui::theme::colors::metadata_text(),
-            ui::theme::colors::subtle_surface(),
-        ),
-    }
-}
-
-fn preview_row_explanation(row: &PreviewRow) -> String {
-    match row.status.as_str() {
-        "Ready" => format!(
-            "This file matched '{}'. smartfolder found a destination inside the selected folder and no conflict was detected, so it can be organized after confirmation.",
-            row.reason
-        ),
-        "Needs Review" => format!(
-            "This file matched '{}', but the destination needs attention before smartfolder will move it. It stays untouched unless the conflict is resolved.",
-            row.reason
-        ),
-        "Untouched" => format!(
-            "This file stays in place because {}. It will not be moved by the current plan.",
-            row.reason
-        ),
-        _ => format!(
-            "This row is marked '{}'. Review the source and destination before organizing.",
-            row.status
-        ),
-    }
-}
-
-fn activity_status_colors(status: TransactionStatus) -> (Color32, Color32) {
-    match status {
-        TransactionStatus::Completed => (
-            ui::theme::colors::success(),
-            ui::theme::colors::success_bg(),
-        ),
-        TransactionStatus::RolledBack | TransactionStatus::PartiallyRolledBack => {
-            (ui::theme::colors::info(), ui::theme::colors::info_bg())
-        }
-        TransactionStatus::Failed | TransactionStatus::Interrupted => (
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        ),
-        TransactionStatus::InProgress => (
-            ui::theme::colors::warning(),
-            ui::theme::colors::warning_bg(),
-        ),
+        render_activity_detail_error_window(ui.ctx(), message, action);
     }
 }
 
@@ -7821,1284 +5473,6 @@ fn ai_confidence_label(confidence: smartfolder_core::ai::AiConfidence) -> &'stat
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum BuiltinRuleAction {
-    Use,
-    Customize,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum SavedProfileAction {
-    Use,
-    Edit,
-}
-
-fn render_active_profile_panel(
-    ui: &mut egui::Ui,
-    planning_source: PlanningSource,
-    mode: BuiltInMode,
-    loaded_profile: Option<&LoadedRuleProfile>,
-    profile_to_edit: &mut Option<LoadedRuleProfile>,
-    maintenance_message: &mut Option<String>,
-) {
-    ui::theme::widgets::card_frame().show(ui, |ui| {
-        ui.label(
-            RichText::new("Active profile")
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.add_space(ui::theme::spacing::XS);
-
-        let (name, rules, destination, is_custom) =
-            active_profile_summary(planning_source, mode, loaded_profile);
-
-        ui.horizontal_wrapped(|ui| {
-            render_status_chip(
-                ui,
-                if is_custom { "Custom" } else { "Built-in" },
-                ui::theme::colors::info(),
-                ui::theme::colors::info_bg(),
-            );
-            ui.label(
-                RichText::new(name)
-                    .strong()
-                    .color(ui::theme::colors::heading_text()),
-            );
-            ui.label(
-                RichText::new(rules)
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::metadata_text()),
-            );
-        });
-        ui.label(
-            RichText::new(destination)
-                .monospace()
-                .color(ui::theme::colors::primary_text()),
-        );
-        ui.add_space(ui::theme::spacing::SM);
-        ui.horizontal_wrapped(|ui| {
-            if let Some(profile) = loaded_profile {
-                if ui
-                    .add(ui::theme::widgets::secondary_button("Edit profile"))
-                    .clicked()
-                {
-                    *profile_to_edit = Some(profile.clone());
-                }
-            }
-            if ui
-                .add(ui::theme::widgets::tertiary_button("Use another"))
-                .clicked()
-            {
-                *maintenance_message =
-                    Some("Choose a built-in style or saved custom profile below.".to_string());
-            }
-        });
-    });
-}
-
-fn active_profile_summary(
-    planning_source: PlanningSource,
-    mode: BuiltInMode,
-    loaded_profile: Option<&LoadedRuleProfile>,
-) -> (String, String, String, bool) {
-    if let (PlanningSource::RuleProfile, Some(profile)) = (planning_source, loaded_profile) {
-        (
-            profile.profile.profile_id.clone(),
-            format!(
-                "{} rule{}",
-                profile.profile.rules.len(),
-                plural(profile.profile.rules.len())
-            ),
-            profile_destination_example(&profile.profile),
-            true,
-        )
-    } else {
-        let (_, title, pattern, _) = builtin_library_items()
-            .into_iter()
-            .find(|(candidate, _, _, _)| *candidate == mode)
-            .unwrap_or((
-                BuiltInMode::TypeYear,
-                "Type + Date",
-                "{type}/{year}/{month}/{day}",
-                "",
-            ));
-        (
-            title.to_string(),
-            "Read-only built-in".to_string(),
-            format!("Destination: {}", sample_destination_template(pattern)),
-            false,
-        )
-    }
-}
-
-fn profile_destination_example(profile: &RuleProfile) -> String {
-    profile
-        .rules
-        .first()
-        .map(|rule| {
-            format!(
-                "Destination: {}",
-                sample_destination_template(&rule.destination)
-            )
-        })
-        .unwrap_or_else(|| "Destination: not set".to_string())
-}
-
-fn render_rules_ai_panel(
-    ui: &mut egui::Ui,
-    has_root: bool,
-    running_ai_task: bool,
-    show_rules_workspace: &mut bool,
-    show_ai_draft_prompt: &mut bool,
-    maintenance_message: &mut Option<String>,
-    error_message: &mut Option<String>,
-) {
-    ui::theme::widgets::surface_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(
-            RichText::new("Rule suggestions")
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.label(
-            RichText::new("Use AI to draft deterministic custom rules, then review and save them before organizing.")
-                .color(ui::theme::colors::secondary_text()),
-        );
-        ui.add_space(ui::theme::spacing::SM);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    has_root && !running_ai_task,
-                    ui::theme::widgets::secondary_button("Suggest rules from current folder"),
-                )
-                .on_disabled_hover_text("Choose a folder before asking AI to suggest rules")
-                .clicked()
-            {
-                *show_rules_workspace = true;
-                *show_ai_draft_prompt = true;
-                *maintenance_message =
-                    Some("Describe how you want files organized, then draft rules.".to_string());
-                *error_message = None;
-            }
-            if ui
-                .add_enabled(
-                    !running_ai_task,
-                    ui::theme::widgets::tertiary_button("Describe how you want files organized"),
-                )
-                .clicked()
-            {
-                *show_rules_workspace = true;
-                *show_ai_draft_prompt = true;
-                *maintenance_message =
-                    Some("Describe the rule profile you want AI to draft.".to_string());
-                *error_message = None;
-            }
-        });
-    });
-}
-
-fn builtin_library_items() -> [(BuiltInMode, &'static str, &'static str, &'static str); 3] {
-    [
-        (
-            BuiltInMode::Type,
-            "By Type",
-            "{type}",
-            "Groups files into Documents, Images, Videos, Archives, and related folders.",
-        ),
-        (
-            BuiltInMode::Date,
-            "By Date",
-            "{year}/{month}/{day}",
-            "Groups files by modified date when time is the clearest way to browse them.",
-        ),
-        (
-            BuiltInMode::TypeYear,
-            "Type + Date",
-            "{type}/{year}/{month}/{day}",
-            "Keeps file kinds together, then adds date folders inside each type.",
-        ),
-    ]
-}
-
-fn render_builtin_rule_row(
-    ui: &mut egui::Ui,
-    title: &str,
-    pattern: &str,
-    detail: &str,
-    selected: bool,
-    mut on_action: impl FnMut(BuiltinRuleAction),
-) {
-    egui::Frame::group(ui.style())
-        .fill(if selected {
-            ui::theme::colors::hover_control()
-        } else {
-            ui::theme::colors::elevated_surface()
-        })
-        .stroke(egui::Stroke::new(
-            1.0,
-            if selected {
-                ui::theme::colors::primary_blue()
-            } else {
-                ui::theme::colors::border()
-            },
-        ))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - 280.0).max(260.0), 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            if selected {
-                                ui::theme::widgets::status_dot(
-                                    ui,
-                                    ui::theme::colors::primary_blue(),
-                                );
-                            }
-                            ui.label(
-                                RichText::new(title)
-                                    .strong()
-                                    .color(ui::theme::colors::heading_text()),
-                            );
-                            if selected {
-                                render_status_chip(
-                                    ui,
-                                    "Active",
-                                    ui::theme::colors::info(),
-                                    ui::theme::colors::info_bg(),
-                                );
-                            }
-                        });
-                        ui.label(
-                            RichText::new(format!(
-                                "Destination: {}",
-                                sample_destination_template(pattern)
-                            ))
-                            .monospace()
-                            .color(ui::theme::colors::primary_text()),
-                        );
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(detail).color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Customize"))
-                        .clicked()
-                    {
-                        on_action(BuiltinRuleAction::Customize);
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Use"))
-                        .clicked()
-                    {
-                        on_action(BuiltinRuleAction::Use);
-                    }
-                });
-            });
-        });
-}
-
-fn render_saved_profile_row(
-    ui: &mut egui::Ui,
-    profile: &LoadedRuleProfile,
-    selected: bool,
-) -> Option<SavedProfileAction> {
-    let mut action = None;
-    egui::Frame::group(ui.style())
-        .fill(if selected {
-            ui::theme::colors::hover_control()
-        } else {
-            ui::theme::colors::elevated_surface()
-        })
-        .stroke(egui::Stroke::new(
-            1.0,
-            if selected {
-                ui::theme::colors::primary_blue()
-            } else {
-                ui::theme::colors::border()
-            },
-        ))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::same(ui::theme::spacing::SM))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - 280.0).max(260.0), 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            if selected {
-                                ui::theme::widgets::status_dot(
-                                    ui,
-                                    ui::theme::colors::primary_blue(),
-                                );
-                            }
-                            ui.label(
-                                RichText::new(&profile.profile.profile_id)
-                                    .strong()
-                                    .color(ui::theme::colors::heading_text()),
-                            );
-                            render_status_chip(
-                                ui,
-                                &format!(
-                                    "{} rule{}",
-                                    profile.profile.rules.len(),
-                                    plural(profile.profile.rules.len())
-                                ),
-                                ui::theme::colors::secondary_text(),
-                                ui::theme::colors::elevated_surface(),
-                            );
-                            if selected {
-                                render_status_chip(
-                                    ui,
-                                    "Active",
-                                    ui::theme::colors::success(),
-                                    ui::theme::colors::success_bg(),
-                                );
-                            }
-                        });
-                        if let Some(rule) = profile.profile.rules.first() {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} -> {}",
-                                    rule.name,
-                                    sample_destination_template(&rule.destination)
-                                ))
-                                .color(ui::theme::colors::secondary_text()),
-                            );
-                        }
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(profile.path.display().to_string())
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::metadata_text()),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(profile.path.display().to_string());
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Use"))
-                        .clicked()
-                    {
-                        action = Some(SavedProfileAction::Use);
-                    }
-                    if ui
-                        .add(ui::theme::widgets::compact_secondary_button("Edit"))
-                        .clicked()
-                    {
-                        action = Some(SavedProfileAction::Edit);
-                    }
-                });
-            });
-        });
-    action
-}
-
-fn render_profile_workspace_status(ui: &mut egui::Ui, loaded_profile: Option<&LoadedRuleProfile>) {
-    if let Some(profile) = loaded_profile {
-        ui.horizontal_wrapped(|ui| {
-            render_status_chip(
-                ui,
-                "Saved",
-                ui::theme::colors::success(),
-                ui::theme::colors::success_bg(),
-            );
-            ui.label(
-                RichText::new(format!("Editing {}", profile.profile.profile_id))
-                    .color(ui::theme::colors::primary_text()),
-            );
-        });
-    } else {
-        ui.horizontal_wrapped(|ui| {
-            render_status_chip(
-                ui,
-                "Draft",
-                ui::theme::colors::warning(),
-                ui::theme::colors::warning_bg(),
-            );
-            ui.label(
-                RichText::new("Save this draft before using it for Custom Rules.")
-                    .color(ui::theme::colors::secondary_text()),
-            );
-        });
-    }
-}
-
-fn render_rule_list_panel(ui: &mut egui::Ui, editor: &mut ProfileEditorState) {
-    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("Rules")
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
-        render_status_chip(
-            ui,
-            &format!("{} rule{}", editor.rules.len(), plural(editor.rules.len())),
-            ui::theme::colors::secondary_text(),
-            ui::theme::colors::elevated_surface(),
-        );
-    });
-    ui.add_space(ui::theme::spacing::XS);
-
-    let mut selected_rule = editor.selected_rule_index();
-    for (index, rule) in editor.rules.iter().enumerate() {
-        if render_rule_list_item(ui, rule, index, index == selected_rule).clicked() {
-            selected_rule = index;
-        }
-        ui.add_space(4.0);
-    }
-    editor.selected_rule = selected_rule;
-
-    ui.add_space(ui::theme::spacing::SM);
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_sized(
-                [80.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                ui::theme::widgets::compact_secondary_button("Add"),
-            )
-            .clicked()
-        {
-            editor.add_rule();
-        }
-        if ui
-            .add_sized(
-                [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                ui::theme::widgets::compact_secondary_button("Duplicate"),
-            )
-            .clicked()
-        {
-            editor.duplicate_selected_rule();
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(
-                editor.selected_rule_index() > 0,
-                ui::theme::widgets::compact_secondary_button("Up")
-                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
-            )
-            .clicked()
-        {
-            editor.move_selected_rule(-1);
-        }
-        if ui
-            .add_enabled(
-                editor.selected_rule_index() + 1 < editor.rules.len(),
-                ui::theme::widgets::compact_secondary_button("Down")
-                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
-            )
-            .clicked()
-        {
-            editor.move_selected_rule(1);
-        }
-        if ui
-            .add_enabled(
-                editor.rules.len() > 1,
-                ui::theme::widgets::compact_secondary_button("Delete")
-                    .min_size(egui::vec2(80.0, PROFILE_WORKSPACE_FIELD_HEIGHT)),
-            )
-            .clicked()
-        {
-            editor.delete_selected_rule();
-        }
-    });
-}
-
-fn render_rule_list_item(
-    ui: &mut egui::Ui,
-    rule: &RuleEditorState,
-    index: usize,
-    selected: bool,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width().max(180.0), 52.0),
-        egui::Sense::click(),
-    );
-    if ui.is_rect_visible(rect) {
-        let fill = if selected {
-            ui::theme::colors::hover_control()
-        } else if response.hovered() {
-            ui::theme::colors::soft_control()
-        } else {
-            ui::theme::colors::elevated_surface()
-        };
-        ui.painter()
-            .rect_filled(rect, egui::Rounding::same(6.0), fill);
-        ui.painter().rect_stroke(
-            rect,
-            egui::Rounding::same(6.0),
-            egui::Stroke::new(1.0, ui::theme::colors::border()),
-        );
-        if selected {
-            let accent = egui::Rect::from_min_max(
-                rect.left_top(),
-                egui::pos2(rect.left() + 3.0, rect.bottom()),
-            );
-            ui.painter().rect_filled(
-                accent,
-                egui::Rounding::same(6.0),
-                ui::theme::colors::primary_blue(),
-            );
-        }
-        let text_x = rect.left() + 10.0;
-        ui.painter().text(
-            egui::pos2(text_x, rect.top() + 13.0),
-            egui::Align2::LEFT_CENTER,
-            format!("{}. {}", index + 1, rule.rule_name),
-            egui::TextStyle::Button.resolve(ui.style()),
-            ui::theme::colors::heading_text(),
-        );
-        ui.painter().text(
-            egui::pos2(text_x, rect.top() + 34.0),
-            egui::Align2::LEFT_CENTER,
-            rule_destination_summary(rule),
-            egui::TextStyle::Small.resolve(ui.style()),
-            ui::theme::colors::secondary_text(),
-        );
-    }
-    response.on_hover_text(rule_destination_summary(rule))
-}
-
-fn render_rule_detail_editor(
-    ui: &mut egui::Ui,
-    rule: &mut RuleEditorState,
-    simulation: Option<&RuleSimulationResult>,
-) {
-    ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-    render_rule_editor_section(ui, "Rule", "Name this rule and set its order.", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            labeled_text_edit(ui, "Rule name", &mut rule.rule_name, 220.0, "");
-            labeled_text_edit(ui, "Priority", &mut rule.priority, 72.0, "10");
-        });
-    });
-
-    ui.add_space(ui::theme::spacing::SM);
-    render_rule_editor_section(
-        ui,
-        "Applies to",
-        "Leave fields blank when they should not constrain the match.",
-        |ui| render_rule_conditions_editor(ui, rule),
-    );
-
-    ui.add_space(ui::theme::spacing::SM);
-    render_rule_editor_section(
-        ui,
-        "Destination",
-        "Build the folder path for matched files.",
-        |ui| {
-            ui.horizontal_wrapped(|ui| {
-                render_destination_mode_toggle(ui, rule);
-                ui.label(
-                    RichText::new(readable_destination_path(&rule.destination))
-                        .monospace()
-                        .color(ui::theme::colors::primary_text()),
-                );
-            });
-            ui.add_space(ui::theme::spacing::SM);
-            render_destination_builder(ui, rule);
-        },
-    );
-
-    ui.add_space(ui::theme::spacing::SM);
-    render_rule_editor_section(
-        ui,
-        "Simulation",
-        "Preview how this rule behaves against the latest analyzed folder.",
-        |ui| render_rule_simulation(ui, rule, simulation),
-    );
-
-    ui.add_space(ui::theme::spacing::SM);
-    render_rule_editor_section(
-        ui,
-        "Advanced",
-        "Use sparingly. These options can broaden matches.",
-        |ui| {
-            ui.checkbox(&mut rule.match_all, "Match all files");
-            if rule.match_all {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "This rule ignores all conditions and should usually be the final fallback rule.",
-                        )
-                        .color(ui::theme::colors::warning()),
-                    )
-                    .wrap(),
-                );
-            }
-        },
-    );
-}
-
-fn render_rule_editor_section(
-    ui: &mut egui::Ui,
-    title: &str,
-    detail: &str,
-    contents: impl FnOnce(&mut egui::Ui),
-) {
-    ui::theme::widgets::surface_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(
-            RichText::new(title)
-                .strong()
-                .size(ui::theme::typography::CARD_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.label(
-            RichText::new(detail)
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-        );
-        ui.add_space(ui::theme::spacing::SM);
-        contents(ui);
-    });
-}
-
-fn render_rule_simulation(
-    ui: &mut egui::Ui,
-    rule: &RuleEditorState,
-    simulation: Option<&RuleSimulationResult>,
-) {
-    let Some(simulation) = simulation.filter(|simulation| simulation.rule_name == rule.rule_name)
-    else {
-        ui.add(
-            egui::Label::new(
-                RichText::new("Run Preview, then use Simulate in the toolbar.")
-                    .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-        return;
-    };
-
-    ui.horizontal_wrapped(|ui| {
-        render_status_chip(
-            ui,
-            &format!(
-                "{} match{}",
-                simulation.matched_files,
-                plural(simulation.matched_files)
-            ),
-            ui::theme::colors::info(),
-            ui::theme::colors::info_bg(),
-        );
-        ui.label(
-            RichText::new(format!(
-                "Checked {} file{} from the current preview.",
-                simulation.total_files,
-                plural(simulation.total_files)
-            ))
-            .color(ui::theme::colors::secondary_text()),
-        );
-    });
-
-    if simulation.sample_matches.is_empty() {
-        ui.label(
-            RichText::new("No sampled files matched this rule.")
-                .color(ui::theme::colors::metadata_text()),
-        );
-    } else {
-        ui.add_space(ui::theme::spacing::XS);
-        for sample in &simulation.sample_matches {
-            truncated_label(ui, &format!("Matched: {sample}"));
-        }
-    }
-}
-
-fn render_rule_conditions_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    if rule.match_all {
-        ui.add(
-            egui::Label::new(
-                RichText::new(
-                    "Match all files is enabled in Advanced, so these conditions are ignored.",
-                )
-                .color(ui::theme::colors::secondary_text()),
-            )
-            .wrap(),
-        );
-    }
-
-    egui::Grid::new("rule-condition-editor")
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Extensions");
-            ui.add_sized(
-                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                egui::TextEdit::singleline(&mut rule.extensions)
-                    .hint_text(example_hint("pdf, docx")),
-            );
-            ui.end_row();
-
-            ui.label("Filename contains");
-            ui.add_sized(
-                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                egui::TextEdit::singleline(&mut rule.filename_contains)
-                    .hint_text(example_hint("invoice")),
-            );
-            ui.end_row();
-
-            ui.label("Path contains");
-            ui.add_sized(
-                [220.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                egui::TextEdit::singleline(&mut rule.path_contains)
-                    .hint_text(example_hint("downloads")),
-            );
-            ui.end_row();
-
-            ui.label("Year");
-            ui.add_sized(
-                [96.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                egui::TextEdit::singleline(&mut rule.year).hint_text(example_hint("2026")),
-            );
-            ui.end_row();
-
-            ui.label("Size range");
-            ui.horizontal(|ui| {
-                ui.add_sized(
-                    [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                    egui::TextEdit::singleline(&mut rule.min_size_bytes)
-                        .hint_text(example_hint("1000")),
-                );
-                ui.add_sized(
-                    [104.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                    egui::TextEdit::singleline(&mut rule.max_size_bytes)
-                        .hint_text(example_hint("200000")),
-                );
-            });
-            ui.end_row();
-        });
-}
-
-fn labeled_text_edit(ui: &mut egui::Ui, label: &str, value: &mut String, width: f32, hint: &str) {
-    ui.label(
-        RichText::new(label)
-            .size(ui::theme::typography::CAPTION)
-            .color(ui::theme::colors::metadata_text()),
-    );
-    let mut edit = egui::TextEdit::singleline(value);
-    if !hint.is_empty() {
-        edit = edit.hint_text(example_hint(hint));
-    }
-    ui.add_sized([width, PROFILE_WORKSPACE_FIELD_HEIGHT], edit);
-}
-
-fn example_hint(value: &str) -> RichText {
-    RichText::new(format!("e.g. {value}"))
-        .italics()
-        .color(ui::theme::colors::metadata_text())
-}
-
-#[derive(Debug, Clone)]
-struct DestinationDragPayload {
-    source: DestinationDragSource,
-}
-
-#[derive(Debug, Clone)]
-enum DestinationDragSource {
-    Existing(usize),
-    Token(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DestinationSegment {
-    Text(String),
-    Token(String),
-}
-
-impl DestinationSegment {
-    fn label(&self) -> &str {
-        match self {
-            Self::Text(value) | Self::Token(value) => value,
-        }
-    }
-
-    fn is_token(&self) -> bool {
-        matches!(self, Self::Token(_))
-    }
-}
-
-fn render_destination_mode_toggle(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    ui.horizontal_wrapped(|ui| {
-        ui.selectable_value(&mut rule.destination_text_mode, false, "Visual");
-        ui.selectable_value(&mut rule.destination_text_mode, true, "Text");
-    });
-}
-
-fn render_destination_builder(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    if rule.destination_text_mode {
-        render_destination_text_editor(ui, rule);
-    } else {
-        render_destination_visual_editor(ui, rule);
-    }
-}
-
-fn render_destination_text_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    ui.add_sized(
-        [
-            ui.available_width().min(520.0),
-            PROFILE_WORKSPACE_FIELD_HEIGHT,
-        ],
-        egui::TextEdit::singleline(&mut rule.destination)
-            .hint_text(example_hint("Documents/PDFs/{year}/{month}")),
-    );
-    ui.label(
-        RichText::new("Use / between folders. Supported tokens: {type}, {year}, {month}, {day}, {extension}, {filename}.")
-            .size(ui::theme::typography::CAPTION)
-            .color(ui::theme::colors::metadata_text()),
-    );
-}
-
-fn render_destination_visual_editor(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("Drag chips to reorder. Drop outside to remove.")
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-        );
-    });
-
-    let mut segments = parse_destination_segments(&rule.destination);
-    let mut dropped_payload: Option<(usize, DestinationDragPayload)> = None;
-
-    let path_response = destination_path_frame().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            if segments.is_empty() {
-                ui.label(
-                    RichText::new("Drop a token or add a folder segment.")
-                        .color(ui::theme::colors::metadata_text()),
-                );
-            }
-
-            for (index, segment) in segments.iter().enumerate() {
-                let chip_response = ui.dnd_drag_source(
-                    egui::Id::new(("destination-segment", index, segment.label())),
-                    DestinationDragPayload {
-                        source: DestinationDragSource::Existing(index),
-                    },
-                    |ui| {
-                        render_destination_segment_chip(ui, segment);
-                    },
-                );
-                let response = chip_response
-                    .response
-                    .on_hover_text("Drag to reorder. Drag outside the path to remove.");
-                if let Some(payload) = response.dnd_release_payload::<DestinationDragPayload>() {
-                    let target_index = ui
-                        .ctx()
-                        .pointer_interact_pos()
-                        .map(|position| {
-                            if position.x > response.rect.center().x {
-                                index + 1
-                            } else {
-                                index
-                            }
-                        })
-                        .unwrap_or(index);
-                    dropped_payload = Some((target_index, (*payload).clone()));
-                }
-            }
-        });
-    });
-
-    if dropped_payload.is_none() {
-        if let Some(payload) = path_response
-            .response
-            .dnd_release_payload::<DestinationDragPayload>()
-        {
-            dropped_payload = Some((segments.len(), (*payload).clone()));
-        }
-    }
-
-    if let Some((target_index, payload)) = dropped_payload {
-        apply_destination_drop(&mut segments, target_index, payload);
-        rule.destination = build_destination_from_segments(&segments);
-    } else if let Some(index) =
-        destination_segment_removed_outside_path(ui, path_response.response.rect, segments.len())
-    {
-        if index < segments.len() {
-            segments.remove(index);
-            rule.destination = build_destination_from_segments(&segments);
-            egui::DragAndDrop::clear_payload(ui.ctx());
-        }
-    }
-
-    ui.add_space(ui::theme::spacing::XS);
-    render_destination_add_segment(ui, rule);
-    ui.add_space(ui::theme::spacing::XS);
-    render_destination_token_palette(ui, rule);
-}
-
-fn destination_path_frame() -> egui::Frame {
-    egui::Frame::group(&egui::Style::default())
-        .fill(ui::theme::colors::surface())
-        .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::same(4.0))
-}
-
-fn render_destination_segment_chip(ui: &mut egui::Ui, segment: &DestinationSegment) {
-    let stroke = if segment.is_token() {
-        ui::theme::colors::info()
-    } else {
-        ui::theme::colors::secondary_text()
-    };
-    let fill = if segment.is_token() {
-        ui::theme::colors::info_bg()
-    } else {
-        ui::theme::colors::elevated_surface()
-    };
-
-    egui::Frame::group(ui.style())
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, stroke))
-        .rounding(egui::Rounding::same(999.0))
-        .inner_margin(egui::Margin::symmetric(9.0, 4.0))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(segment.label())
-                    .monospace()
-                    .strong()
-                    .size(ui::theme::typography::CAPTION)
-                    .color(stroke),
-            );
-        });
-}
-
-fn destination_segment_removed_outside_path(
-    ui: &mut egui::Ui,
-    path_rect: egui::Rect,
-    segment_count: usize,
-) -> Option<usize> {
-    if segment_count == 0 || !ui.ctx().input(|input| input.pointer.any_released()) {
-        return None;
-    }
-
-    let pointer = ui.ctx().pointer_interact_pos()?;
-    if path_rect.contains(pointer) {
-        return None;
-    }
-
-    let payload = egui::DragAndDrop::payload::<DestinationDragPayload>(ui.ctx())?;
-    match payload.source {
-        DestinationDragSource::Existing(index) => Some(index),
-        DestinationDragSource::Token(_) => None,
-    }
-}
-
-fn render_destination_add_segment(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("Folder segment")
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-        );
-        ui.add_sized(
-            [180.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-            egui::TextEdit::singleline(&mut rule.new_destination_segment)
-                .hint_text(example_hint("Invoices")),
-        );
-        if ui
-            .add_sized(
-                [72.0, PROFILE_WORKSPACE_FIELD_HEIGHT],
-                ui::theme::widgets::compact_secondary_button("Add"),
-            )
-            .clicked()
-        {
-            append_text_destination_segment(rule);
-        }
-    });
-}
-
-fn render_destination_token_palette(ui: &mut egui::Ui, rule: &mut RuleEditorState) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("Tokens")
-                .size(ui::theme::typography::CAPTION)
-                .color(ui::theme::colors::metadata_text()),
-        );
-        for token in ["{type}", "{year}", "{month}", "{day}", "{extension}"] {
-            render_token_palette_chip(ui, rule, token);
-        }
-    });
-    egui::CollapsingHeader::new("Advanced tokens")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                render_token_palette_chip(ui, rule, "{filename}");
-            });
-        });
-}
-
-fn render_token_palette_chip(ui: &mut egui::Ui, rule: &mut RuleEditorState, token: &'static str) {
-    let response = ui.dnd_drag_source(
-        egui::Id::new(("destination-token-palette", token)),
-        DestinationDragPayload {
-            source: DestinationDragSource::Token(token.to_string()),
-        },
-        |ui| {
-            let button = egui::Button::new(
-                RichText::new(token)
-                    .monospace()
-                    .strong()
-                    .color(ui::theme::colors::info()),
-            )
-            .fill(ui::theme::colors::surface())
-            .stroke(egui::Stroke::new(1.0, ui::theme::colors::info()))
-            .min_size(egui::vec2(72.0, PROFILE_WORKSPACE_FIELD_HEIGHT));
-            if ui.add(button).clicked() {
-                append_destination_token(&mut rule.destination, token);
-            }
-        },
-    );
-    response
-        .response
-        .on_hover_text("Drag into destination or click to append");
-}
-
-fn parse_destination_segments(destination: &str) -> Vec<DestinationSegment> {
-    destination
-        .split(['/', '\\'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| {
-            if is_destination_token(segment) {
-                DestinationSegment::Token(segment.to_string())
-            } else {
-                DestinationSegment::Text(segment.to_string())
-            }
-        })
-        .collect()
-}
-
-fn build_destination_from_segments(segments: &[DestinationSegment]) -> String {
-    segments
-        .iter()
-        .map(|segment| segment.label())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn readable_destination_path(destination: &str) -> String {
-    let segments = parse_destination_segments(destination);
-    if segments.is_empty() {
-        "No destination set".to_string()
-    } else {
-        segments
-            .iter()
-            .map(DestinationSegment::label)
-            .collect::<Vec<_>>()
-            .join(" / ")
-    }
-}
-
-fn apply_destination_drop(
-    segments: &mut Vec<DestinationSegment>,
-    target_index: usize,
-    payload: DestinationDragPayload,
-) {
-    match payload.source {
-        DestinationDragSource::Existing(source_index) => {
-            if source_index >= segments.len() {
-                return;
-            }
-            let segment = segments.remove(source_index);
-            let adjusted_target = if source_index < target_index {
-                target_index.saturating_sub(1)
-            } else {
-                target_index
-            };
-            segments.insert(adjusted_target.min(segments.len()), segment);
-        }
-        DestinationDragSource::Token(token) => {
-            segments.insert(
-                target_index.min(segments.len()),
-                DestinationSegment::Token(token),
-            );
-        }
-    }
-}
-
-fn append_text_destination_segment(rule: &mut RuleEditorState) {
-    let trimmed = rule
-        .new_destination_segment
-        .trim()
-        .trim_matches(['/', '\\'])
-        .to_string();
-    if trimmed.is_empty() {
-        return;
-    }
-    let mut segments = parse_destination_segments(&rule.destination);
-    segments.push(if is_destination_token(&trimmed) {
-        DestinationSegment::Token(trimmed)
-    } else {
-        DestinationSegment::Text(trimmed)
-    });
-    rule.destination = build_destination_from_segments(&segments);
-    rule.new_destination_segment.clear();
-}
-
-fn is_destination_token(segment: &str) -> bool {
-    matches!(
-        segment,
-        "{type}" | "{year}" | "{month}" | "{day}" | "{extension}" | "{filename}"
-    )
-}
-
-fn append_destination_token(destination: &mut String, token: &str) {
-    if destination.trim().is_empty() {
-        destination.push_str(token);
-    } else if destination.ends_with('/') || destination.ends_with('\\') {
-        destination.push_str(token);
-    } else {
-        destination.push('/');
-        destination.push_str(token);
-    }
-}
-
-fn rule_destination_summary(rule: &RuleEditorState) -> String {
-    if rule.destination.trim().is_empty() {
-        "No destination set".to_string()
-    } else {
-        format!("-> {}", rule.destination.trim())
-    }
-}
-
-fn activity_event_title(row: &TransactionRow) -> String {
-    let folder = folder_name_label(&row.root);
-    match row.status {
-        TransactionStatus::Completed => format!(
-            "Organized {} file{} in {folder}",
-            row.completed,
-            plural(row.completed)
-        ),
-        TransactionStatus::RolledBack => format!(
-            "Restored previous layout in {folder}: {} file{} restored",
-            row.rolled_back,
-            plural(row.rolled_back)
-        ),
-        TransactionStatus::PartiallyRolledBack => format!(
-            "Partially restored previous layout in {folder}: {} file{} restored",
-            row.rolled_back,
-            plural(row.rolled_back)
-        ),
-        TransactionStatus::Interrupted => format!(
-            "Organization interrupted in {folder} after {} recorded change{}",
-            row.total_operations,
-            plural(row.total_operations)
-        ),
-        TransactionStatus::InProgress => format!(
-            "Organization running in {folder}: {} recorded change{}",
-            row.total_operations,
-            plural(row.total_operations)
-        ),
-        TransactionStatus::Failed => format!(
-            "Organization needs review in {folder}: {} failed, {} organized",
-            row.failed, row.completed
-        ),
-    }
-}
-
-fn activity_date_label(row: &TransactionRow) -> &str {
-    row.started_at
-        .split_once(' ')
-        .map_or(row.started_at.as_str(), |(date, _)| date)
-}
-
-fn activity_time_label(row: &TransactionRow) -> &str {
-    row.started_at
-        .split_once(' ')
-        .map_or("", |(_, time)| time)
-        .get(0..5)
-        .unwrap_or("")
-}
-
-fn activity_detail_headline(detail: &TransactionDetail) -> String {
-    match detail.status {
-        TransactionStatus::Completed => format!(
-            "Organized {} file{} on {}.",
-            detail.operation_counts.completed,
-            plural(detail.operation_counts.completed),
-            detail.started_at
-        ),
-        TransactionStatus::RolledBack => format!(
-            "Restored {} file{} from this activity.",
-            detail.operation_counts.rolled_back,
-            plural(detail.operation_counts.rolled_back)
-        ),
-        TransactionStatus::PartiallyRolledBack => format!(
-            "Restored {} file{} with some changes still needing review.",
-            detail.operation_counts.rolled_back,
-            plural(detail.operation_counts.rolled_back)
-        ),
-        TransactionStatus::Interrupted => format!(
-            "Organization was interrupted after {} recorded change{}.",
-            detail.total_operations,
-            plural(detail.total_operations)
-        ),
-        TransactionStatus::InProgress => format!(
-            "Organization is still in progress with {} recorded change{}.",
-            detail.total_operations,
-            plural(detail.total_operations)
-        ),
-        TransactionStatus::Failed => format!(
-            "Organization needs review: {} failed, {} completed.",
-            detail.operation_counts.failed, detail.operation_counts.completed
-        ),
-    }
-}
-
-fn activity_detail(row: &TransactionRow) -> String {
-    match row.status {
-        TransactionStatus::Completed => format!(
-            "Why: {}. Completed {}. {} item{} skipped or failed.",
-            row.reason_summary,
-            row.started_at,
-            row.skipped + row.failed,
-            plural(row.skipped + row.failed)
-        ),
-        TransactionStatus::RolledBack => format!(
-            "Restore completed {}. Original file locations were restored where possible.",
-            row.started_at
-        ),
-        TransactionStatus::PartiallyRolledBack => {
-            "Restore completed with remaining issues. Review details before making more changes."
-                .to_string()
-        }
-        TransactionStatus::Interrupted | TransactionStatus::InProgress => format!(
-            "Why: {}. {} completed, {} pending. Resume or restore from the recovery controls.",
-            row.reason_summary, row.completed, row.pending
-        ),
-        TransactionStatus::Failed => {
-            "Some file moves failed. Review details before retrying or restoring.".to_string()
-        }
-    }
-}
-
-fn activity_count_summary(row: &TransactionRow) -> String {
-    format!(
-        "{} moved / {} restored / {} needs review",
-        row.completed,
-        row.rolled_back,
-        row.skipped + row.failed + row.pending
-    )
-}
-
 fn same_folder(left: &Path, right: &Path) -> bool {
     normalized_path_key(left) == normalized_path_key(right)
 }
@@ -9238,7 +5612,7 @@ fn example_tree_connector(entry: &ExampleTreeEntry) -> String {
     connector
 }
 
-fn sample_destination_template(template: &str) -> String {
+pub(crate) fn sample_destination_template(template: &str) -> String {
     let mut rendered = template.trim().replace('\\', "/");
     for (token, replacement) in [
         ("{year}", "2026"),
@@ -9257,20 +5631,7 @@ fn sample_destination_template(template: &str) -> String {
     rendered
 }
 
-fn plural_y(value: usize) -> &'static str {
-    if value == 1 {
-        "y"
-    } else {
-        "ies"
-    }
-}
-
-fn summary_row(ui: &mut egui::Ui, label: &str, value: usize) {
-    ui.label(label);
-    ui.label(value.to_string());
-    ui.end_row();
-}
-
+#[cfg(test)]
 fn status_label(status: TransactionStatus) -> &'static str {
     match status {
         TransactionStatus::InProgress => "in progress",
@@ -9282,6 +5643,7 @@ fn status_label(status: TransactionStatus) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn operation_status_label(status: OperationStatus) -> &'static str {
     match status {
         OperationStatus::Pending => "pending",
@@ -9301,7 +5663,7 @@ fn can_undo_status(status: TransactionStatus) -> bool {
     )
 }
 
-fn is_cloud_synced_path(path: &Path) -> bool {
+pub(crate) fn is_cloud_synced_path(path: &Path) -> bool {
     path.components().any(|component| {
         let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
         value.contains("onedrive")
@@ -9336,14 +5698,20 @@ mod tests {
     };
     use smartfolder_core::rules::{CustomRule, RuleProfile};
 
-    use super::{
+    use crate::ui::screens::activity::{
         activity_count_summary, activity_date_label, activity_event_title, activity_time_label,
-        apply_destination_drop, build_destination_from_segments, can_undo_status,
-        is_cloud_synced_path, operation_status_label, parse_destination_segments,
-        preloaded_root_from_args, preview_rows, profile_file_stem, same_folder, status_label,
-        transaction_operation_counts, untouched_preview_rows, AnalysisPlanSource,
-        DestinationDragPayload, DestinationDragSource, DestinationSegment, LoadedRuleProfile,
-        PlanningSource, ProfileEditorState, RuleEditorState, SmartfolderApp, TransactionRow,
+    };
+    use crate::ui::screens::preview::{preview_rows, untouched_preview_rows};
+    use crate::ui::screens::rules::{
+        apply_destination_drop, build_destination_from_segments, parse_destination_segments,
+        DestinationDragPayload, DestinationDragSource, DestinationSegment,
+    };
+
+    use super::{
+        can_undo_status, is_cloud_synced_path, operation_status_label, preloaded_root_from_args,
+        profile_file_stem, same_folder, status_label, transaction_operation_counts,
+        AnalysisPlanSource, LoadedRuleProfile, PlanningSource, ProfileEditorState, RuleEditorState,
+        SmartfolderApp, TransactionRow,
     };
 
     #[test]

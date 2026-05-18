@@ -9,6 +9,10 @@ Version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Continued the `smartfolder-gui` presentation extraction by moving shell navigation, command palette, AI preview surfaces, and more organize-screen helpers out of `main.rs` into `ui/shell.rs` and `ui/screens/*` modules while preserving behavior.
+
 ### Planned
 
 - Cross-platform GUI packaging research.

@@ -3,7 +3,10 @@
 use std::{collections::BTreeMap, path::Path};
 
 use eframe::egui::{self, Color32, RichText};
-use smartfolder_core::model::{ConflictState, PlanOperation, UntouchedReason, UntouchedRecord};
+use smartfolder_core::{
+    ai::{AiConfidence, AiFinding, AiFolderAnalysis},
+    model::{ConflictState, PlanOperation, UntouchedReason, UntouchedRecord},
+};
 
 use crate::{
     plural,
@@ -13,6 +16,14 @@ use crate::{
     },
     AnalysisOutput, PreviewAction, PreviewFilter, PreviewRow,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiPreviewAction {
+    Analyze,
+    ViewNotes,
+    DraftRules,
+    Cancel,
+}
 
 /// Build display rows for planned operations.
 pub(crate) fn preview_rows(operations: &[PlanOperation], root: &Path) -> Vec<PreviewRow> {
@@ -743,4 +754,300 @@ fn preview_destination_cell_with_tooltip(
         })
         .inner;
     response.on_hover_text(tooltip);
+}
+
+pub(crate) fn render_ai_assist_strip(
+    ui: &mut egui::Ui,
+    analysis: Option<&AiFolderAnalysis>,
+    folder_analysis_running: bool,
+    busy: bool,
+    content_inspection_enabled: bool,
+    untouched_count: usize,
+) -> Option<AiPreviewAction> {
+    let mut action = None;
+    let aligned_width = preview_aligned_content_width(ui);
+    ui.scope(|ui| {
+        ui.set_max_width(aligned_width);
+        egui::Frame::group(ui.style())
+            .fill(ui::theme::colors::surface())
+            .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if folder_analysis_running {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("AI insights")
+                                .strong()
+                                .color(ui::theme::colors::heading_text()),
+                        );
+                        ui.label(
+                            RichText::new("Reviewing the scanned folder context...")
+                                .color(ui::theme::colors::secondary_text()),
+                        );
+                        if ui
+                            .add(ui::theme::widgets::compact_secondary_button("Cancel"))
+                            .clicked()
+                        {
+                            action = Some(AiPreviewAction::Cancel);
+                        }
+                    });
+                    return;
+                }
+
+                if let Some(analysis) = analysis {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("AI insights ready")
+                                .strong()
+                                .color(ui::theme::colors::heading_text()),
+                        );
+                        render_status_chip(
+                            ui,
+                            ai_confidence_label(analysis.confidence),
+                            ui::theme::colors::info(),
+                            ui::theme::colors::info_bg(),
+                        );
+                        render_status_chip(
+                            ui,
+                            &format!(
+                                "{} pattern{}",
+                                analysis.patterns.len(),
+                                plural(analysis.patterns.len())
+                            ),
+                            ui::theme::colors::success(),
+                            ui::theme::colors::success_bg(),
+                        );
+                        render_status_chip(
+                            ui,
+                            &format!(
+                                "{} risk{}",
+                                analysis.risks.len(),
+                                plural(analysis.risks.len())
+                            ),
+                            ui::theme::colors::warning(),
+                            ui::theme::colors::warning_bg(),
+                        );
+                        if ui
+                            .add(ui::theme::widgets::compact_secondary_button(
+                                "View insights",
+                            ))
+                            .clicked()
+                        {
+                            action = Some(AiPreviewAction::ViewNotes);
+                        }
+                        if ui
+                            .add(ui::theme::widgets::compact_secondary_button(
+                                "Create draft rules",
+                            ))
+                            .clicked()
+                        {
+                            action = Some(AiPreviewAction::DraftRules);
+                        }
+                    });
+                } else {
+                    ui.vertical(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("AI insights")
+                                    .strong()
+                                    .color(ui::theme::colors::heading_text()),
+                            );
+                            render_ai_mode_chip(ui, content_inspection_enabled);
+                            if ui
+                                .add_enabled(
+                                    !busy,
+                                    ui::theme::widgets::compact_secondary_button(
+                                        "Analyze folder with AI",
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                action = Some(AiPreviewAction::Analyze);
+                            }
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(ai_preview_context_copy(untouched_count))
+                                    .color(ui::theme::colors::secondary_text()),
+                            )
+                            .wrap(),
+                        );
+                    });
+                }
+            });
+    });
+    action
+}
+
+pub(crate) fn render_ai_notes_content(
+    ui: &mut egui::Ui,
+    analysis: &AiFolderAnalysis,
+    draft_rules_requested: &mut bool,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("AI insights")
+                .strong()
+                .size(ui::theme::typography::SECTION_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        render_ai_mode_chip(ui, analysis.content_inspection_used);
+        render_status_chip(
+            ui,
+            ai_confidence_label(analysis.confidence),
+            ui::theme::colors::info(),
+            ui::theme::colors::info_bg(),
+        );
+        if analysis.content_inspection_used {
+            render_status_chip(
+                ui,
+                &format!(
+                    "{} content sample{}",
+                    analysis.content_samples_included,
+                    plural(analysis.content_samples_included)
+                ),
+                ui::theme::colors::secondary_text(),
+                ui::theme::colors::elevated_surface(),
+            );
+        }
+    });
+    ui.add_space(ui::theme::spacing::SM);
+    ui.add(
+        egui::Label::new(RichText::new(&analysis.summary).color(ui::theme::colors::primary_text()))
+            .wrap(),
+    );
+    ui.add(
+        egui::Label::new(
+            RichText::new(&analysis.recommended_strategy)
+                .color(ui::theme::colors::secondary_text()),
+        )
+        .wrap(),
+    );
+    ui.add_space(ui::theme::spacing::SM);
+    if ui
+        .add(ui::theme::widgets::primary_button("Create draft rules"))
+        .clicked()
+    {
+        *draft_rules_requested = true;
+    }
+    ui.add_space(ui::theme::spacing::MD);
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if !analysis.content_sample_warnings.is_empty() {
+                ui.label(
+                    RichText::new("Content sampling notes")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for warning in analysis.content_sample_warnings.iter().take(6) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("- {warning}"))
+                                .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
+                }
+                if analysis.content_sample_warnings.len() > 6 {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} more sampling note{} omitted.",
+                            analysis.content_sample_warnings.len() - 6,
+                            plural(analysis.content_sample_warnings.len() - 6)
+                        ))
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::metadata_text()),
+                    );
+                }
+                ui.add_space(ui::theme::spacing::SM);
+            }
+            if !analysis.patterns.is_empty() {
+                ui.label(
+                    RichText::new("Patterns")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for finding in &analysis.patterns {
+                    render_ai_finding(ui, finding);
+                }
+            }
+            if !analysis.risks.is_empty() {
+                ui.add_space(ui::theme::spacing::SM);
+                ui.label(
+                    RichText::new("Risks")
+                        .strong()
+                        .color(ui::theme::colors::heading_text()),
+                );
+                for finding in &analysis.risks {
+                    render_ai_finding(ui, finding);
+                }
+            }
+        });
+}
+
+fn render_ai_mode_chip(ui: &mut egui::Ui, content_inspection_enabled: bool) {
+    render_status_chip(
+        ui,
+        if content_inspection_enabled {
+            "Content-aware"
+        } else {
+            "Metadata only"
+        },
+        ui::theme::colors::info(),
+        ui::theme::colors::info_bg(),
+    );
+}
+
+fn ai_preview_context_copy(untouched_count: usize) -> String {
+    let base =
+        "Optional folder-wide review of scanned items. The deterministic preview remains authoritative.";
+    if untouched_count == 0 {
+        base.to_string()
+    } else {
+        format!(
+            "{base} It can also explain why {untouched_count} item{} did not match a rule.",
+            plural(untouched_count)
+        )
+    }
+}
+
+fn render_ai_finding(ui: &mut egui::Ui, finding: &AiFinding) {
+    ui.add_space(ui::theme::spacing::XS);
+    ui.label(
+        RichText::new(&finding.title)
+            .strong()
+            .color(ui::theme::colors::primary_text()),
+    );
+    ui.add(
+        egui::Label::new(RichText::new(&finding.detail).color(ui::theme::colors::secondary_text()))
+            .wrap(),
+    );
+    if !finding.examples.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Examples")
+                    .size(ui::theme::typography::CAPTION)
+                    .color(ui::theme::colors::metadata_text()),
+            );
+            for item in finding.examples.iter().take(4) {
+                render_status_chip(
+                    ui,
+                    item,
+                    ui::theme::colors::metadata_text(),
+                    ui::theme::colors::subtle_surface(),
+                );
+            }
+        });
+    }
+}
+
+fn ai_confidence_label(confidence: AiConfidence) -> &'static str {
+    match confidence {
+        AiConfidence::Low => "Low confidence",
+        AiConfidence::Medium => "Medium confidence",
+        AiConfidence::High => "High confidence",
+    }
 }

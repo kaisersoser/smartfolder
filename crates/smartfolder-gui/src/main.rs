@@ -40,9 +40,9 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use chrono::{TimeDelta, Utc};
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use smartfolder_core::ai::{
-    validate_ai_profile_draft, AiFinding, AiFolderAnalysis, AiFolderContext, AiProfileValidation,
+    validate_ai_profile_draft, AiFolderAnalysis, AiFolderContext, AiProfileValidation,
     AiPromptRefinement, AiProviderState, AiProviderStatus, AiRuleExplanation, AiRuleProfileDraft,
     OllamaClient,
 };
@@ -70,8 +70,7 @@ use smartfolder_core::storage::ensure_profiles_dir;
 use preferences::{GuiPreferences, StylePreference};
 use ui::components::{
     constrained_page as render_constrained_page, panel_frame as settings_panel_frame,
-    safety_line as render_safety_line, screen_heading as render_screen_heading,
-    status_chip as render_status_chip, truncated_label,
+    safety_line as render_safety_line, screen_heading as render_screen_heading, truncated_label,
 };
 use ui::screens::activity::{
     render_activity_detail_error_window, render_activity_detail_window, render_activity_scope_bar,
@@ -79,13 +78,16 @@ use ui::screens::activity::{
     render_restore_result,
 };
 use ui::screens::organize::{
-    organize_files_label, render_analysis_progress, render_apply_confirmation, render_apply_entry,
-    render_apply_progress, render_apply_result, render_plan_summary,
+    build_example_tree_entries, render_analysis_progress, render_apply_confirmation,
+    render_apply_entry, render_apply_progress, render_apply_result, render_folder_status_light,
+    render_instruction_detail_panel, render_instruction_picker, render_organize_step_controls,
+    render_organize_step_indicator, render_plan_summary, ExampleTreeEntry, InstructionDetailAction,
+    InstructionPreset, OrganizeNavAction, OrganizeStep,
 };
 use ui::screens::preview::{
-    preview_aligned_content_width, preview_rows, render_preview_controls, render_preview_detail,
-    render_preview_examples, render_preview_rows, render_preview_table_header, render_preview_tree,
-    untouched_preview_rows,
+    preview_rows, render_ai_assist_strip, render_ai_notes_content, render_preview_controls,
+    render_preview_detail, render_preview_examples, render_preview_rows,
+    render_preview_table_header, render_preview_tree, untouched_preview_rows, AiPreviewAction,
 };
 use ui::screens::rules::{
     builtin_library_items, render_active_profile_panel, render_ai_draft_review,
@@ -110,8 +112,6 @@ const PREVIEW_PAGE_SIZE: usize = 100;
 const TRANSACTION_DETAIL_ROW_LIMIT: usize = 100;
 const WINDOW_WIDTH: f32 = 1160.0;
 const WINDOW_HEIGHT: f32 = 780.0;
-const SHELL_NAV_WIDTH: f32 = ui::theme::spacing::SIDEBAR_WIDTH;
-const SHELL_NAV_COLLAPSED_WIDTH: f32 = ui::theme::spacing::SIDEBAR_COLLAPSED_WIDTH;
 const CARD_MIN_WIDTH: f32 = 188.0;
 const PREVIEW_EXAMPLE_LIMIT: usize = 3;
 const INSTRUCTION_PANEL_HEIGHT: f32 = 216.0;
@@ -120,7 +120,7 @@ pub(crate) const PROFILE_RULE_LIST_WIDTH: f32 = 252.0;
 const MAX_AI_OPERATION_RECORDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppSection {
+pub(crate) enum AppSection {
     Organize,
     Activity,
     Rules,
@@ -128,9 +128,9 @@ enum AppSection {
 }
 
 impl AppSection {
-    const ALL: [Self; 4] = [Self::Organize, Self::Activity, Self::Rules, Self::Settings];
+    pub(crate) const ALL: [Self; 4] = [Self::Organize, Self::Activity, Self::Rules, Self::Settings];
 
-    fn icon(self) -> &'static str {
+    pub(crate) fn icon(self) -> &'static str {
         match self {
             Self::Organize => ui::icons::FOLDER,
             Self::Activity => ui::icons::ACTIVITY,
@@ -139,7 +139,7 @@ impl AppSection {
         }
     }
 
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Organize => "Organize",
             Self::Activity => "Activity",
@@ -148,7 +148,7 @@ impl AppSection {
         }
     }
 
-    fn subtitle(self) -> &'static str {
+    pub(crate) fn subtitle(self) -> &'static str {
         match self {
             Self::Organize => "Preview safe changes before organizing files.",
             Self::Activity => "Review recent changes and restore previous layouts if needed.",
@@ -157,60 +157,12 @@ impl AppSection {
         }
     }
 
-    fn shortcut(self) -> &'static str {
+    pub(crate) fn shortcut(self) -> &'static str {
         match self {
             Self::Organize => "Alt+1",
             Self::Activity => "Alt+2",
             Self::Rules => "Alt+3",
             Self::Settings => "Alt+4",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum OrganizeStep {
-    Folder,
-    Style,
-    Preview,
-    Organize,
-}
-
-impl OrganizeStep {
-    const ALL: [Self; 4] = [Self::Folder, Self::Style, Self::Preview, Self::Organize];
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Folder => "Folder",
-            Self::Style => "Instructions",
-            Self::Preview => "Preview",
-            Self::Organize => "Organize",
-        }
-    }
-
-    fn subtitle(self) -> &'static str {
-        match self {
-            Self::Folder => "Choose the root folder",
-            Self::Style => "Choose organization rules",
-            Self::Preview => "Review example changes",
-            Self::Organize => "Confirm and keep restore available",
-        }
-    }
-
-    fn number(self) -> usize {
-        match self {
-            Self::Folder => 1,
-            Self::Style => 2,
-            Self::Preview => 3,
-            Self::Organize => 4,
-        }
-    }
-
-    fn previous(self) -> Option<Self> {
-        match self {
-            Self::Folder => None,
-            Self::Style => Some(Self::Folder),
-            Self::Preview => Some(Self::Style),
-            Self::Organize => Some(Self::Preview),
         }
     }
 }
@@ -225,101 +177,6 @@ enum AnalysisEvent {
 enum ApplyEvent {
     Progress(ApplyProgress),
     Finished(ApplyMessage),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrganizeNavAction {
-    Back,
-    Continue,
-    Reanalyze,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InstructionPreset {
-    ByType,
-    ByDate,
-    ByExtension,
-    TypeAndDate,
-    CustomRules,
-}
-
-#[derive(Debug, Clone)]
-struct ExampleTreeEntry {
-    depth: usize,
-    label: String,
-    is_folder: bool,
-    is_last: bool,
-    ancestor_has_next: Vec<bool>,
-}
-
-impl InstructionPreset {
-    const ALL: [Self; 5] = [
-        Self::ByType,
-        Self::ByDate,
-        Self::ByExtension,
-        Self::TypeAndDate,
-        Self::CustomRules,
-    ];
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::ByType => "By Type",
-            Self::ByDate => "By Date",
-            Self::ByExtension => "By Extension",
-            Self::TypeAndDate => "Type + Date",
-            Self::CustomRules => "Custom Rules",
-        }
-    }
-
-    fn example_destination(self) -> &'static str {
-        match self {
-            Self::ByType => "Images",
-            Self::ByDate => "2026/05/13",
-            Self::ByExtension => "pdf",
-            Self::TypeAndDate => "Images/2026/05/13",
-            Self::CustomRules => "Documents/PDFs",
-        }
-    }
-
-    fn example_file_name(self) -> &'static str {
-        match self {
-            Self::ByType => "beach-sunset.jpg",
-            Self::ByDate => "meeting-notes.docx",
-            Self::ByExtension => "project-spec.pdf",
-            Self::TypeAndDate => "beach-sunset.jpg",
-            Self::CustomRules => "invoice-042.pdf",
-        }
-    }
-
-    fn secondary_example_file_name(self) -> &'static str {
-        match self {
-            Self::ByType => "screenshot.png",
-            Self::ByDate => "budget-review.xlsx",
-            Self::ByExtension => "invoice-042.pdf",
-            Self::TypeAndDate => "class-photo.jpg",
-            Self::CustomRules => "receipt-1042.pdf",
-        }
-    }
-
-    fn detail(self) -> &'static str {
-        match self {
-            Self::ByType => "Group related file types into broad folders that are easy to scan later.",
-            Self::ByDate => "Sort files by when they were last modified so recent work stays together.",
-            Self::ByExtension => "Separate files by exact extension when the file format matters more than the category.",
-            Self::TypeAndDate => "Keep similar file types together, then add date folders inside each type.",
-            Self::CustomRules => "Apply a saved rule profile when one folder needs more specific destinations than the built-in options provide.",
-        }
-    }
-
-    fn note(self) -> &'static str {
-        match self {
-            Self::ByType => "Good default for mixed folders.",
-            Self::ByDate => "Good for inboxes, downloads, and dated work.",
-            Self::ByExtension => "Good when file formats need strict separation.",
-            Self::TypeAndDate => "Best when you want both category and time structure.",
-            Self::CustomRules => "Requires an imported or saved rule profile.",
-        }
-    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -1660,94 +1517,6 @@ impl SmartfolderApp {
         }
     }
 
-    fn render_instruction_detail_panel(&mut self, ui: &mut egui::Ui, preset: InstructionPreset) {
-        let example_entries = self.instruction_example_entries(preset);
-
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(preset.title())
-                    .strong()
-                    .size(ui::theme::typography::CARD_TITLE)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            ui.add(
-                egui::Label::new(
-                    RichText::new(preset.detail())
-                        .size(ui::theme::typography::BODY)
-                        .color(ui::theme::colors::secondary_text()),
-                )
-                .wrap(),
-            );
-
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("Example result")
-                    .strong()
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::heading_text()),
-            );
-            egui::Frame::group(ui.style())
-                .fill(ui::theme::colors::soft_control())
-                .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-                .inner_margin(egui::Margin::same(10.0))
-                .show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        render_instruction_example_tree(ui, &example_entries);
-                        ui.add_space(4.0);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(preset.note())
-                                    .size(ui::theme::typography::CAPTION)
-                                    .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                    });
-                });
-
-            if preset == InstructionPreset::CustomRules {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Profile status")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                if let Some(profile) = &self.loaded_profile {
-                    render_status_chip(
-                        ui,
-                        "Profile loaded",
-                        ui::theme::colors::success(),
-                        ui::theme::colors::success_bg(),
-                    );
-                    ui.label(format!("Using {}.", profile.display_label()));
-                } else {
-                    render_status_chip(
-                        ui,
-                        "Profile needed",
-                        ui::theme::colors::warning(),
-                        ui::theme::colors::warning_bg(),
-                    );
-                    ui.label("Import a profile before previewing with Custom Rules.");
-                }
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add(ui::theme::widgets::secondary_button("Import profile..."))
-                        .clicked()
-                    {
-                        self.import_rule_profile();
-                    }
-                    if ui
-                        .add(ui::theme::widgets::secondary_button("Open Rules"))
-                        .clicked()
-                    {
-                        self.active_section = AppSection::Rules;
-                    }
-                });
-            }
-        });
-    }
-
     fn sync_preview_selection(&mut self) {
         self.selected_preview_row = self
             .analysis_result
@@ -1860,188 +1629,6 @@ impl SmartfolderApp {
         if let Some(section) = requested_section {
             self.active_section = section;
         }
-    }
-
-    fn render_shell_nav(&mut self, ui: &mut egui::Ui) {
-        if self.shell_nav_expanded {
-            self.render_sidebar(ui);
-        } else {
-            self.render_collapsed_sidebar(ui);
-        }
-    }
-
-    fn render_nav_toggle(&mut self, ui: &mut egui::Ui) {
-        let (icon, tooltip) = if self.shell_nav_expanded {
-            (ui::icons::COLLAPSE, "Collapse sidebar")
-        } else {
-            (ui::icons::EXPAND, "Expand sidebar")
-        };
-        if ui
-            .add(ui::theme::widgets::icon_button(icon))
-            .on_hover_text(tooltip)
-            .clicked()
-        {
-            self.shell_nav_expanded = !self.shell_nav_expanded;
-        }
-    }
-
-    fn render_collapsed_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(ui::theme::spacing::SM);
-        ui.vertical_centered(|ui| {
-            self.render_nav_toggle(ui);
-            ui.add_space(ui::theme::spacing::MD);
-
-            for section in AppSection::ALL {
-                let selected = self.active_section == section;
-                let response = ui
-                    .add_sized(
-                        [40.0, 36.0],
-                        egui::Button::new(RichText::new(section.icon()).size(18.0).color(
-                            if selected {
-                                ui::theme::colors::primary_blue()
-                            } else {
-                                ui::theme::colors::secondary_text()
-                            },
-                        ))
-                        .fill(if selected {
-                            ui::theme::colors::hover_control()
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            if selected {
-                                ui::theme::colors::border()
-                            } else {
-                                Color32::TRANSPARENT
-                            },
-                        )),
-                    )
-                    .on_hover_text(format!("{} ({})", section.title(), section.shortcut()));
-                if response.clicked() {
-                    self.active_section = section;
-                }
-                ui.add_space(ui::theme::spacing::XS);
-            }
-        });
-    }
-
-    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(ui::theme::spacing::MD);
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("smartfolder")
-                    .size(ui::theme::typography::SECTION_TITLE)
-                    .strong()
-                    .color(ui::theme::colors::heading_text()),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.render_nav_toggle(ui);
-            });
-        });
-        ui.label(
-            RichText::new("Organize files safely, then restore the previous layout if needed.")
-                .color(ui::theme::colors::secondary_text()),
-        );
-        ui.label(
-            RichText::new("Use Alt+1 through Alt+4 to switch sections.")
-                .small()
-                .color(ui::theme::colors::metadata_text()),
-        );
-        ui.add_space(ui::theme::spacing::LG);
-
-        for section in AppSection::ALL {
-            let selected = self.active_section == section;
-            let nav_width = SHELL_NAV_WIDTH - (ui::theme::spacing::LG * 2.0);
-            let response = egui::Frame::none()
-                .fill(if selected {
-                    ui::theme::colors::hover_control()
-                } else {
-                    Color32::TRANSPARENT
-                })
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    if selected {
-                        ui::theme::colors::border()
-                    } else {
-                        Color32::TRANSPARENT
-                    },
-                ))
-                .rounding(egui::Rounding::same(ui::theme::spacing::RADIUS_MD))
-                .inner_margin(egui::Margin::symmetric(
-                    ui::theme::spacing::MD,
-                    ui::theme::spacing::SM,
-                ))
-                .show(ui, |ui| {
-                    let inner = ui.allocate_ui_with_layout(
-                        egui::vec2(nav_width, 56.0),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(section.icon()).size(16.0).color(
-                                    if selected {
-                                        ui::theme::colors::primary_blue()
-                                    } else {
-                                        ui::theme::colors::secondary_text()
-                                    },
-                                ));
-                                ui.label(
-                                    RichText::new(section.title())
-                                        .strong()
-                                        .color(ui::theme::colors::heading_text()),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(
-                                            RichText::new(section.shortcut())
-                                                .small()
-                                                .color(ui::theme::colors::metadata_text()),
-                                        );
-                                    },
-                                );
-                            });
-                            ui.add_space(ui::theme::spacing::XS);
-                            ui.label(
-                                RichText::new(section.subtitle())
-                                    .color(ui::theme::colors::secondary_text()),
-                            );
-                        },
-                    );
-                    ui.interact(
-                        inner.response.rect,
-                        ui.id().with("app-section-nav").with(section.title()),
-                        egui::Sense::click(),
-                    )
-                })
-                .inner;
-            if response.clicked() {
-                self.active_section = section;
-            }
-            ui.add_space(ui::theme::spacing::XS);
-        }
-
-        ui.add_space(ui::theme::spacing::MD);
-        ui::theme::widgets::card_frame()
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Launch behavior")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                ui.label(
-                    RichText::new(
-                        "Right-clicking a folder in Explorer should open smartfolder with that folder already selected.",
-                    )
-                    .color(ui::theme::colors::secondary_text()),
-                );
-                ui.add_space(ui::theme::spacing::XS);
-                ui.label(
-                    RichText::new("Keyboard section shortcuts never organize files by themselves.")
-                        .small()
-                        .color(ui::theme::colors::metadata_text()),
-                );
-            });
     }
 
     fn render_organize_screen(
@@ -2173,6 +1760,11 @@ impl SmartfolderApp {
             ui.add_space(8.0);
             let selected_instruction = self.selected_instruction_preset();
             let mut requested_instruction = None;
+            let mut instruction_detail_action = None;
+            let loaded_profile_label = self
+                .loaded_profile
+                .as_ref()
+                .map(LoadedRuleProfile::display_label);
 
             let panel_gap = 10.0;
             let panel_margin = 10.0;
@@ -2213,7 +1805,15 @@ impl SmartfolderApp {
                                 .auto_shrink([false, false])
                                 .max_height(INSTRUCTION_PANEL_HEIGHT)
                                 .show(ui, |ui| {
-                                    self.render_instruction_detail_panel(ui, detail_instruction);
+                                    let example_entries =
+                                        self.instruction_example_entries(detail_instruction);
+                                    render_instruction_detail_panel(
+                                        ui,
+                                        detail_instruction,
+                                        &example_entries,
+                                        loaded_profile_label.as_deref(),
+                                        &mut instruction_detail_action,
+                                    );
                                 });
                         });
                 });
@@ -2242,13 +1842,27 @@ impl SmartfolderApp {
                             .auto_shrink([false, false])
                             .max_height(INSTRUCTION_PANEL_HEIGHT)
                             .show(ui, |ui| {
-                                self.render_instruction_detail_panel(ui, detail_instruction);
+                                let example_entries =
+                                    self.instruction_example_entries(detail_instruction);
+                                render_instruction_detail_panel(
+                                    ui,
+                                    detail_instruction,
+                                    &example_entries,
+                                    loaded_profile_label.as_deref(),
+                                    &mut instruction_detail_action,
+                                );
                             });
                     });
             }
 
             if let Some(preset) = requested_instruction {
                 self.select_instruction_preset(preset);
+            }
+            if let Some(action) = instruction_detail_action {
+                match action {
+                    InstructionDetailAction::ImportProfile => self.import_rule_profile(),
+                    InstructionDetailAction::OpenRules => self.active_section = AppSection::Rules,
+                }
             }
 
             ui.add_space(10.0);
@@ -2342,7 +1956,8 @@ impl SmartfolderApp {
                     match render_ai_assist_strip(
                         ui,
                         self.ai_analysis.as_ref(),
-                        self.ai_task,
+                        self.ai_task == Some(AiTaskKind::FolderAnalysis)
+                            && self.is_running_ai_task(),
                         self.is_running_ai_task(),
                         self.preferences.ai.content_inspection_enabled,
                         result.preview_counts.untouched,
@@ -3056,147 +2671,80 @@ impl SmartfolderApp {
         }
     }
 
-    fn render_command_palette_window(
-        &mut self,
-        ctx: &egui::Context,
-    ) -> Option<CommandPaletteAction> {
-        if !self.show_command_palette {
-            return None;
-        }
-
-        let mut action = None;
-        let mut open = true;
-        egui::Window::new("Command palette")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(520.0)
-            .show(ctx, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.command_palette_query)
-                        .hint_text("Search commands")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(ui::theme::spacing::SM);
-
-                let query = self.command_palette_query.trim().to_ascii_lowercase();
-                for item in self.command_palette_items() {
-                    if !query.is_empty()
-                        && !item.label.to_ascii_lowercase().contains(&query)
-                        && !item.detail.to_ascii_lowercase().contains(&query)
-                    {
-                        continue;
-                    }
-
-                    let response = ui
-                        .add_enabled_ui(item.enabled, |ui| {
-                            ui::theme::widgets::surface_frame().show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        RichText::new(item.label)
-                                            .strong()
-                                            .color(ui::theme::colors::heading_text()),
-                                    );
-                                    ui.label(
-                                        RichText::new(item.detail)
-                                            .size(ui::theme::typography::CAPTION)
-                                            .color(ui::theme::colors::metadata_text()),
-                                    );
-                                });
-                            });
-                        })
-                        .response
-                        .interact(egui::Sense::click());
-
-                    if response.clicked() && item.enabled {
-                        action = Some(item.action);
-                    }
-                    ui.add_space(ui::theme::spacing::XS);
-                }
-            });
-
-        if action.is_some() || !open {
-            self.show_command_palette = false;
-        }
-
-        action
-    }
-
-    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
+    fn command_palette_items(&self) -> Vec<ui::shell::CommandPaletteItem<CommandPaletteAction>> {
         let busy = self.is_analyzing() || self.is_applying() || self.is_undoing();
         let ready = self
             .analysis_result
             .as_ref()
             .map_or(0, |result| result.preview_counts.ready);
         vec![
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Go to Organize",
                 "Open the preview-led organize workflow",
                 true,
                 CommandPaletteAction::OpenSection(AppSection::Organize),
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Go to Activity",
                 "Review recent activity and restore previous layouts",
                 true,
                 CommandPaletteAction::OpenSection(AppSection::Activity),
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Go to Rules",
                 "Open built-in and custom rule profiles",
                 true,
                 CommandPaletteAction::OpenSection(AppSection::Rules),
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Go to Settings",
                 "Open app preferences and AI readiness",
                 true,
                 CommandPaletteAction::OpenSection(AppSection::Settings),
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Choose folder",
                 "Return to folder selection",
                 !busy,
                 CommandPaletteAction::ChooseFolder,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Preview current folder",
                 "Analyze the selected folder",
                 self.can_run_analysis() && !busy,
                 CommandPaletteAction::Analyze,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Review all changes",
                 "Open the detailed file list",
                 self.analysis_result.is_some(),
                 CommandPaletteAction::ReviewAllChanges,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Show preview tree",
                 "Open the detailed preview grouped by destination",
                 self.analysis_result.is_some(),
                 CommandPaletteAction::ShowPreviewTree,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Organize ready files",
                 "Move only safe ready files after confirmation",
                 ready > 0 && !busy,
                 CommandPaletteAction::OrganizeReady,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Restore latest layout",
                 "Restore the latest restorable activity for this folder",
                 self.latest_restorable_transaction().is_some() && !busy,
                 CommandPaletteAction::RestoreLatest,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Open profile workspace",
                 "Edit and validate custom rules",
                 true,
                 CommandPaletteAction::OpenProfileWorkspace,
             ),
-            CommandPaletteItem::new(
+            ui::shell::CommandPaletteItem::new(
                 "Test AI connection",
                 "Run the Ollama readiness check",
                 !self.is_checking_ai_status(),
@@ -3290,16 +2838,20 @@ impl eframe::App for SmartfolderApp {
         let mut preview_action = None;
         let mut history_action = None;
 
-        let shell_nav_width = if self.shell_nav_expanded {
-            SHELL_NAV_WIDTH
-        } else {
-            SHELL_NAV_COLLAPSED_WIDTH
-        };
+        let shell_nav_width = ui::shell::shell_nav_width(self.shell_nav_expanded);
 
         egui::SidePanel::left("app-shell-nav")
             .resizable(false)
             .exact_width(shell_nav_width)
-            .show(ctx, |ui| self.render_shell_nav(ui));
+            .show(ctx, |ui| {
+                if let Some(section) = ui::shell::render_shell_nav(
+                    ui,
+                    &mut self.shell_nav_expanded,
+                    self.active_section,
+                ) {
+                    self.active_section = section;
+                }
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -3330,7 +2882,13 @@ impl eframe::App for SmartfolderApp {
 
         self.render_rules_workspace_window(ctx);
 
-        if let Some(action) = self.render_command_palette_window(ctx) {
+        let command_palette_items = self.command_palette_items();
+        if let Some(action) = ui::shell::render_command_palette_window(
+            ctx,
+            &mut self.show_command_palette,
+            &mut self.command_palette_query,
+            &command_palette_items,
+        ) {
             self.apply_command_palette_action(action);
         }
 
@@ -3414,30 +2972,6 @@ enum CommandPaletteAction {
     RestoreLatest,
     OpenProfileWorkspace,
     TestAiConnection,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CommandPaletteItem {
-    label: &'static str,
-    detail: &'static str,
-    enabled: bool,
-    action: CommandPaletteAction,
-}
-
-impl CommandPaletteItem {
-    fn new(
-        label: &'static str,
-        detail: &'static str,
-        enabled: bool,
-        action: CommandPaletteAction,
-    ) -> Self {
-        Self {
-            label,
-            detail,
-            enabled,
-            action,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4059,14 +3593,6 @@ enum AiTaskOutput {
     DraftProfile(AiDraftProfileResult),
     PromptRefinement(AiPromptRefinement),
     RuleExplanation(AiRuleExplanation),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AiPreviewAction {
-    Analyze,
-    ViewNotes,
-    DraftRules,
-    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -4849,294 +4375,6 @@ fn cleanup_old_session_data() -> std::result::Result<usize, String> {
     Ok(removed)
 }
 
-fn render_ai_assist_strip(
-    ui: &mut egui::Ui,
-    analysis: Option<&AiFolderAnalysis>,
-    active_task: Option<AiTaskKind>,
-    busy: bool,
-    content_inspection_enabled: bool,
-    untouched_count: usize,
-) -> Option<AiPreviewAction> {
-    let mut action = None;
-    let aligned_width = preview_aligned_content_width(ui);
-    ui.scope(|ui| {
-        ui.set_max_width(aligned_width);
-        egui::Frame::group(ui.style())
-            .fill(ui::theme::colors::surface())
-            .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
-            .inner_margin(egui::Margin::symmetric(14.0, 10.0))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                if active_task == Some(AiTaskKind::FolderAnalysis) && busy {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("AI insights")
-                                .strong()
-                                .color(ui::theme::colors::heading_text()),
-                        );
-                        ui.label(
-                            RichText::new("Reviewing the scanned folder context...")
-                                .color(ui::theme::colors::secondary_text()),
-                        );
-                        if ui
-                            .add(ui::theme::widgets::compact_secondary_button("Cancel"))
-                            .clicked()
-                        {
-                            action = Some(AiPreviewAction::Cancel);
-                        }
-                    });
-                    return;
-                }
-
-                if let Some(analysis) = analysis {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("AI insights ready")
-                                .strong()
-                                .color(ui::theme::colors::heading_text()),
-                        );
-                        render_status_chip(
-                            ui,
-                            ai_confidence_label(analysis.confidence),
-                            ui::theme::colors::info(),
-                            ui::theme::colors::info_bg(),
-                        );
-                        render_status_chip(
-                            ui,
-                            &format!(
-                                "{} pattern{}",
-                                analysis.patterns.len(),
-                                plural(analysis.patterns.len())
-                            ),
-                            ui::theme::colors::success(),
-                            ui::theme::colors::success_bg(),
-                        );
-                        render_status_chip(
-                            ui,
-                            &format!(
-                                "{} risk{}",
-                                analysis.risks.len(),
-                                plural(analysis.risks.len())
-                            ),
-                            ui::theme::colors::warning(),
-                            ui::theme::colors::warning_bg(),
-                        );
-                        if ui
-                            .add(ui::theme::widgets::compact_secondary_button(
-                                "View insights",
-                            ))
-                            .clicked()
-                        {
-                            action = Some(AiPreviewAction::ViewNotes);
-                        }
-                        if ui
-                            .add(ui::theme::widgets::compact_secondary_button(
-                                "Create draft rules",
-                            ))
-                            .clicked()
-                        {
-                            action = Some(AiPreviewAction::DraftRules);
-                        }
-                    });
-                } else {
-                    ui.vertical(|ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                RichText::new("AI insights")
-                                    .strong()
-                                    .color(ui::theme::colors::heading_text()),
-                            );
-                            render_ai_mode_chip(ui, content_inspection_enabled);
-                            if ui
-                                .add_enabled(
-                                    !busy,
-                                    ui::theme::widgets::compact_secondary_button(
-                                        "Analyze folder with AI",
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                action = Some(AiPreviewAction::Analyze);
-                            }
-                        });
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(ai_preview_context_copy(untouched_count))
-                                    .color(ui::theme::colors::secondary_text()),
-                            )
-                            .wrap(),
-                        );
-                    });
-                }
-            });
-    });
-    action
-}
-
-fn render_ai_mode_chip(ui: &mut egui::Ui, content_inspection_enabled: bool) {
-    render_status_chip(
-        ui,
-        if content_inspection_enabled {
-            "Content-aware"
-        } else {
-            "Metadata only"
-        },
-        ui::theme::colors::info(),
-        ui::theme::colors::info_bg(),
-    );
-}
-
-fn ai_preview_context_copy(untouched_count: usize) -> String {
-    let base =
-        "Optional folder-wide review of scanned items. The deterministic preview remains authoritative.";
-    if untouched_count == 0 {
-        base.to_string()
-    } else {
-        format!(
-            "{base} It can also explain why {untouched_count} item{} did not match a rule.",
-            plural(untouched_count)
-        )
-    }
-}
-
-fn render_ai_notes_content(
-    ui: &mut egui::Ui,
-    analysis: &AiFolderAnalysis,
-    draft_rules_requested: &mut bool,
-) {
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("AI insights")
-                .strong()
-                .size(ui::theme::typography::SECTION_TITLE)
-                .color(ui::theme::colors::heading_text()),
-        );
-        render_ai_mode_chip(ui, analysis.content_inspection_used);
-        render_status_chip(
-            ui,
-            ai_confidence_label(analysis.confidence),
-            ui::theme::colors::info(),
-            ui::theme::colors::info_bg(),
-        );
-        if analysis.content_inspection_used {
-            render_status_chip(
-                ui,
-                &format!(
-                    "{} content sample{}",
-                    analysis.content_samples_included,
-                    plural(analysis.content_samples_included)
-                ),
-                ui::theme::colors::secondary_text(),
-                ui::theme::colors::elevated_surface(),
-            );
-        }
-    });
-    ui.add_space(ui::theme::spacing::SM);
-    ui.add(
-        egui::Label::new(RichText::new(&analysis.summary).color(ui::theme::colors::primary_text()))
-            .wrap(),
-    );
-    ui.add(
-        egui::Label::new(
-            RichText::new(&analysis.recommended_strategy)
-                .color(ui::theme::colors::secondary_text()),
-        )
-        .wrap(),
-    );
-    ui.add_space(ui::theme::spacing::SM);
-    if ui
-        .add(ui::theme::widgets::primary_button("Create draft rules"))
-        .clicked()
-    {
-        *draft_rules_requested = true;
-    }
-    ui.add_space(ui::theme::spacing::MD);
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if !analysis.content_sample_warnings.is_empty() {
-                ui.label(
-                    RichText::new("Content sampling notes")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for warning in analysis.content_sample_warnings.iter().take(6) {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("- {warning}"))
-                                .color(ui::theme::colors::secondary_text()),
-                        )
-                        .wrap(),
-                    );
-                }
-                if analysis.content_sample_warnings.len() > 6 {
-                    ui.label(
-                        RichText::new(format!(
-                            "{} more sampling note{} omitted.",
-                            analysis.content_sample_warnings.len() - 6,
-                            plural(analysis.content_sample_warnings.len() - 6)
-                        ))
-                        .size(ui::theme::typography::CAPTION)
-                        .color(ui::theme::colors::metadata_text()),
-                    );
-                }
-                ui.add_space(ui::theme::spacing::SM);
-            }
-            if !analysis.patterns.is_empty() {
-                ui.label(
-                    RichText::new("Patterns")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for finding in &analysis.patterns {
-                    render_ai_finding(ui, finding);
-                }
-            }
-            if !analysis.risks.is_empty() {
-                ui.add_space(ui::theme::spacing::SM);
-                ui.label(
-                    RichText::new("Risks")
-                        .strong()
-                        .color(ui::theme::colors::heading_text()),
-                );
-                for finding in &analysis.risks {
-                    render_ai_finding(ui, finding);
-                }
-            }
-        });
-}
-
-fn render_ai_finding(ui: &mut egui::Ui, finding: &AiFinding) {
-    ui.add_space(ui::theme::spacing::XS);
-    ui.label(
-        RichText::new(&finding.title)
-            .strong()
-            .color(ui::theme::colors::primary_text()),
-    );
-    ui.add(
-        egui::Label::new(RichText::new(&finding.detail).color(ui::theme::colors::secondary_text()))
-            .wrap(),
-    );
-    if !finding.examples.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new("Examples")
-                    .size(ui::theme::typography::CAPTION)
-                    .color(ui::theme::colors::metadata_text()),
-            );
-            for item in finding.examples.iter().take(4) {
-                render_status_chip(
-                    ui,
-                    item,
-                    ui::theme::colors::metadata_text(),
-                    ui::theme::colors::subtle_surface(),
-                );
-            }
-        });
-    }
-}
-
 fn render_undo_progress(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spinner();
@@ -5238,257 +4476,6 @@ fn section_max_width(section: AppSection) -> f32 {
     }
 }
 
-fn render_instruction_picker(
-    ui: &mut egui::Ui,
-    selected_instruction: InstructionPreset,
-    requested_instruction: &mut Option<InstructionPreset>,
-) {
-    ui.vertical(|ui| {
-        ui.label(
-            RichText::new("Available instructions")
-                .strong()
-                .color(ui::theme::colors::heading_text()),
-        );
-        ui.add_space(6.0);
-        for preset in InstructionPreset::ALL {
-            let selected = selected_instruction == preset;
-            let response = render_instruction_list_row(ui, preset.title(), selected);
-            if response.clicked() {
-                *requested_instruction = Some(preset);
-            }
-        }
-    });
-}
-
-fn render_instruction_list_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let row_size = egui::vec2(ui.available_width(), 26.0);
-    let (rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
-
-    if ui.is_rect_visible(rect) {
-        let fill = if selected {
-            ui::theme::colors::primary_blue()
-        } else if response.hovered() {
-            ui::theme::colors::hover_control()
-        } else {
-            ui::theme::colors::surface()
-        };
-        let text_color = if selected {
-            ui::theme::colors::on_primary()
-        } else {
-            ui::theme::colors::primary_text()
-        };
-        ui.painter()
-            .rect_filled(rect, egui::Rounding::same(2.0), fill);
-        ui.painter().text(
-            rect.left_center() + egui::vec2(8.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            egui::TextStyle::Body.resolve(ui.style()),
-            text_color,
-        );
-    }
-
-    response
-}
-
-fn render_organize_step_indicator(
-    ui: &mut egui::Ui,
-    current: OrganizeStep,
-    furthest: OrganizeStep,
-    requested_step: &mut Option<OrganizeStep>,
-) {
-    ui.horizontal_wrapped(|ui| {
-        for (index, step) in OrganizeStep::ALL.iter().copied().enumerate() {
-            if index > 0 {
-                ui.label(
-                    RichText::new("->")
-                        .size(ui::theme::typography::CONTROL)
-                        .color(ui::theme::colors::metadata_text()),
-                );
-            }
-
-            let is_current = step == current;
-            let is_available = step <= furthest;
-            let text_color = if is_current {
-                ui::theme::colors::primary_blue()
-            } else if is_available {
-                ui::theme::colors::primary_text()
-            } else {
-                ui::theme::colors::metadata_text()
-            };
-            let fill = if is_current {
-                ui::theme::colors::hover_control()
-            } else {
-                Color32::TRANSPARENT
-            };
-            let stroke = if is_current {
-                egui::Stroke::new(1.0, ui::theme::colors::primary_blue())
-            } else {
-                egui::Stroke::NONE
-            };
-            let label = format!("{} {}", step.number(), step.title());
-            let button = egui::Button::new(
-                RichText::new(label)
-                    .size(ui::theme::typography::CONTROL)
-                    .strong()
-                    .color(text_color),
-            )
-            .fill(fill)
-            .stroke(stroke)
-            .min_size(egui::vec2(88.0, ui::theme::spacing::COMPACT_CONTROL_HEIGHT));
-
-            let response = ui
-                .add_enabled(is_available, button)
-                .on_hover_text(step.subtitle());
-            if response.clicked() {
-                *requested_step = Some(step);
-            }
-        }
-    });
-}
-
-fn render_organize_step_controls(
-    ui: &mut egui::Ui,
-    current: OrganizeStep,
-    has_root: bool,
-    can_run_analysis: bool,
-    analysis_result: Option<&AnalysisOutput>,
-    busy: bool,
-    nav_action: &mut Option<OrganizeNavAction>,
-) {
-    let mut helper_text = None;
-
-    ui.vertical(|ui| {
-        ui.horizontal_wrapped(|ui| {
-            if current.previous().is_some()
-                && ui
-                    .add_enabled(!busy, ui::theme::widgets::secondary_button("Back"))
-                    .clicked()
-            {
-                *nav_action = Some(OrganizeNavAction::Back);
-            }
-
-            match current {
-                OrganizeStep::Folder => {
-                    if ui
-                        .add_enabled(
-                            has_root && !busy,
-                            ui::theme::widgets::primary_button("Continue"),
-                        )
-                        .clicked()
-                    {
-                        *nav_action = Some(OrganizeNavAction::Continue);
-                    }
-                    helper_text = Some("Choose the folder first. Nothing moves during this step.");
-                }
-                OrganizeStep::Style => {
-                    if ui
-                        .add_enabled(
-                            can_run_analysis && !busy,
-                            ui::theme::widgets::primary_button("Preview Changes"),
-                        )
-                        .clicked()
-                    {
-                        *nav_action = Some(OrganizeNavAction::Continue);
-                    }
-                    helper_text = Some(
-                        "Preview Changes analyzes this folder using the selected instructions and opens the example preview.",
-                    );
-                }
-                OrganizeStep::Preview => {
-                    let ready = analysis_result.map_or(0, |result| result.preview_counts.ready);
-                    if ui
-                        .add_enabled(
-                            can_run_analysis && !busy,
-                            ui::theme::widgets::secondary_button("Re-analyze"),
-                        )
-                        .clicked()
-                    {
-                        *nav_action = Some(OrganizeNavAction::Reanalyze);
-                    }
-                    if ui
-                        .add_enabled(
-                            ready > 0 && !busy,
-                            ui::theme::widgets::primary_button(organize_files_label(ready)),
-                        )
-                        .clicked()
-                    {
-                        *nav_action = Some(OrganizeNavAction::Continue);
-                    }
-                    if ready == 0 {
-                        helper_text = Some(
-                            "No safe moves are ready yet. Review the preview details or choose another style.",
-                        );
-                    }
-                }
-                OrganizeStep::Organize => {
-                    helper_text = Some(
-                        "Confirm only when the preview matches what you expect. Restore remains available afterward.",
-                    );
-                }
-            }
-        });
-
-        if let Some(helper_text) = helper_text {
-            ui.add_space(4.0);
-            ui.add(
-                egui::Label::new(
-                    RichText::new(helper_text)
-                        .size(ui::theme::typography::CAPTION)
-                        .color(ui::theme::colors::secondary_text()),
-                )
-                .wrap(),
-            );
-        }
-    });
-}
-
-fn render_folder_status_light(ui: &mut egui::Ui, has_root: bool, preselected: bool) {
-    let (color, label, detail) = if has_root {
-        (
-            ui::theme::colors::success(),
-            "Folder ready",
-            if preselected {
-                "This folder was preselected from launch. Nothing has been analyzed or moved yet."
-            } else {
-                "This folder is selected. Nothing has been analyzed or moved yet."
-            },
-        )
-    } else {
-        (
-            ui::theme::colors::warning(),
-            "Folder needed",
-            "Choose or drop a folder before continuing.",
-        )
-    };
-
-    let response = ui
-        .add(
-            egui::Label::new(RichText::new("●").size(18.0).color(color))
-                .sense(egui::Sense::click()),
-        )
-        .on_hover_ui(|ui| {
-            ui.label(
-                RichText::new(label)
-                    .strong()
-                    .color(ui::theme::colors::heading_text()),
-            );
-            ui.label(RichText::new(detail).color(ui::theme::colors::secondary_text()));
-        });
-
-    if response.clicked() {
-        response.request_focus();
-    }
-}
-
-fn ai_confidence_label(confidence: smartfolder_core::ai::AiConfidence) -> &'static str {
-    match confidence {
-        smartfolder_core::ai::AiConfidence::Low => "Low confidence",
-        smartfolder_core::ai::AiConfidence::Medium => "Medium confidence",
-        smartfolder_core::ai::AiConfidence::High => "High confidence",
-    }
-}
-
 fn same_folder(left: &Path, right: &Path) -> bool {
     normalized_path_key(left) == normalized_path_key(right)
 }
@@ -5504,128 +4491,6 @@ fn folder_name_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-fn build_example_tree_entries(
-    root_folder: &str,
-    destination: &str,
-    file_name: &str,
-    secondary_file_name: &str,
-) -> Vec<ExampleTreeEntry> {
-    let normalized_destination = destination.replace('\\', "/");
-    let segments: Vec<&str> = normalized_destination
-        .split('/')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .collect();
-
-    let mut entries = vec![ExampleTreeEntry {
-        depth: 0,
-        label: format!("./{root_folder}"),
-        is_folder: true,
-        is_last: false,
-        ancestor_has_next: Vec::new(),
-    }];
-
-    for (index, segment) in segments.iter().enumerate() {
-        entries.push(ExampleTreeEntry {
-            depth: index + 1,
-            label: (*segment).to_string(),
-            is_folder: true,
-            is_last: false,
-            ancestor_has_next: vec![true; index + 1],
-        });
-    }
-
-    let file_depth = segments.len() + 1;
-    entries.push(ExampleTreeEntry {
-        depth: file_depth,
-        label: file_name.to_string(),
-        is_folder: false,
-        is_last: false,
-        ancestor_has_next: vec![true; file_depth],
-    });
-    entries.push(ExampleTreeEntry {
-        depth: file_depth,
-        label: secondary_file_name.to_string(),
-        is_folder: false,
-        is_last: true,
-        ancestor_has_next: vec![true; file_depth.saturating_sub(1)],
-    });
-
-    entries
-}
-
-fn render_instruction_example_tree(ui: &mut egui::Ui, entries: &[ExampleTreeEntry]) {
-    let text_color = ui::theme::colors::primary_text();
-    let branch_color = ui::theme::colors::metadata_text();
-    let tree_text_size = ui::theme::typography::CAPTION;
-
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(2.0, 1.0);
-        for entry in entries {
-            ui.horizontal(|ui| {
-                let connector = example_tree_connector(entry);
-                if !connector.is_empty() {
-                    ui.label(
-                        RichText::new(connector)
-                            .monospace()
-                            .size(tree_text_size)
-                            .color(branch_color),
-                    );
-                }
-                if entry.is_folder {
-                    paint_example_folder_icon(ui);
-                    ui.add_space(2.0);
-                }
-                ui.label(
-                    RichText::new(&entry.label)
-                        .size(tree_text_size)
-                        .strong()
-                        .color(text_color),
-                );
-            });
-        }
-    });
-}
-
-fn paint_example_folder_icon(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(15.0, 12.0), egui::Sense::hover());
-    let painter = ui.painter();
-    let tab = egui::Rect::from_min_size(rect.min + egui::vec2(1.0, 1.0), egui::vec2(6.0, 3.5));
-    let body = egui::Rect::from_min_size(rect.min + egui::vec2(1.0, 4.0), egui::vec2(13.0, 7.0));
-
-    painter.rect_filled(
-        tab,
-        egui::Rounding::same(1.0),
-        Color32::from_rgb(251, 209, 86),
-    );
-    painter.rect_filled(
-        body,
-        egui::Rounding::same(1.0),
-        Color32::from_rgb(244, 178, 53),
-    );
-    painter.line_segment(
-        [body.left_top(), body.right_top()],
-        egui::Stroke::new(1.0, Color32::from_rgb(255, 224, 123)),
-    );
-}
-
-fn example_tree_connector(entry: &ExampleTreeEntry) -> String {
-    if entry.depth == 0 {
-        return String::new();
-    }
-
-    let mut connector = String::new();
-    for has_next in entry
-        .ancestor_has_next
-        .iter()
-        .take(entry.depth.saturating_sub(1))
-    {
-        connector.push_str(if *has_next { "│ " } else { "  " });
-    }
-    connector.push_str(if entry.is_last { "└─" } else { "├─" });
-    connector
 }
 
 pub(crate) fn sample_destination_template(template: &str) -> String {

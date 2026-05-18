@@ -12,6 +12,7 @@ This document captures the strategic direction for `smartfolder` across release 
 | v2.0 UX rewrite (GUI-first) | ✅ Released |
 | v2.1 installer and distribution | ✅ Released |
 | v2.2 AI-assisted organization | ✅ Released |
+| v2.25 UX refinement and trust pass | ✅ Released |
 | v2.3 CLI AI parity | 📋 Planned |
 | v2.x cross-platform tracks | 📋 Planned |
 

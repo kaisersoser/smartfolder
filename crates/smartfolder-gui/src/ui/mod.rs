@@ -10,4 +10,5 @@ pub(crate) mod components;
 #[allow(dead_code)]
 pub(crate) mod icons;
 pub(crate) mod screens;
+pub(crate) mod shell;
 pub(crate) mod theme;

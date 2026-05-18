@@ -9,8 +9,9 @@ The current desktop app focuses on the safe Explorer-to-preview workflow:
 - Right-click a folder in Explorer and choose `Organize with smartfolder`.
 - Open the GUI with that folder preselected.
 - Choose a built-in style or saved custom rule profile.
-- Analyze, preview, organize, and undo from the same app.
-- Use Activity, Rules, and Settings for restore history, rule profiles, and local preferences.
+- Analyze, preview, organize, and restore from the same app.
+- Review Activity, Rules, and Settings for restore history, rule profiles, AI assistance, and local preferences.
+- Use preview tree mode, command palette actions, and richer ready/review/untouched explanations when inspecting larger folders.
 
 ## v1 CLI scope
 
@@ -52,7 +53,7 @@ The Windows-first GUI crate can be started with:
 cargo run -p smartfolder-gui -- <root>
 ```
 
-The GUI can analyze with built-in modes, import TOML rule profiles, and create a simple saved rule profile visually from the Profile editor.
+The GUI can analyze with built-in modes, import TOML rule profiles, create saved rule profiles visually from the Profile editor, and optionally use Ollama-backed AI assistance for folder analysis, rule drafting, prompt refinement, and rule explanation.
 
 To add a per-user Windows Explorer launcher after building the release GUI:
 

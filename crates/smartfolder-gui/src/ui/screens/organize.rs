@@ -1,12 +1,14 @@
 //! Organize workflow presentation helpers.
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, RichText};
 
 use crate::{
     is_cloud_synced_path, plural,
     ui::{
         self,
-        components::{safety_line as render_safety_line, truncated_label},
+        components::{
+            safety_line as render_safety_line, status_chip as render_status_chip, truncated_label,
+        },
         screens::preview::{
             preview_aligned_content_width, render_preview_metric_card, render_preview_summary_line,
             untouched_reason_label,
@@ -14,6 +16,165 @@ use crate::{
     },
     AnalysisOutput, AnalysisProgress, ApplyOutput, ApplyProgress, HistoryAction,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrganizeNavAction {
+    Back,
+    Continue,
+    Reanalyze,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstructionDetailAction {
+    ImportProfile,
+    OpenRules,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OrganizeStep {
+    Folder,
+    Style,
+    Preview,
+    Organize,
+}
+
+impl OrganizeStep {
+    const ALL: [Self; 4] = [Self::Folder, Self::Style, Self::Preview, Self::Organize];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Folder => "Folder",
+            Self::Style => "Instructions",
+            Self::Preview => "Preview",
+            Self::Organize => "Organize",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Folder => "Choose the root folder",
+            Self::Style => "Choose organization rules",
+            Self::Preview => "Review example changes",
+            Self::Organize => "Confirm and keep restore available",
+        }
+    }
+
+    fn number(self) -> usize {
+        match self {
+            Self::Folder => 1,
+            Self::Style => 2,
+            Self::Preview => 3,
+            Self::Organize => 4,
+        }
+    }
+
+    pub(crate) fn previous(self) -> Option<Self> {
+        match self {
+            Self::Folder => None,
+            Self::Style => Some(Self::Folder),
+            Self::Preview => Some(Self::Style),
+            Self::Organize => Some(Self::Preview),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstructionPreset {
+    ByType,
+    ByDate,
+    ByExtension,
+    TypeAndDate,
+    CustomRules,
+}
+
+impl InstructionPreset {
+    const ALL: [Self; 5] = [
+        Self::ByType,
+        Self::ByDate,
+        Self::ByExtension,
+        Self::TypeAndDate,
+        Self::CustomRules,
+    ];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::ByType => "By Type",
+            Self::ByDate => "By Date",
+            Self::ByExtension => "By Extension",
+            Self::TypeAndDate => "Type + Date",
+            Self::CustomRules => "Custom Rules",
+        }
+    }
+
+    pub(crate) fn example_destination(self) -> &'static str {
+        match self {
+            Self::ByType => "Images",
+            Self::ByDate => "2026/05/13",
+            Self::ByExtension => "pdf",
+            Self::TypeAndDate => "Images/2026/05/13",
+            Self::CustomRules => "Documents/PDFs",
+        }
+    }
+
+    pub(crate) fn example_file_name(self) -> &'static str {
+        match self {
+            Self::ByType => "beach-sunset.jpg",
+            Self::ByDate => "meeting-notes.docx",
+            Self::ByExtension => "project-spec.pdf",
+            Self::TypeAndDate => "beach-sunset.jpg",
+            Self::CustomRules => "invoice-042.pdf",
+        }
+    }
+
+    pub(crate) fn secondary_example_file_name(self) -> &'static str {
+        match self {
+            Self::ByType => "screenshot.png",
+            Self::ByDate => "budget-review.xlsx",
+            Self::ByExtension => "invoice-042.pdf",
+            Self::TypeAndDate => "class-photo.jpg",
+            Self::CustomRules => "receipt-1042.pdf",
+        }
+    }
+
+    pub(crate) fn detail(self) -> &'static str {
+        match self {
+            Self::ByType => {
+                "Group related file types into broad folders that are easy to scan later."
+            }
+            Self::ByDate => {
+                "Sort files by when they were last modified so recent work stays together."
+            }
+            Self::ByExtension => {
+                "Separate files by exact extension when the file format matters more than the category."
+            }
+            Self::TypeAndDate => {
+                "Keep similar file types together, then add date folders inside each type."
+            }
+            Self::CustomRules => {
+                "Apply a saved rule profile when one folder needs more specific destinations than the built-in options provide."
+            }
+        }
+    }
+
+    pub(crate) fn note(self) -> &'static str {
+        match self {
+            Self::ByType => "Good default for mixed folders.",
+            Self::ByDate => "Good for inboxes, downloads, and dated work.",
+            Self::ByExtension => "Good when file formats need strict separation.",
+            Self::TypeAndDate => "Best when you want both category and time structure.",
+            Self::CustomRules => "Requires an imported or saved rule profile.",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExampleTreeEntry {
+    depth: usize,
+    label: String,
+    is_folder: bool,
+    is_last: bool,
+    ancestor_has_next: Vec<bool>,
+}
 
 pub(crate) fn render_analysis_progress(
     ui: &mut egui::Ui,
@@ -366,6 +527,341 @@ pub(crate) fn organize_files_label(ready: usize) -> String {
     format!("Organize {ready} file{}", plural(ready))
 }
 
+pub(crate) fn render_instruction_picker(
+    ui: &mut egui::Ui,
+    selected_instruction: InstructionPreset,
+    requested_instruction: &mut Option<InstructionPreset>,
+) {
+    ui.vertical(|ui| {
+        ui.label(
+            RichText::new("Available instructions")
+                .strong()
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.add_space(6.0);
+        for preset in InstructionPreset::ALL {
+            let selected = selected_instruction == preset;
+            let response = render_instruction_list_row(ui, preset.title(), selected);
+            if response.clicked() {
+                *requested_instruction = Some(preset);
+            }
+        }
+    });
+}
+
+pub(crate) fn render_instruction_detail_panel(
+    ui: &mut egui::Ui,
+    preset: InstructionPreset,
+    example_entries: &[ExampleTreeEntry],
+    loaded_profile_label: Option<&str>,
+    action: &mut Option<InstructionDetailAction>,
+) {
+    ui.vertical(|ui| {
+        ui.label(
+            RichText::new(preset.title())
+                .strong()
+                .size(ui::theme::typography::CARD_TITLE)
+                .color(ui::theme::colors::heading_text()),
+        );
+        ui.add(
+            egui::Label::new(
+                RichText::new(preset.detail())
+                    .size(ui::theme::typography::BODY)
+                    .color(ui::theme::colors::secondary_text()),
+            )
+            .wrap(),
+        );
+
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Example result")
+                .strong()
+                .size(ui::theme::typography::CAPTION)
+                .color(ui::theme::colors::heading_text()),
+        );
+        egui::Frame::group(ui.style())
+            .fill(ui::theme::colors::soft_control())
+            .stroke(egui::Stroke::new(1.0, ui::theme::colors::border()))
+            .inner_margin(egui::Margin::same(10.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    render_instruction_example_tree(ui, example_entries);
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(preset.note())
+                                .size(ui::theme::typography::CAPTION)
+                                .color(ui::theme::colors::secondary_text()),
+                        )
+                        .wrap(),
+                    );
+                });
+            });
+
+        if preset == InstructionPreset::CustomRules {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Profile status")
+                    .strong()
+                    .color(ui::theme::colors::heading_text()),
+            );
+            if let Some(label) = loaded_profile_label {
+                render_status_chip(
+                    ui,
+                    "Profile loaded",
+                    ui::theme::colors::success(),
+                    ui::theme::colors::success_bg(),
+                );
+                ui.label(format!("Using {label}."));
+            } else {
+                render_status_chip(
+                    ui,
+                    "Profile needed",
+                    ui::theme::colors::warning(),
+                    ui::theme::colors::warning_bg(),
+                );
+                ui.label("Import a profile before previewing with Custom Rules.");
+            }
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Import profile..."))
+                    .clicked()
+                {
+                    *action = Some(InstructionDetailAction::ImportProfile);
+                }
+                if ui
+                    .add(ui::theme::widgets::secondary_button("Open Rules"))
+                    .clicked()
+                {
+                    *action = Some(InstructionDetailAction::OpenRules);
+                }
+            });
+        }
+    });
+}
+
+fn render_instruction_list_row(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let row_size = egui::vec2(ui.available_width(), 26.0);
+    let (rect, response) = ui.allocate_exact_size(row_size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            ui::theme::colors::primary_blue()
+        } else if response.hovered() {
+            ui::theme::colors::hover_control()
+        } else {
+            ui::theme::colors::surface()
+        };
+        let text_color = if selected {
+            ui::theme::colors::on_primary()
+        } else {
+            ui::theme::colors::primary_text()
+        };
+        ui.painter()
+            .rect_filled(rect, egui::Rounding::same(2.0), fill);
+        ui.painter().text(
+            rect.left_center() + egui::vec2(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Body.resolve(ui.style()),
+            text_color,
+        );
+    }
+
+    response
+}
+
+pub(crate) fn render_organize_step_indicator(
+    ui: &mut egui::Ui,
+    current: OrganizeStep,
+    furthest: OrganizeStep,
+    requested_step: &mut Option<OrganizeStep>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        for (index, step) in OrganizeStep::ALL.iter().copied().enumerate() {
+            if index > 0 {
+                ui.label(
+                    RichText::new("->")
+                        .size(ui::theme::typography::CONTROL)
+                        .color(ui::theme::colors::metadata_text()),
+                );
+            }
+
+            let is_current = step == current;
+            let is_available = step <= furthest;
+            let text_color = if is_current {
+                ui::theme::colors::primary_blue()
+            } else if is_available {
+                ui::theme::colors::primary_text()
+            } else {
+                ui::theme::colors::metadata_text()
+            };
+            let fill = if is_current {
+                ui::theme::colors::hover_control()
+            } else {
+                Color32::TRANSPARENT
+            };
+            let stroke = if is_current {
+                egui::Stroke::new(1.0, ui::theme::colors::primary_blue())
+            } else {
+                egui::Stroke::NONE
+            };
+            let label = format!("{} {}", step.number(), step.title());
+            let button = egui::Button::new(
+                RichText::new(label)
+                    .size(ui::theme::typography::CONTROL)
+                    .strong()
+                    .color(text_color),
+            )
+            .fill(fill)
+            .stroke(stroke)
+            .min_size(egui::vec2(88.0, ui::theme::spacing::COMPACT_CONTROL_HEIGHT));
+
+            let response = ui
+                .add_enabled(is_available, button)
+                .on_hover_text(step.subtitle());
+            if response.clicked() {
+                *requested_step = Some(step);
+            }
+        }
+    });
+}
+
+pub(crate) fn render_organize_step_controls(
+    ui: &mut egui::Ui,
+    current: OrganizeStep,
+    has_root: bool,
+    can_run_analysis: bool,
+    analysis_result: Option<&AnalysisOutput>,
+    busy: bool,
+    nav_action: &mut Option<OrganizeNavAction>,
+) {
+    let mut helper_text = None;
+
+    ui.vertical(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            if current.previous().is_some()
+                && ui
+                    .add_enabled(!busy, ui::theme::widgets::secondary_button("Back"))
+                    .clicked()
+            {
+                *nav_action = Some(OrganizeNavAction::Back);
+            }
+
+            match current {
+                OrganizeStep::Folder => {
+                    if ui
+                        .add_enabled(
+                            has_root && !busy,
+                            ui::theme::widgets::primary_button("Continue"),
+                        )
+                        .clicked()
+                    {
+                        *nav_action = Some(OrganizeNavAction::Continue);
+                    }
+                    helper_text = Some("Choose the folder first. Nothing moves during this step.");
+                }
+                OrganizeStep::Style => {
+                    if ui
+                        .add_enabled(
+                            can_run_analysis && !busy,
+                            ui::theme::widgets::primary_button("Preview Changes"),
+                        )
+                        .clicked()
+                    {
+                        *nav_action = Some(OrganizeNavAction::Continue);
+                    }
+                    helper_text = Some(
+                        "Preview Changes analyzes this folder using the selected instructions and opens the example preview.",
+                    );
+                }
+                OrganizeStep::Preview => {
+                    let ready = analysis_result.map_or(0, |result| result.preview_counts.ready);
+                    if ui
+                        .add_enabled(
+                            can_run_analysis && !busy,
+                            ui::theme::widgets::secondary_button("Re-analyze"),
+                        )
+                        .clicked()
+                    {
+                        *nav_action = Some(OrganizeNavAction::Reanalyze);
+                    }
+                    if ui
+                        .add_enabled(
+                            ready > 0 && !busy,
+                            ui::theme::widgets::primary_button(organize_files_label(ready)),
+                        )
+                        .clicked()
+                    {
+                        *nav_action = Some(OrganizeNavAction::Continue);
+                    }
+                    if ready == 0 {
+                        helper_text = Some(
+                            "No safe moves are ready yet. Review the preview details or choose another style.",
+                        );
+                    }
+                }
+                OrganizeStep::Organize => {
+                    helper_text = Some(
+                        "Confirm only when the preview matches what you expect. Restore remains available afterward.",
+                    );
+                }
+            }
+        });
+
+        if let Some(helper_text) = helper_text {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(helper_text)
+                        .size(ui::theme::typography::CAPTION)
+                        .color(ui::theme::colors::secondary_text()),
+                )
+                .wrap(),
+            );
+        }
+    });
+}
+
+pub(crate) fn render_folder_status_light(ui: &mut egui::Ui, has_root: bool, preselected: bool) {
+    let (color, label, detail) = if has_root {
+        (
+            ui::theme::colors::success(),
+            "Folder ready",
+            if preselected {
+                "This folder was preselected from launch. Nothing has been analyzed or moved yet."
+            } else {
+                "This folder is selected. Nothing has been analyzed or moved yet."
+            },
+        )
+    } else {
+        (
+            ui::theme::colors::warning(),
+            "Folder needed",
+            "Choose or drop a folder before continuing.",
+        )
+    };
+
+    let response = ui
+        .add(
+            egui::Label::new(RichText::new("●").size(18.0).color(color))
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_ui(|ui| {
+            ui.label(
+                RichText::new(label)
+                    .strong()
+                    .color(ui::theme::colors::heading_text()),
+            );
+            ui.label(RichText::new(detail).color(ui::theme::colors::secondary_text()));
+        });
+
+    if response.clicked() {
+        response.request_focus();
+    }
+}
+
 pub(crate) fn render_apply_confirmation(
     ctx: &egui::Context,
     result: &AnalysisOutput,
@@ -607,4 +1103,126 @@ fn plan_summary_detail(ready: usize, needs_attention: usize, left_in_place: usiz
         plural(needs_attention),
         plural(left_in_place)
     )
+}
+
+pub(crate) fn build_example_tree_entries(
+    root_folder: &str,
+    destination: &str,
+    file_name: &str,
+    secondary_file_name: &str,
+) -> Vec<ExampleTreeEntry> {
+    let normalized_destination = destination.replace('\\', "/");
+    let segments: Vec<&str> = normalized_destination
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    let mut entries = vec![ExampleTreeEntry {
+        depth: 0,
+        label: format!("./{root_folder}"),
+        is_folder: true,
+        is_last: false,
+        ancestor_has_next: Vec::new(),
+    }];
+
+    for (index, segment) in segments.iter().enumerate() {
+        entries.push(ExampleTreeEntry {
+            depth: index + 1,
+            label: (*segment).to_string(),
+            is_folder: true,
+            is_last: false,
+            ancestor_has_next: vec![true; index + 1],
+        });
+    }
+
+    let file_depth = segments.len() + 1;
+    entries.push(ExampleTreeEntry {
+        depth: file_depth,
+        label: file_name.to_string(),
+        is_folder: false,
+        is_last: false,
+        ancestor_has_next: vec![true; file_depth],
+    });
+    entries.push(ExampleTreeEntry {
+        depth: file_depth,
+        label: secondary_file_name.to_string(),
+        is_folder: false,
+        is_last: true,
+        ancestor_has_next: vec![true; file_depth.saturating_sub(1)],
+    });
+
+    entries
+}
+
+pub(crate) fn render_instruction_example_tree(ui: &mut egui::Ui, entries: &[ExampleTreeEntry]) {
+    let text_color = ui::theme::colors::primary_text();
+    let branch_color = ui::theme::colors::metadata_text();
+    let tree_text_size = ui::theme::typography::CAPTION;
+
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(2.0, 1.0);
+        for entry in entries {
+            ui.horizontal(|ui| {
+                let connector = example_tree_connector(entry);
+                if !connector.is_empty() {
+                    ui.label(
+                        RichText::new(connector)
+                            .monospace()
+                            .size(tree_text_size)
+                            .color(branch_color),
+                    );
+                }
+                if entry.is_folder {
+                    paint_example_folder_icon(ui);
+                    ui.add_space(2.0);
+                }
+                ui.label(
+                    RichText::new(&entry.label)
+                        .size(tree_text_size)
+                        .strong()
+                        .color(text_color),
+                );
+            });
+        }
+    });
+}
+
+fn paint_example_folder_icon(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(15.0, 12.0), egui::Sense::hover());
+    let painter = ui.painter();
+    let tab = egui::Rect::from_min_size(rect.min + egui::vec2(1.0, 1.0), egui::vec2(6.0, 3.5));
+    let body = egui::Rect::from_min_size(rect.min + egui::vec2(1.0, 4.0), egui::vec2(13.0, 7.0));
+
+    painter.rect_filled(
+        tab,
+        egui::Rounding::same(1.0),
+        Color32::from_rgb(251, 209, 86),
+    );
+    painter.rect_filled(
+        body,
+        egui::Rounding::same(1.0),
+        Color32::from_rgb(244, 178, 53),
+    );
+    painter.line_segment(
+        [body.left_top(), body.right_top()],
+        egui::Stroke::new(1.0, Color32::from_rgb(255, 224, 123)),
+    );
+}
+
+fn example_tree_connector(entry: &ExampleTreeEntry) -> String {
+    if entry.depth == 0 {
+        return String::new();
+    }
+
+    let mut connector = String::new();
+    for has_next in entry
+        .ancestor_has_next
+        .iter()
+        .take(entry.depth.saturating_sub(1))
+    {
+        connector.push_str(if *has_next { "│ " } else { "  " });
+    }
+    connector.push_str(if entry.is_last { "└─" } else { "├─" });
+    connector
 }

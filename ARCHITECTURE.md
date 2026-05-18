@@ -123,10 +123,12 @@ The Windows-first desktop frontend built with `eframe`/`egui`.
 
 - Shell sections: Organize, Activity, Rules, Settings.
 - Organize screen: folder selection, style cards (By Type, By Date, Type + Date), Analyze Folder, Preview table, Organize Files, Undo Changes.
+- Optional AI assistance: provider readiness in Settings plus folder analysis, draft-rule generation, prompt refinement, and rule explanation surfaces in the GUI workflow.
 - Explorer launcher: opens the GUI with a preloaded folder argument.
 - Rule editor: create and edit simple profiles; TOML import/export in advanced actions.
 - Preferences and theme persistence (`preferences.rs`).
 - UI typography: Inter font; icons: `egui-phosphor` (Phosphor icon set).
+- UI presentation is being modularized under `src/ui/`, with shared components and theme helpers plus dedicated screen modules such as `ui/screens/organize.rs`, `activity.rs`, `preview.rs`, `rules.rs`, and `settings.rs`.
 
 **Key dependencies:** `smartfolder-core`, `eframe`, `egui-phosphor`, `rfd` (native file dialogs), `serde`/`serde_json`, `chrono`.
 

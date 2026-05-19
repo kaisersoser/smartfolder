@@ -9,6 +9,13 @@ Version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Completed the v2.3 CLI AI parity track with `smartfolder ai status`, `smartfolder ai analyze <folder>`, `smartfolder ai draft-profile <folder> --prompt "..."`, and `smartfolder profiles explain <profile-id> --folder <folder>`.
+- Added JSON output for CLI AI status, folder analysis, draft profiles, and profile explanations.
+- Added v2.3 CLI AI tests for parser coverage, disabled-provider gating, and no profile writes when AI is unavailable.
+- Added a v2.3 CLI AI parity implementation plan covering delivered commands, safety requirements, settled decisions, and release verification.
+
 ### Changed
 
 - Continued the `smartfolder-gui` presentation extraction by moving shell navigation, command palette, AI preview surfaces, and more organize-screen helpers out of `main.rs` into `ui/shell.rs` and `ui/screens/*` modules while preserving behavior.

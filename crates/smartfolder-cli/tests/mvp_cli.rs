@@ -153,6 +153,7 @@ fn top_level_help_and_version_are_available() {
     assert!(help_stdout.contains("ANALYZE OPTIONS"));
     assert!(help_stdout.contains("TRANSACTION SUBCOMMANDS"));
     assert!(help_stdout.contains("PROFILE SUBCOMMANDS"));
+    assert!(help_stdout.contains("AI SUBCOMMANDS"));
 
     let version = smartfolder(&context.app_data_root)
         .arg("--version")
@@ -160,6 +161,121 @@ fn top_level_help_and_version_are_available() {
         .success();
     let version_stdout = stdout_text(&version);
     assert!(version_stdout.starts_with("smartfolder "));
+}
+
+#[test]
+fn ai_status_reports_disabled_default_without_provider_call() {
+    let context = TestContext::new("root");
+
+    let human = smartfolder(&context.app_data_root)
+        .args(["ai", "status"])
+        .assert()
+        .success();
+    let human_stdout = stdout_text(&human);
+    assert!(human_stdout.contains("AI assistance: disabled"));
+    assert!(human_stdout.contains("State: disabled"));
+    assert!(human_stdout.contains("Available: no"));
+
+    let json = smartfolder(&context.app_data_root)
+        .args(["ai", "status", "--json"])
+        .assert()
+        .success();
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout_text(&json)).expect("status should be valid json");
+    assert_eq!(value["provider"], "ollama");
+    assert_eq!(value["enabled"], false);
+    assert_eq!(value["available"], false);
+    assert_eq!(value["state"], "disabled");
+}
+
+#[test]
+fn ai_workflow_commands_require_enabled_ai_without_writing_profiles() {
+    let context = TestContext::new("root");
+    write_file(&context.root.join("invoice.pdf"), b"invoice");
+
+    let analyze = smartfolder(&context.app_data_root)
+        .args([
+            "ai",
+            "analyze",
+            context.root.to_str().expect("root path should be utf-8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let analyze_error: serde_json::Value =
+        serde_json::from_str(&stderr_text(&analyze)).expect("json error should parse");
+    assert!(analyze_error["error"]["message"]
+        .as_str()
+        .expect("message should be present")
+        .contains("AI assistance is disabled"));
+
+    let draft = smartfolder(&context.app_data_root)
+        .args([
+            "ai",
+            "draft-profile",
+            context.root.to_str().expect("root path should be utf-8"),
+            "--prompt",
+            "put invoices under Invoices/{year}",
+            "--save-as",
+            "generated",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let draft_error: serde_json::Value =
+        serde_json::from_str(&stderr_text(&draft)).expect("json error should parse");
+    assert!(draft_error["error"]["message"]
+        .as_str()
+        .expect("message should be present")
+        .contains("AI assistance is disabled"));
+    assert!(!context
+        .app_data_root
+        .join("profiles")
+        .join("generated.toml")
+        .exists());
+
+    let rules_path = context.plan_path("rules.toml");
+    fs::write(
+        &rules_path,
+        r#"
+profile_id = "invoices"
+
+[[rules]]
+name = "invoice pdfs"
+destination = "Invoices/{year}"
+extensions = ["pdf"]
+"#,
+    )
+    .expect("rules file should be written");
+    smartfolder(&context.app_data_root)
+        .args([
+            "profiles",
+            "import",
+            rules_path.to_str().expect("rules path should be utf-8"),
+        ])
+        .assert()
+        .success();
+
+    let explain = smartfolder(&context.app_data_root)
+        .args([
+            "profiles",
+            "explain",
+            "invoices",
+            "--folder",
+            context.root.to_str().expect("root path should be utf-8"),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    let explain_error: serde_json::Value =
+        serde_json::from_str(&stderr_text(&explain)).expect("json error should parse");
+    assert!(explain_error["error"]["message"]
+        .as_str()
+        .expect("message should be present")
+        .contains("AI assistance is disabled"));
 }
 
 #[test]

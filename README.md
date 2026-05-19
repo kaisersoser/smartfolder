@@ -90,11 +90,18 @@ smartfolder profiles list
 smartfolder profiles import rules.toml
 smartfolder profiles inspect my-profile
 smartfolder profiles validate rules.toml
+smartfolder ai status
+smartfolder ai analyze <root>
+smartfolder ai analyze <root> --json
+smartfolder ai draft-profile <root> --prompt "Put invoices under Invoices/{year}" --save-as invoices
+smartfolder profiles explain invoices --folder <root>
 ```
 
 Analyze scans only the selected folder by default. Add `--include-subfolders` or `--recursive` when you want to include nested folders, and combine it with `--max-depth <n>` to limit recursion. Use `--json` with commands that support machine-readable output. If an error occurs while `--json` is present, errors are emitted as JSON on stderr.
 
 Built-in `type-year`, `type-date`, and `type-year-month-day` modes currently produce `Type\Year\Month\Day\filename` with full month names, for example `Documents\2026\May\11\report.pdf`. Custom TOML rule destinations support `{year}`, `{month}`, and `{day}` placeholders.
+
+CLI AI commands reuse the desktop app's local AI settings and Ollama readiness checks. They do not add API-key support, do not move files, and only read file contents when the persisted AI content-inspection setting is enabled. AI-generated profiles are validated as deterministic TOML rule profiles before they can be saved with `--save-as`.
 
 ## Safety model
 

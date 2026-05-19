@@ -1,7 +1,7 @@
 //! Command-line interface for smartfolder.
 //!
 //! Provides a user-friendly interface to the smartfolder core library.
-//! The CLI supports analyze, preview, apply, resume, undo, transactions, and profiles commands.
+//! The CLI supports analyze, preview, apply, resume, undo, transactions, profiles, and AI commands.
 //!
 //! # Commands
 //!
@@ -12,6 +12,7 @@
 //! - **undo**: Reverse the effects of a transaction
 //! - **transactions**: List, inspect, and cleanup transaction journals
 //! - **profiles**: List, import, inspect, and validate saved rule profiles
+//! - **ai**: Inspect optional AI provider readiness for CLI workflows
 //!
 //! # Workflow
 //!
@@ -38,7 +39,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use smartfolder_core::ai::{
+    validate_ai_profile_draft, AiConfidence, AiFolderAnalysis, AiFolderContext,
+    AiProfileValidation, AiProviderState, AiProviderStatus, AiRuleExplanation, AiRuleProfileDraft,
+    AiSettings, OllamaClient,
+};
 use smartfolder_core::apply::{apply_plan, ApplyCancellationToken, ApplyOptions};
 use smartfolder_core::model::{BuiltInMode, PlanRecord, TransactionJournal, TransactionStatus};
 use smartfolder_core::planner::{generate_plan, render_preview, render_preview_json, PlanOptions};
@@ -47,8 +53,8 @@ use smartfolder_core::recovery::{
     undo_transaction,
 };
 use smartfolder_core::rules::RuleProfile;
-use smartfolder_core::scanner::{scan_folder, ScanOptions};
-use smartfolder_core::storage::{ensure_profiles_dir, profiles_dir};
+use smartfolder_core::scanner::{scan_folder, ScanOptions, ScanSummary};
+use smartfolder_core::storage::{ensure_profiles_dir, gui_preferences_path, profiles_dir};
 use thiserror::Error;
 
 type Result<T> = std::result::Result<T, CliError>;
@@ -93,10 +99,120 @@ fn run() -> Result<()> {
         Some("undo") => run_undo(&args[1..]),
         Some("transactions") => run_transactions(&args[1..]),
         Some("profiles") => run_profiles(&args[1..]),
+        Some("ai") => run_ai(&args[1..]),
         Some(command) => Err(CliError::UnknownCommand {
             command: (*command).to_string(),
         }),
     }
+}
+
+/// Inspect optional AI provider commands.
+fn run_ai(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("status") => run_ai_status(&args[1..]),
+        Some("analyze") => run_ai_analyze(&args[1..]),
+        Some("draft-profile") => run_ai_draft_profile(&args[1..]),
+        Some(command) => Err(CliError::UnknownCommand {
+            command: format!("ai {command}"),
+        }),
+        None => Err(CliError::MissingArgument {
+            name: "ai subcommand",
+        }),
+    }
+}
+
+/// Print AI provider readiness using the shared GUI AI settings file.
+fn run_ai_status(args: &[String]) -> Result<()> {
+    let command = AiStatusCommand::parse(args)?;
+    let settings = load_ai_settings()?;
+    let status = if settings.enabled {
+        let client = OllamaClient::new(settings.endpoint.clone(), settings.timeout());
+        client.check_status(settings.selected_model.as_deref())
+    } else {
+        AiProviderStatus {
+            available: false,
+            state: AiProviderState::Disabled,
+            selected_model: None,
+            models: Vec::new(),
+            message: "AI assistance is disabled.".to_string(),
+        }
+    };
+    let output = AiStatusOutput::from_settings_and_status(&settings, &status);
+
+    if command.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_ai_status(&output);
+    }
+
+    Ok(())
+}
+
+/// Analyze a folder with the optional AI provider using deterministic scan context.
+fn run_ai_analyze(args: &[String]) -> Result<()> {
+    let command = AiAnalyzeCommand::parse(args)?;
+    let provider = ready_ai_provider()?;
+    let scan = scan_folder(&command.root, &command.scan_options)?;
+    let context = AiFolderContext::from_records_with_content_mode(
+        &command.root,
+        &scan.records,
+        provider.settings.content_inspection_enabled,
+    );
+    let analysis = provider.client.analyze_folder(&provider.model, &context)?;
+    let output = AiAnalyzeOutput {
+        provider: "ollama",
+        model: provider.model,
+        root: command.root,
+        scan_summary: CliScanSummary::from(&scan.summary),
+        content_inspection_enabled: provider.settings.content_inspection_enabled,
+        analysis,
+    };
+
+    if command.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_ai_analysis(&output);
+    }
+
+    Ok(())
+}
+
+/// Generate a deterministic rule-profile draft from an AI prompt and folder context.
+fn run_ai_draft_profile(args: &[String]) -> Result<()> {
+    let command = AiDraftProfileCommand::parse(args)?;
+    let provider = ready_ai_provider()?;
+    let scan = scan_folder(&command.root, &command.scan_options)?;
+    let context = AiFolderContext::from_records_with_content_mode(
+        &command.root,
+        &scan.records,
+        provider.settings.content_inspection_enabled,
+    );
+    let draft = provider
+        .client
+        .draft_profile(&provider.model, &command.prompt, &context, None)?;
+    let validation = validate_ai_profile_draft(draft.clone(), &scan.records);
+    let saved_profile_path = save_ai_profile_if_requested(&validation, command.save_as.as_deref())?;
+    let output = AiDraftProfileOutput::new(
+        "ollama",
+        provider.model,
+        command.root,
+        command.prompt,
+        draft,
+        &validation,
+        saved_profile_path,
+    );
+
+    if command.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_ai_draft_profile(&output);
+    }
+
+    if !validation.is_usable() {
+        return Err(CliError::AiValidationFailed);
+    }
+
+    Ok(())
 }
 
 /// Scan a directory and generate an organization plan.
@@ -368,6 +484,7 @@ fn run_profiles(args: &[String]) -> Result<()> {
             }
             Ok(())
         }
+        Some("explain") => run_profiles_explain(&args[1..]),
         Some("import") => {
             let source = args
                 .get(1)
@@ -428,6 +545,39 @@ fn run_profiles(args: &[String]) -> Result<()> {
     }
 }
 
+/// Explain a saved deterministic rule profile with optional AI context.
+fn run_profiles_explain(args: &[String]) -> Result<()> {
+    let command = ProfilesExplainCommand::parse(args)?;
+    let profile_path = saved_profile_path(&command.profile_id)?;
+    let profile = RuleProfile::from_toml(&fs::read_to_string(&profile_path)?)?;
+    let provider = ready_ai_provider()?;
+    let scan = scan_folder(&command.folder, &command.scan_options)?;
+    let context = AiFolderContext::from_records_with_content_mode(
+        &command.folder,
+        &scan.records,
+        provider.settings.content_inspection_enabled,
+    );
+    let explanation = provider
+        .client
+        .explain_profile(&provider.model, &profile, &context)?;
+    let output = AiRuleExplanationOutput {
+        provider: "ollama",
+        model: provider.model,
+        profile_id: profile.profile_id,
+        folder: command.folder,
+        content_inspection_enabled: provider.settings.content_inspection_enabled,
+        explanation,
+    };
+
+    if command.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_ai_rule_explanation(&output);
+    }
+
+    Ok(())
+}
+
 /// Arguments for the 'analyze' command: scan and plan generation.
 #[derive(Debug)]
 struct AnalyzeCommand {
@@ -445,6 +595,303 @@ struct AnalyzeCommand {
 enum ProfileSource {
     Path(PathBuf),
     Saved(String),
+}
+
+/// Arguments for the 'ai status' command.
+#[derive(Debug)]
+struct AiStatusCommand {
+    json: bool,
+}
+
+/// Arguments for the 'ai analyze' command.
+#[derive(Debug)]
+struct AiAnalyzeCommand {
+    root: PathBuf,
+    scan_options: ScanOptions,
+    json: bool,
+}
+
+/// Arguments for the 'ai draft-profile' command.
+#[derive(Debug)]
+struct AiDraftProfileCommand {
+    root: PathBuf,
+    prompt: String,
+    save_as: Option<String>,
+    scan_options: ScanOptions,
+    json: bool,
+}
+
+/// Arguments for the 'profiles explain' command.
+#[derive(Debug)]
+struct ProfilesExplainCommand {
+    profile_id: String,
+    folder: PathBuf,
+    scan_options: ScanOptions,
+    json: bool,
+}
+
+impl AiStatusCommand {
+    /// Parse AI status command arguments from CLI.
+    fn parse(args: &[String]) -> Result<Self> {
+        let json = parse_flag_options(args, &["--json"])?.contains(&"--json");
+        Ok(Self { json })
+    }
+}
+
+impl AiAnalyzeCommand {
+    /// Parse AI folder analysis arguments from CLI.
+    fn parse(args: &[String]) -> Result<Self> {
+        let root = args
+            .first()
+            .ok_or(CliError::MissingArgument { name: "folder" })?;
+        let mut command = Self {
+            root: PathBuf::from(root),
+            scan_options: ScanOptions::default(),
+            json: false,
+        };
+        let mut index = 1;
+
+        while index < args.len() {
+            match args[index].as_str() {
+                "--json" => command.json = true,
+                option => {
+                    if !parse_scan_option(option, args, &mut index, &mut command.scan_options)? {
+                        return Err(CliError::UnknownOption {
+                            option: option.to_string(),
+                        });
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        Ok(command)
+    }
+}
+
+impl AiDraftProfileCommand {
+    /// Parse AI profile draft arguments from CLI.
+    fn parse(args: &[String]) -> Result<Self> {
+        let root = args
+            .first()
+            .ok_or(CliError::MissingArgument { name: "folder" })?;
+        let mut command = Self {
+            root: PathBuf::from(root),
+            prompt: String::new(),
+            save_as: None,
+            scan_options: ScanOptions::default(),
+            json: false,
+        };
+        let mut index = 1;
+
+        while index < args.len() {
+            match args[index].as_str() {
+                "--prompt" => {
+                    index += 1;
+                    command.prompt = value_arg(args, index, "--prompt")?.trim().to_string();
+                }
+                "--save-as" => {
+                    index += 1;
+                    command.save_as = Some(value_arg(args, index, "--save-as")?.to_string());
+                }
+                "--json" => command.json = true,
+                option => {
+                    if !parse_scan_option(option, args, &mut index, &mut command.scan_options)? {
+                        return Err(CliError::UnknownOption {
+                            option: option.to_string(),
+                        });
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        if command.prompt.is_empty() {
+            return Err(CliError::MissingArgument { name: "prompt" });
+        }
+
+        Ok(command)
+    }
+}
+
+impl ProfilesExplainCommand {
+    /// Parse saved-profile explanation arguments from CLI.
+    fn parse(args: &[String]) -> Result<Self> {
+        let profile_id = args
+            .first()
+            .ok_or(CliError::MissingArgument { name: "profile-id" })?
+            .clone();
+        let mut command = Self {
+            profile_id,
+            folder: PathBuf::new(),
+            scan_options: ScanOptions::default(),
+            json: false,
+        };
+        let mut index = 1;
+
+        while index < args.len() {
+            match args[index].as_str() {
+                "--folder" => {
+                    index += 1;
+                    command.folder = PathBuf::from(value_arg(args, index, "--folder")?);
+                }
+                "--json" => command.json = true,
+                option => {
+                    if !parse_scan_option(option, args, &mut index, &mut command.scan_options)? {
+                        return Err(CliError::UnknownOption {
+                            option: option.to_string(),
+                        });
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        if command.folder.as_os_str().is_empty() {
+            return Err(CliError::MissingArgument { name: "folder" });
+        }
+
+        Ok(command)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CliGuiPreferences {
+    ai: AiSettings,
+}
+
+#[derive(Debug, Serialize)]
+struct AiStatusOutput {
+    provider: &'static str,
+    enabled: bool,
+    available: bool,
+    state: &'static str,
+    endpoint: String,
+    selected_model: Option<String>,
+    installed_models: Vec<String>,
+    timeout_seconds: u64,
+    content_inspection_enabled: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CliScanSummary {
+    entries_seen: usize,
+    records_collected: usize,
+    entries_skipped: usize,
+    folders_scanned: usize,
+    warnings: usize,
+}
+
+impl From<&ScanSummary> for CliScanSummary {
+    fn from(summary: &ScanSummary) -> Self {
+        Self {
+            entries_seen: summary.entries_seen,
+            records_collected: summary.records_collected,
+            entries_skipped: summary.entries_skipped,
+            folders_scanned: summary.folders_scanned,
+            warnings: summary.warnings,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AiAnalyzeOutput {
+    provider: &'static str,
+    model: String,
+    root: PathBuf,
+    scan_summary: CliScanSummary,
+    content_inspection_enabled: bool,
+    analysis: AiFolderAnalysis,
+}
+
+#[derive(Debug, Serialize)]
+struct AiDraftProfileOutput {
+    provider: &'static str,
+    model: String,
+    root: PathBuf,
+    prompt: String,
+    draft: AiRuleProfileDraft,
+    validation: AiValidationOutput,
+    saved_profile_path: Option<PathBuf>,
+}
+
+impl AiDraftProfileOutput {
+    fn new(
+        provider: &'static str,
+        model: String,
+        root: PathBuf,
+        prompt: String,
+        draft: AiRuleProfileDraft,
+        validation: &AiProfileValidation,
+        saved_profile_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            root,
+            prompt,
+            draft,
+            validation: AiValidationOutput::from(validation),
+            saved_profile_path,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AiValidationOutput {
+    usable: bool,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+    profile: Option<RuleProfile>,
+}
+
+impl From<&AiProfileValidation> for AiValidationOutput {
+    fn from(validation: &AiProfileValidation) -> Self {
+        Self {
+            usable: validation.is_usable(),
+            errors: validation.errors.clone(),
+            warnings: validation.warnings.clone(),
+            profile: validation.profile.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AiRuleExplanationOutput {
+    provider: &'static str,
+    model: String,
+    profile_id: String,
+    folder: PathBuf,
+    content_inspection_enabled: bool,
+    explanation: AiRuleExplanation,
+}
+
+struct ReadyAiProvider {
+    settings: AiSettings,
+    client: OllamaClient,
+    model: String,
+}
+
+impl AiStatusOutput {
+    fn from_settings_and_status(settings: &AiSettings, status: &AiProviderStatus) -> Self {
+        Self {
+            provider: "ollama",
+            enabled: settings.enabled,
+            available: status.available,
+            state: ai_provider_state_label(status.state),
+            endpoint: settings.endpoint.clone(),
+            selected_model: status
+                .selected_model
+                .clone()
+                .or_else(|| settings.selected_model.clone()),
+            installed_models: status.models.clone(),
+            timeout_seconds: settings.timeout_seconds,
+            content_inspection_enabled: settings.content_inspection_enabled,
+            message: status.message.clone(),
+        }
+    }
 }
 
 impl AnalyzeCommand {
@@ -716,6 +1163,53 @@ fn parse_usize(value: &str, option: &'static str) -> Result<usize> {
     })
 }
 
+fn parse_scan_option(
+    option: &str,
+    args: &[String],
+    index: &mut usize,
+    scan_options: &mut ScanOptions,
+) -> Result<bool> {
+    match option {
+        "--max-depth" => {
+            *index += 1;
+            scan_options.max_depth = Some(parse_usize(
+                value_arg(args, *index, "--max-depth")?,
+                "--max-depth",
+            )?);
+            scan_options.current_folder_only = false;
+            Ok(true)
+        }
+        "--include-subfolders" | "--recursive" => {
+            scan_options.current_folder_only = false;
+            Ok(true)
+        }
+        "--current-folder-only" => {
+            scan_options.current_folder_only = true;
+            Ok(true)
+        }
+        "--include-hidden" => {
+            scan_options.include_hidden = true;
+            Ok(true)
+        }
+        "--include-system" => {
+            scan_options.include_system = true;
+            Ok(true)
+        }
+        "--include-project-folders" => {
+            scan_options.include_project_folders = true;
+            Ok(true)
+        }
+        "--exclude" => {
+            *index += 1;
+            scan_options
+                .exclude_names
+                .push(value_arg(args, *index, "--exclude")?.to_string());
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn parse_flag_options<'a>(args: &[String], allowed: &[&'a str]) -> Result<Vec<&'a str>> {
     let mut flags = Vec::new();
     for arg in args {
@@ -728,6 +1222,274 @@ fn parse_flag_options<'a>(args: &[String], allowed: &[&'a str]) -> Result<Vec<&'
         }
     }
     Ok(flags)
+}
+
+fn ready_ai_provider() -> Result<ReadyAiProvider> {
+    let settings = load_ai_settings()?;
+    if !settings.enabled {
+        return Err(CliError::AiUnavailable {
+            message: "AI assistance is disabled. Enable AI assistance in the desktop app settings."
+                .to_string(),
+        });
+    }
+
+    let client = OllamaClient::new(settings.endpoint.clone(), settings.timeout());
+    let status = client.check_status(settings.selected_model.as_deref());
+    if !status.available {
+        return Err(CliError::AiUnavailable {
+            message: format!(
+                "AI provider is not ready ({}): {}",
+                ai_provider_state_label(status.state),
+                status.message
+            ),
+        });
+    }
+    let model = status
+        .selected_model
+        .clone()
+        .ok_or_else(|| CliError::AiUnavailable {
+            message: "AI provider is ready but no model was selected.".to_string(),
+        })?;
+
+    Ok(ReadyAiProvider {
+        settings,
+        client,
+        model,
+    })
+}
+
+fn save_ai_profile_if_requested(
+    validation: &AiProfileValidation,
+    save_as: Option<&str>,
+) -> Result<Option<PathBuf>> {
+    let Some(profile_id) = save_as else {
+        return Ok(None);
+    };
+    let Some(mut profile) = validation
+        .profile
+        .clone()
+        .filter(|_| validation.errors.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    profile.profile_id = profile_id.trim().to_string();
+    profile.validate()?;
+    let destination = saved_profile_path_for_write(&profile.profile_id)?;
+    fs::write(&destination, profile.to_toml_string()?)?;
+    Ok(Some(destination))
+}
+
+fn load_ai_settings() -> Result<AiSettings> {
+    let path = gui_preferences_path()?;
+    if !path.exists() {
+        return Ok(AiSettings::default());
+    }
+
+    let preferences: CliGuiPreferences = serde_json::from_str(&fs::read_to_string(path)?)?;
+    Ok(preferences.ai)
+}
+
+fn ai_provider_state_label(state: AiProviderState) -> &'static str {
+    match state {
+        AiProviderState::Disabled => "disabled",
+        AiProviderState::EndpointUnavailable => "endpoint_unavailable",
+        AiProviderState::NoModels => "no_models",
+        AiProviderState::ModelMissing => "model_missing",
+        AiProviderState::RequestFailed => "request_failed",
+        AiProviderState::Ready => "ready",
+    }
+}
+
+fn print_ai_status(output: &AiStatusOutput) {
+    println!("AI assistance: {}", enabled_label(output.enabled));
+    println!("Provider: {}", output.provider);
+    println!("Endpoint: {}", output.endpoint);
+    println!("State: {}", output.state);
+    println!("Available: {}", yes_no(output.available));
+    println!(
+        "Selected model: {}",
+        output.selected_model.as_deref().unwrap_or("none")
+    );
+    println!("Installed models: {}", output.installed_models.len());
+    println!("Timeout: {} seconds", output.timeout_seconds);
+    println!(
+        "Content inspection: {}",
+        enabled_label(output.content_inspection_enabled)
+    );
+    println!("Message: {}", output.message);
+}
+
+fn print_ai_analysis(output: &AiAnalyzeOutput) {
+    println!("AI folder analysis");
+    println!("Folder: {}", output.root.display());
+    println!("Provider: {} | Model: {}", output.provider, output.model);
+    println!(
+        "Scanned: {} records across {} folder{}; skipped {}; warnings {}",
+        output.scan_summary.records_collected,
+        output.scan_summary.folders_scanned,
+        plural(output.scan_summary.folders_scanned),
+        output.scan_summary.entries_skipped,
+        output.scan_summary.warnings
+    );
+    println!(
+        "Content inspection: {}",
+        enabled_label(output.content_inspection_enabled)
+    );
+    println!("Scope: {}", output.analysis.scope_used);
+    println!(
+        "Confidence: {}",
+        ai_confidence_label(output.analysis.confidence)
+    );
+    println!();
+    println!("Summary: {}", output.analysis.summary);
+    println!("Recommendation: {}", output.analysis.recommended_strategy);
+
+    print_ai_findings("Patterns", &output.analysis.patterns);
+    print_ai_findings("Risks", &output.analysis.risks);
+
+    if !output.analysis.content_sample_warnings.is_empty() {
+        println!();
+        println!("Content sampling notes:");
+        for warning in &output.analysis.content_sample_warnings {
+            println!("- {warning}");
+        }
+    }
+}
+
+fn print_ai_draft_profile(output: &AiDraftProfileOutput) {
+    println!("AI draft profile");
+    println!("Folder: {}", output.root.display());
+    println!("Provider: {} | Model: {}", output.provider, output.model);
+    println!("Draft profile id: {}", output.draft.profile_id);
+    println!(
+        "Validation: {}",
+        if output.validation.usable {
+            "usable"
+        } else {
+            "failed"
+        }
+    );
+    println!(
+        "Rules: {} rule{}",
+        output.draft.rules.len(),
+        plural(output.draft.rules.len())
+    );
+    if let Some(rationale) = &output.draft.rationale {
+        println!("Rationale: {rationale}");
+    }
+
+    if !output.validation.warnings.is_empty() {
+        println!();
+        println!("Warnings:");
+        for warning in &output.validation.warnings {
+            println!("- {warning}");
+        }
+    }
+
+    if !output.validation.errors.is_empty() {
+        println!();
+        println!("Errors:");
+        for error in &output.validation.errors {
+            println!("- {error}");
+        }
+    }
+
+    if let Some(path) = &output.saved_profile_path {
+        println!();
+        println!("Saved profile: {}", path.display());
+    } else if output.validation.usable {
+        println!();
+        println!("No profile was saved. Use --save-as <profile-id> to save this draft.");
+    }
+}
+
+fn print_ai_rule_explanation(output: &AiRuleExplanationOutput) {
+    println!("AI rule explanation");
+    println!("Profile: {}", output.profile_id);
+    println!("Folder: {}", output.folder.display());
+    println!("Provider: {} | Model: {}", output.provider, output.model);
+    println!(
+        "Content inspection: {}",
+        enabled_label(output.content_inspection_enabled)
+    );
+    println!("Scope: {}", output.explanation.scope_used);
+    println!();
+    println!("Summary: {}", output.explanation.summary);
+
+    if !output.explanation.rule_order.is_empty() {
+        println!();
+        println!("Rule order:");
+        for rule in &output.explanation.rule_order {
+            println!("- {}: {}", rule.rule_name, rule.explanation);
+        }
+    }
+
+    if !output.explanation.likely_matches.is_empty() {
+        println!();
+        println!("Likely matches:");
+        for example in &output.explanation.likely_matches {
+            println!(
+                "- {}: {} -> {}",
+                example.rule_name, example.relative_path, example.destination_example
+            );
+        }
+    }
+
+    if !output.explanation.warnings.is_empty() {
+        println!();
+        println!("Warnings:");
+        for warning in &output.explanation.warnings {
+            println!("- {warning}");
+        }
+    }
+}
+
+fn print_ai_findings(title: &str, findings: &[smartfolder_core::ai::AiFinding]) {
+    if findings.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("{title}:");
+    for finding in findings {
+        println!("- {}: {}", finding.title, finding.detail);
+        if !finding.examples.is_empty() {
+            println!("  Examples: {}", finding.examples.join(", "));
+        }
+    }
+}
+
+fn ai_confidence_label(confidence: AiConfidence) -> &'static str {
+    match confidence {
+        AiConfidence::Low => "low",
+        AiConfidence::Medium => "medium",
+        AiConfidence::High => "high",
+    }
+}
+
+fn enabled_label(value: bool) -> &'static str {
+    if value {
+        "enabled"
+    } else {
+        "disabled"
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -889,7 +1651,8 @@ COMMANDS:
     resume <transaction-id>     Resume an interrupted or failed transaction
     undo <transaction-id>       Undo a transaction
     transactions <SUBCOMMAND>   List, inspect, or clean transaction journals
-    profiles <SUBCOMMAND>       List, import, inspect, or validate rule profiles
+    profiles <SUBCOMMAND>       List, import, inspect, validate, or explain profiles
+    ai <SUBCOMMAND>             Inspect optional AI provider readiness and assistance
 
 OPTIONS:
     -h, --help                  Print help
@@ -933,6 +1696,22 @@ PROFILE SUBCOMMANDS:
     profiles inspect <profile-id> [--json]
     profiles import <rules.toml> [--id <profile-id>]
     profiles validate <rules.toml>
+    profiles explain <profile-id> --folder <folder> [--json]
+
+AI SUBCOMMANDS:
+    ai status [--json]
+    ai analyze <folder> [--json]
+    ai draft-profile <folder> --prompt <prompt> [--save-as <profile-id>] [--json]
+
+AI SCAN OPTIONS:
+    --include-subfolders        Recurse into subfolders during AI context scans
+    --recursive                 Alias for --include-subfolders
+    --max-depth <n>             Recurse into subfolders up to this depth
+    --current-folder-only       Do not recurse into subfolders (default)
+    --include-hidden            Include hidden files/folders
+    --include-system            Include system files/folders where detectable
+    --include-project-folders   Include default project/dependency exclusions
+    --exclude <name>            Exclude entries by exact name
 ",
         smartfolder_core::version()
     );
@@ -991,6 +1770,12 @@ enum CliError {
     )]
     CloudFolderRequiresConfirmation { root: PathBuf },
 
+    #[error("AI provider unavailable: {message}")]
+    AiUnavailable { message: String },
+
+    #[error("AI profile draft failed deterministic validation")]
+    AiValidationFailed,
+
     #[error("failed to install Ctrl+C handler: {0}")]
     SignalHandler(String),
 
@@ -1020,7 +1805,12 @@ impl CliError {
             | Self::ConfirmationDeclined
             | Self::TransactionNotResumable { .. }
             | Self::CloudFolderRequiresConfirmation { .. } => 2,
-            Self::Io(_) | Self::Core(_) | Self::Json(_) | Self::SignalHandler(_) => 1,
+            Self::Io(_)
+            | Self::Core(_)
+            | Self::Json(_)
+            | Self::SignalHandler(_)
+            | Self::AiUnavailable { .. }
+            | Self::AiValidationFailed => 1,
         }
     }
 }
@@ -1183,6 +1973,100 @@ mod tests {
         let undo = UndoCommand::parse(&strings(&["txn_123", "--yes"])).expect("undo parses");
         assert_eq!(undo.transaction_id, "txn_123");
         assert!(undo.yes);
+    }
+
+    #[test]
+    fn ai_status_parser_supports_json_only() {
+        let command = AiStatusCommand::parse(&strings(&["--json"])).expect("ai status parses");
+        assert!(command.json);
+
+        let error = AiStatusCommand::parse(&strings(&["--bogus"]))
+            .expect_err("unknown ai status options should fail");
+        assert!(matches!(error, CliError::UnknownOption { .. }));
+    }
+
+    #[test]
+    fn ai_analyze_parser_reuses_scan_options() {
+        let command = AiAnalyzeCommand::parse(&strings(&[
+            r"D:\Root",
+            "--include-subfolders",
+            "--max-depth",
+            "3",
+            "--include-hidden",
+            "--exclude",
+            "skipme",
+            "--json",
+        ]))
+        .expect("ai analyze should parse");
+
+        assert_eq!(command.root, PathBuf::from(r"D:\Root"));
+        assert!(!command.scan_options.current_folder_only);
+        assert_eq!(command.scan_options.max_depth, Some(3));
+        assert!(command.scan_options.include_hidden);
+        assert_eq!(command.scan_options.exclude_names, vec!["skipme"]);
+        assert!(command.json);
+    }
+
+    #[test]
+    fn ai_draft_profile_parser_requires_prompt_and_supports_save_as() {
+        let command = AiDraftProfileCommand::parse(&strings(&[
+            r"D:\Root",
+            "--prompt",
+            "sort invoices by year",
+            "--save-as",
+            "invoices",
+            "--json",
+        ]))
+        .expect("ai draft-profile should parse");
+
+        assert_eq!(command.root, PathBuf::from(r"D:\Root"));
+        assert_eq!(command.prompt, "sort invoices by year");
+        assert_eq!(command.save_as, Some("invoices".to_string()));
+        assert!(command.json);
+
+        let missing_prompt = AiDraftProfileCommand::parse(&strings(&[r"D:\Root"]))
+            .expect_err("prompt should be required");
+        assert!(matches!(
+            missing_prompt,
+            CliError::MissingArgument { name: "prompt" }
+        ));
+    }
+
+    #[test]
+    fn profiles_explain_parser_requires_folder() {
+        let command = ProfilesExplainCommand::parse(&strings(&[
+            "invoices",
+            "--folder",
+            r"D:\Root",
+            "--recursive",
+            "--json",
+        ]))
+        .expect("profiles explain should parse");
+
+        assert_eq!(command.profile_id, "invoices");
+        assert_eq!(command.folder, PathBuf::from(r"D:\Root"));
+        assert!(!command.scan_options.current_folder_only);
+        assert!(command.json);
+
+        let missing_folder = ProfilesExplainCommand::parse(&strings(&["invoices"]))
+            .expect_err("folder should be required");
+        assert!(matches!(
+            missing_folder,
+            CliError::MissingArgument { name: "folder" }
+        ));
+    }
+
+    #[test]
+    fn ai_provider_state_labels_are_stable_for_json_output() {
+        assert_eq!(
+            ai_provider_state_label(AiProviderState::Disabled),
+            "disabled"
+        );
+        assert_eq!(ai_provider_state_label(AiProviderState::Ready), "ready");
+        assert_eq!(
+            ai_provider_state_label(AiProviderState::EndpointUnavailable),
+            "endpoint_unavailable"
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ This document captures the strategic direction for `smartfolder` across release 
 | v2.1 installer and distribution | ✅ Released |
 | v2.2 AI-assisted organization | ✅ Released |
 | v2.25 UX refinement and trust pass | ✅ Released |
-| v2.3 CLI AI parity | 📋 Planned |
+| v2.3 CLI AI parity | ✅ Completed |
 | v2.x cross-platform tracks | 📋 Planned |
 
 ---
@@ -225,6 +225,8 @@ select or preload folder → analyze → preview → organize → undo → origi
 
 **Goal:** expose the v2.2 AI capabilities to CLI users once the GUI-first AI workflow is stable.
 
+Implementation plan: [`docs/v2-roadmap/v2.3-cli-ai-parity-implementation-plan.md`](docs/v2-roadmap/v2.3-cli-ai-parity-implementation-plan.md)
+
 Candidate commands:
 
 - `smartfolder ai status`
@@ -233,6 +235,22 @@ Candidate commands:
 - `smartfolder profiles explain <profile-id> --folder <folder>`
 
 No API-key support is planned until secure credential storage exists.
+
+### Implementation status
+
+1. ✅ Add CLI AI namespace and provider status command:
+  - `smartfolder ai status`
+  - `smartfolder ai status --json`
+2. ✅ Add CLI AI folder analysis:
+  - `smartfolder ai analyze <folder>`
+  - `smartfolder ai analyze <folder> --json`
+3. ✅ Add CLI AI draft-profile generation:
+  - `smartfolder ai draft-profile <folder> --prompt "..."`
+  - `smartfolder ai draft-profile <folder> --prompt "..." --save-as <profile-id>`
+4. ✅ Add CLI profile explanation:
+  - `smartfolder profiles explain <profile-id> --folder <folder>`
+  - `smartfolder profiles explain <profile-id> --folder <folder> --json`
+5. ✅ Complete release documentation and verification.
 
 ---
 
